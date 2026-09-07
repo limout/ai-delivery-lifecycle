@@ -27,7 +27,7 @@ def build_graph(provider: AIProvider | None = None):
 
     graph.add_node(
         "requirements",
-        requirements_agent,
+        partial(requirements_agent, provider=provider),
     )
 
     graph.add_edge(START, "discovery")

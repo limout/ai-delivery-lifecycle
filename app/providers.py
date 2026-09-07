@@ -96,6 +96,23 @@ class MockProvider(AIProvider):
     """
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
+        if "requirements definition" in prompt:
+            return {
+                "functional_requirements": [
+                    "The system should provide a self-service interface.",
+                ],
+                "non_functional_requirements": [
+                    "The system should support appropriate enterprise security controls."
+                ],
+                "acceptance_criteria": [
+                    "An authorized enterprise user can access the self-service interface."
+                ],
+                "open_questions": [
+                    "Which specific self-service workflows are required?"
+                ],
+                "contradictions": [],
+            }
+
         return {
             "problem": "Customer needs a software solution.",
             "business_goal": "Solve the customer's business need.",
@@ -118,4 +135,4 @@ class MockProvider(AIProvider):
                 "What budget constraints exist?",
                 "What existing systems need to be integrated?",
             ],
-        }
+    }
