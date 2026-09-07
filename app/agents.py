@@ -115,16 +115,29 @@ def discovery_agent(
     """
     AI Discovery Agent.
 
-    Converts a raw customer request into structured discovery
-    information.
+    Converts the customer request and any clarification answers
+    into structured discovery information.
     """
 
     request = state["user_request"]
+    clarification_answers = state.get("clarification_answers", [])
+
+    clarification_context = ""
+
+    if clarification_answers:
+        clarification_context = f"""
+Previous clarification answers from the customer:
+
+{clarification_answers}
+
+Use these answers as new customer-provided facts.
+Re-evaluate the discovery using the updated information.
+"""
 
     prompt = f"""
 You are a senior software delivery discovery consultant.
 
-Analyze the customer's initial request and produce a structured
+Analyze the customer's request and produce a structured
 discovery assessment.
 
 IMPORTANT RULES:
@@ -133,13 +146,18 @@ IMPORTANT RULES:
 2. Never invent budget, timeline, users, systems, or business goals.
 3. Identify missing information explicitly.
 4. Generate useful clarification questions.
-5. Think like a Delivery Lead preparing the project for requirements
+5. Customer clarification answers are authoritative customer input.
+6. If a previous unknown has now been answered, remove it from
+   unknowns where appropriate.
+7. Think like a Delivery Lead preparing the project for requirements
    and later estimation.
-6. The input may be vague, incomplete, or informal.
+8. The input may be vague, incomplete, or informal.
 
-Customer request:
+Original customer request:
 
 {request}
+
+{clarification_context}
 """
 
     discovery = provider.generate_json(
@@ -224,8 +242,8 @@ REQUIREMENTS:
 
 {requirements}
 
-Your job is to decide whether the project definition is
-sufficient to continue.
+Decide whether the project definition is sufficiently clear
+to continue.
 
 Return READY only when the information is sufficiently clear
 for the next delivery stage.
@@ -234,15 +252,12 @@ Return NEEDS_INFO when important information is still missing.
 
 IMPORTANT:
 
-1. Do not reject a project merely because every possible detail
-   is unknown.
-2. Focus on information that materially affects scope, solution,
+1. Focus on information that materially affects scope, solution,
    security, integrations, delivery feasibility, or estimation.
-3. Do not invent answers.
-4. If information is missing, explain why it matters.
-5. Provide concrete clarification questions.
-6. If requirements contradict discovery, return NEEDS_INFO.
-7. Questions should be useful for a real customer conversation.
+2. Do not invent answers.
+3. If information is missing, explain why it matters.
+4. Provide concrete clarification questions.
+5. If requirements contradict discovery, return NEEDS_INFO.
 """
 
     validation = provider.generate_json(
@@ -251,3 +266,20 @@ IMPORTANT:
     )
 
     return {"validation": validation}
+
+
+def clarification_agent(state: DeliveryState) -> dict:
+    """
+    Prepare the clarification request that should be sent to
+    the customer.
+
+    The actual customer interaction will be added later through
+    the API/UI.
+    """
+
+    validation = state["validation"]
+
+    return {
+        "clarification_answers": [],
+        "iteration": state.get("iteration", 1) + 1,
+    }

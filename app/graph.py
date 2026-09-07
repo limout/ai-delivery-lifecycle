@@ -3,6 +3,7 @@ from functools import partial
 from langgraph.graph import END, START, StateGraph
 
 from app.agents import (
+    clarification_agent,
     discovery_agent,
     requirements_agent,
     validation_agent,
@@ -50,12 +51,12 @@ def build_graph(provider: AIProvider | None = None):
     )
 
     graph.add_node(
-        "ready",
-        lambda state: {},
+        "clarification",
+        clarification_agent,
     )
 
     graph.add_node(
-        "needs_info",
+        "ready",
         lambda state: {},
     )
 
@@ -68,11 +69,11 @@ def build_graph(provider: AIProvider | None = None):
         route_after_validation,
         {
             "ready": "ready",
-            "needs_info": "needs_info",
+            "needs_info": "clarification",
         },
     )
 
     graph.add_edge("ready", END)
-    graph.add_edge("needs_info", END)
+    graph.add_edge("clarification", END)
 
     return graph.compile()

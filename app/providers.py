@@ -73,7 +73,7 @@ class GeminiProvider(AIProvider):
                         "AI provider returned invalid JSON."
                     ) from exc
 
-            except errors.ServerError as exc:
+            except errors.ServerError:
                 if attempt >= self.max_retries:
                     raise
 
@@ -96,6 +96,7 @@ class MockProvider(AIProvider):
     """
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
+
         if "requirements definition" in prompt:
             return {
                 "functional_requirements": [
@@ -107,10 +108,19 @@ class MockProvider(AIProvider):
                 "acceptance_criteria": [
                     "An authorized enterprise user can access the self-service interface."
                 ],
-                "open_questions": [
-                    "Which specific self-service workflows are required?"
-                ],
+                "open_questions": [],
                 "contradictions": [],
+            }
+
+        if "whether the project definition is" in prompt:
+            return {
+                "status": "NEEDS_INFO",
+                "reasons": [
+                    "The target delivery timeline is not known."
+                ],
+                "questions": [
+                    "What is the target delivery timeline?"
+                ],
             }
 
         return {
@@ -122,17 +132,9 @@ class MockProvider(AIProvider):
             "constraints": [],
             "assumptions": [],
             "unknowns": [
-                "Target users",
-                "Business success criteria",
-                "Budget",
-                "Timeline",
-                "Existing systems",
+                "Target delivery timeline",
             ],
             "clarification_questions": [
-                "Who are the target users?",
-                "What business outcome should the solution achieve?",
-                "What is the expected timeline?",
-                "What budget constraints exist?",
-                "What existing systems need to be integrated?",
+                "What is the target delivery timeline?",
             ],
-    }
+        }
