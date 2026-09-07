@@ -77,6 +77,7 @@ def workflow_response(result: dict) -> dict:
         "solution": result.get("solution"),
         "delivery_plan": result.get("delivery_plan"),
         "estimate": result.get("estimate"),
+        "delivery_review": result.get("delivery_review"),
         "proposal": result.get("proposal"),
         "sow": result.get("sow"),
     }
