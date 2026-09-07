@@ -10,8 +10,8 @@ from app.providers import (
     AIProviderQuotaError,
     GeminiProvider,
     MockProvider,
+    OllamaProvider,
 )
-
 
 router = APIRouter()
 
@@ -32,13 +32,15 @@ def get_provider() -> AIProvider:
     if provider_name == "mock":
         return MockProvider()
 
+    if provider_name == "ollama":
+        return OllamaProvider()
+
     if provider_name == "gemini":
         return GeminiProvider()
 
     raise RuntimeError(
         f"Unsupported AI_PROVIDER: {provider_name}"
     )
-
 
 def run_workflow(
     request: str,
@@ -72,6 +74,11 @@ def workflow_response(result: dict) -> dict:
             [],
         ),
         "iteration": result.get("iteration"),
+        "solution": result.get("solution"),
+        "delivery_plan": result.get("delivery_plan"),
+        "estimate": result.get("estimate"),
+        "proposal": result.get("proposal"),
+        "sow": result.get("sow"),
     }
 
 
