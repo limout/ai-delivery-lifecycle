@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Delivery Lifecycle</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1100px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background: #f5f7fa;
+            color: #1f2937;
+        }
+
+        h1 {
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #6b7280;
+            margin-bottom: 30px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 14px;
+            box-sizing: border-box;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 16px;
+            resize: vertical;
+        }
+
+        button {
+            margin-top: 12px;
+            padding: 11px 20px;
+            border: 0;
+            border-radius: 7px;
+            background: #2563eb;
+            color: white;
+            font-size: 15px;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+
+        .status {
+            display: inline-block;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+
+        .ready {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .needs-info {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 12px;
+            border-radius: 7px;
+            margin-top: 20px;
+        }
+
+        ul {
+            padding-left: 22px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .section {
+            margin-top: 18px;
+        }
+
+        .section h3 {
+            margin-bottom: 8px;
+        }
+
+        #questions {
+            margin-top: 20px;
+        }
+
+        .question {
+            margin-bottom: 12px;
+        }
+
+        .question label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .question input {
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+        }
+
+        pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>AI Delivery Lifecycle</h1>
+
+    <div class="subtitle">
+        Transform an ambiguous customer request into structured
+        discovery, requirements and delivery validation.
+    </div>
+
+    <div class="card">
+        <h2>Customer Request</h2>
+
+        <textarea
+            id="request"
+            placeholder="Example: We want to build a customer self-service portal..."
+        ></textarea>
+
+        <button id="analyzeButton" onclick="analyze()">
+            Analyze
+        </button>
+    </div>
+
+    <div id="error" class="error hidden"></div>
+
+    <div id="result" class="card hidden">
+
+        <div>
+            <span id="status" class="status"></span>
+        </div>
+
+        <div class="section">
+            <h3>Discovery</h3>
+            <pre id="discovery"></pre>
+        </div>
+
+        <div class="section">
+            <h3>Requirements</h3>
+            <pre id="requirements"></pre>
+        </div>
+
+        <div class="section">
+            <h3>Validation</h3>
+            <pre id="validation"></pre>
+        </div>
+
+        <div id="questions" class="section hidden">
+            <h3>Clarification Questions</h3>
+
+            <div id="questionList"></div>
+
+            <button onclick="clarify()">
+                Submit Answers
+            </button>
+        </div>
+
+    </div>
+
+<script>
+
+let currentIteration = 1;
+
+function showError(message) {
+    const element = document.getElementById("error");
+
+    element.textContent = message;
+    element.classList.remove("hidden");
+}
+
+function clearError() {
+    document.getElementById("error").classList.add("hidden");
+}
+
+function renderResult(data) {
+
+    const result = document.getElementById("result");
+    const status = document.getElementById("status");
+
+    result.classList.remove("hidden");
+
+    status.textContent = data.status;
+
+    status.className = "status " +
+        (data.status === "READY" ? "ready" : "needs-info");
+
+    document.getElementById("discovery").textContent =
+        JSON.stringify(data.discovery, null, 2);
+
+    document.getElementById("requirements").textContent =
+        JSON.stringify(data.requirements, null, 2);
+
+    document.getElementById("validation").textContent =
+        JSON.stringify(data.validation, null, 2);
+
+    currentIteration = data.iteration || 1;
+
+    const questions = data.clarification_questions || [];
+    const questionsContainer = document.getElementById("questions");
+    const questionList = document.getElementById("questionList");
+
+    questionList.innerHTML = "";
+
+    if (questions.length > 0) {
+
+        questionsContainer.classList.remove("hidden");
+
+        questions.forEach((question, index) => {
+
+            const wrapper = document.createElement("div");
+            wrapper.className = "question";
+
+            const label = document.createElement("label");
+            label.textContent = question;
+
+            const input = document.createElement("input");
+            input.type = "text";
+            input.id = `answer-${index}`;
+
+            wrapper.appendChild(label);
+            wrapper.appendChild(input);
+
+            questionList.appendChild(wrapper);
+        });
+
+    } else {
+        questionsContainer.classList.add("hidden");
+    }
+}
+
+
+async function analyze() {
+
+    clearError();
+
+    const request = document
+        .getElementById("request")
+        .value
+        .trim();
+
+    if (!request) {
+        showError("Please enter a customer request.");
+        return;
+    }
+
+    const button = document.getElementById("analyzeButton");
+
+    button.disabled = true;
+    button.textContent = "Analyzing...";
+
+    try {
+
+        const response = await fetch("/analyze", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                user_request: request
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.message || "Workflow failed."
+            );
+        }
+
+        renderResult(data);
+
+    } catch (error) {
+
+        showError(error.message);
+
+    } finally {
+
+        button.disabled = false;
+        button.textContent = "Analyze";
+    }
+}
+
+
+async function clarify() {
+
+    clearError();
+
+    const request = document
+        .getElementById("request")
+        .value
+        .trim();
+
+    const questions =
+        document.querySelectorAll("#questionList input");
+
+    const answers = [];
+
+    questions.forEach(input => {
+        if (input.value.trim()) {
+            answers.push(input.value.trim());
+        }
+    });
+
+    if (answers.length === 0) {
+        showError("Please answer at least one question.");
+        return;
+    }
+
+    try {
+
+        const response = await fetch("/clarify", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                user_request: request,
+                clarification_answers: answers,
+                iteration: currentIteration
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.message || "Clarification failed."
+            );
+        }
+
+        renderResult(data);
+
+    } catch (error) {
+
+        showError(error.message);
+    }
+}
+
+</script>
+
+</body>
+</html>

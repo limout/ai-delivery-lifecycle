@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
-from app.api import app, get_provider
+from app.main import app
+from app.api import get_provider
 from app.providers import (
     AIProvider,
     AIProviderQuotaError,
@@ -137,3 +138,11 @@ def test_unknown_provider_is_rejected(monkeypatch):
         assert False, "Expected RuntimeError"
     except RuntimeError as exc:
         assert "Unsupported AI_PROVIDER" in str(exc)
+
+
+def test_home_page():
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "AI Delivery Lifecycle" in response.text
+    assert "Customer Request" in response.text

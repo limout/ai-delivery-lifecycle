@@ -1,6 +1,6 @@
 import os
 
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -13,11 +13,7 @@ from app.providers import (
 )
 
 
-app = FastAPI(
-    title="AI Delivery Lifecycle",
-    description="Agentic AI workflow for software delivery lifecycle.",
-    version="0.1.0",
-)
+router = APIRouter()
 
 
 class AnalyzeRequest(BaseModel):
@@ -79,14 +75,14 @@ def workflow_response(result: dict) -> dict:
     }
 
 
-@app.get("/health")
+@router.get("/health")
 def health() -> dict:
     return {
         "status": "ok",
     }
 
 
-@app.get("/config")
+@router.get("/config")
 def config() -> dict:
     return {
         "ai_provider": os.getenv(
@@ -96,7 +92,7 @@ def config() -> dict:
     }
 
 
-@app.post("/analyze")
+@router.post("/analyze")
 def analyze(
     request: AnalyzeRequest,
     provider: AIProvider = Depends(get_provider),
@@ -119,7 +115,7 @@ def analyze(
         )
 
 
-@app.post("/clarify")
+@router.post("/clarify")
 def clarify(
     request: ClarifyRequest,
     provider: AIProvider = Depends(get_provider),
