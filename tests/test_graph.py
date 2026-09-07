@@ -16,6 +16,7 @@ class ReadyMockProvider(MockProvider):
 
 class ClarificationAwareMockProvider(MockProvider):
     def generate_json(self, prompt: str, schema: dict) -> dict:
+
         if "requirements definition" in prompt:
             if "Salesforce" in prompt:
                 return {
@@ -31,6 +32,7 @@ class ClarificationAwareMockProvider(MockProvider):
                 }
 
         if "whether the project definition is" in prompt:
+
             if "Salesforce" in prompt:
                 return {
                     "status": "READY",
@@ -52,11 +54,10 @@ class ClarificationAwareMockProvider(MockProvider):
             }
 
         if "discovery assessment" in prompt:
+
             if "Salesforce" in prompt:
                 return {
-                    "problem": (
-                        "Customer needs a software solution."
-                    ),
+                    "problem": "Customer needs a software solution.",
                     "business_goal": (
                         "Solve the customer's business need."
                     ),
@@ -167,3 +168,42 @@ def test_clarification_answers_restart_the_workflow():
 
     assert second_result["validation"]["status"] == "READY"
     assert second_result["iteration"] == 2
+
+
+def test_clarification_loop_reaches_ready_after_timeline_answer():
+    graph = build_graph(MockProvider())
+
+    first_result = graph.invoke(
+        {
+            "user_request": (
+                "We want to build a customer self-service portal."
+            )
+        }
+    )
+
+    assert first_result["validation"]["status"] == "NEEDS_INFO"
+
+    assert (
+        "What is the target delivery timeline?"
+        in first_result["clarification_questions"]
+    )
+
+    second_result = graph.invoke(
+        {
+            "user_request": (
+                "We want to build a customer self-service portal."
+            ),
+            "clarification_answers": [
+                "2 months"
+            ],
+            "iteration": first_result["iteration"],
+        }
+    )
+
+    assert second_result["validation"]["status"] == "READY"
+
+    assert second_result["discovery"]["unknowns"] == []
+
+    assert (
+        second_result["requirements"]["open_questions"] == []
+    )

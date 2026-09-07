@@ -62,8 +62,7 @@ class GeminiProvider(AIProvider):
         Generate structured JSON.
 
         Temporary server failures are retried.
-        Quota/rate-limit errors are surfaced immediately because
-        retrying does not help when the project quota is exhausted.
+        Quota/rate-limit errors are surfaced immediately.
         """
 
         for attempt in range(self.max_retries + 1):
@@ -107,29 +106,98 @@ class GeminiProvider(AIProvider):
 
 class MockProvider(AIProvider):
     """
-    Deterministic provider used by automated tests.
+    Deterministic provider used by automated tests and Demo Mode.
 
     It does not call an external API.
+
+    The mock simulates a realistic clarification loop:
+
+        Customer request
+            ↓
+        Discovery
+            ↓
+        Missing timeline
+            ↓
+        Clarification
+            ↓
+        Customer provides "2 months"
+            ↓
+        Updated discovery
+            ↓
+        Requirements
+            ↓
+        Validation
+            ↓
+        READY
     """
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
 
+        prompt_lower = prompt.lower()
+
+        # ---------------------------------------------------------
+        # Requirements
+        # ---------------------------------------------------------
+
         if "requirements definition" in prompt:
+
+            has_salesforce = "Salesforce" in prompt
+
+            has_timeline = (
+                "2 months" in prompt_lower
+                or "two months" in prompt_lower
+                or "target delivery timeline: 2 months" in prompt_lower
+            )
+
+            functional_requirements = [
+                "The system should provide a self-service interface."
+            ]
+
+            if has_salesforce:
+                functional_requirements.append(
+                    "The portal must integrate with Salesforce."
+                )
+
+            open_questions = []
+
+            if not has_timeline:
+                open_questions.append(
+                    "What is the target delivery timeline?"
+                )
+
             return {
-                "functional_requirements": [
-                    "The system should provide a self-service interface.",
-                ],
+                "functional_requirements": functional_requirements,
                 "non_functional_requirements": [
-                    "The system should support appropriate enterprise security controls."
+                    "The system should support appropriate enterprise "
+                    "security controls."
                 ],
                 "acceptance_criteria": [
-                    "An authorized enterprise user can access the self-service interface."
+                    "An authorized enterprise user can access the "
+                    "self-service interface."
                 ],
-                "open_questions": [],
+                "open_questions": open_questions,
                 "contradictions": [],
             }
 
+        # ---------------------------------------------------------
+        # Validation
+        # ---------------------------------------------------------
+
         if "whether the project definition is" in prompt:
+
+            has_timeline = (
+                "2 months" in prompt_lower
+                or "two months" in prompt_lower
+                or "target delivery timeline: 2 months" in prompt_lower
+            )
+
+            if has_timeline:
+                return {
+                    "status": "READY",
+                    "reasons": [],
+                    "questions": [],
+                }
+
             return {
                 "status": "NEEDS_INFO",
                 "reasons": [
@@ -139,6 +207,77 @@ class MockProvider(AIProvider):
                     "What is the target delivery timeline?"
                 ],
             }
+
+        # ---------------------------------------------------------
+        # Discovery
+        # ---------------------------------------------------------
+
+        if "discovery assessment" in prompt:
+
+            has_salesforce = "Salesforce" in prompt
+
+            has_timeline = (
+                "previous clarification answers from the customer"
+                in prompt_lower
+                and (
+                    "2 months" in prompt_lower
+                    or "two months" in prompt_lower
+                )
+            )
+
+            unknowns = []
+            clarification_questions = []
+            constraints = []
+
+            if not has_timeline:
+                unknowns.append(
+                    "Target delivery timeline"
+                )
+
+                clarification_questions.append(
+                    "What is the target delivery timeline?"
+                )
+
+            else:
+                constraints.append(
+                    "Target delivery timeline: 2 months"
+                )
+
+            existing_systems = []
+
+            if has_salesforce:
+                existing_systems.append("Salesforce")
+
+            return {
+                "problem": (
+                    "Enterprise customers need a self-service "
+                    "way to interact with the company."
+                ),
+                "business_goal": (
+                    "Improve customer self-service and reduce "
+                    "operational support effort."
+                ),
+                "users": [
+                    "Enterprise customers"
+                ],
+                "stakeholders": [
+                    "Customer Success",
+                    "Account Management",
+                    "Enterprise Client Administrators",
+                ],
+                "existing_systems": existing_systems,
+                "constraints": constraints,
+                "assumptions": [
+                    "The solution will require enterprise authentication "
+                    "and access control."
+                ],
+                "unknowns": unknowns,
+                "clarification_questions": clarification_questions,
+            }
+
+        # ---------------------------------------------------------
+        # Fallback
+        # ---------------------------------------------------------
 
         return {
             "problem": "Customer needs a software solution.",
@@ -152,6 +291,6 @@ class MockProvider(AIProvider):
                 "Target delivery timeline",
             ],
             "clarification_questions": [
-                "What is the target delivery timeline?",
+                "What is the target delivery timeline?"
             ],
         }
