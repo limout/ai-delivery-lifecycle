@@ -11,6 +11,14 @@ from google.genai import errors
 load_dotenv()
 
 
+class AIProviderError(RuntimeError):
+    """Base exception for AI provider failures."""
+
+
+class AIProviderQuotaError(AIProviderError):
+    """Raised when the AI provider quota has been exceeded."""
+
+
 class AIProvider(ABC):
     """
     Interface for an AI model provider.
@@ -51,8 +59,11 @@ class GeminiProvider(AIProvider):
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
         """
-        Generate structured JSON with retry handling for
-        temporary Gemini availability/rate-limit errors.
+        Generate structured JSON.
+
+        Temporary server failures are retried.
+        Quota/rate-limit errors are surfaced immediately because
+        retrying does not help when the project quota is exhausted.
         """
 
         for attempt in range(self.max_retries + 1):
@@ -69,23 +80,29 @@ class GeminiProvider(AIProvider):
                 try:
                     return json.loads(response.text)
                 except json.JSONDecodeError as exc:
-                    raise RuntimeError(
+                    raise AIProviderError(
                         "AI provider returned invalid JSON."
                     ) from exc
 
-            except errors.ServerError:
+            except errors.ServerError as exc:
                 if attempt >= self.max_retries:
-                    raise
+                    raise AIProviderError(
+                        "AI provider is temporarily unavailable."
+                    ) from exc
 
                 time.sleep(self.retry_delay * (2**attempt))
 
             except errors.ClientError as exc:
                 status_code = getattr(exc, "status_code", None)
 
-                if status_code != 429 or attempt >= self.max_retries:
-                    raise
+                if status_code == 429:
+                    raise AIProviderQuotaError(
+                        "AI provider quota has been exceeded."
+                    ) from exc
 
-                time.sleep(self.retry_delay * (2**attempt))
+                raise AIProviderError(
+                    f"AI provider request failed with status {status_code}."
+                ) from exc
 
 
 class MockProvider(AIProvider):

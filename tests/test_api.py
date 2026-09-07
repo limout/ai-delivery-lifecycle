@@ -1,7 +1,11 @@
 from fastapi.testclient import TestClient
 
 from app.api import app, get_provider
-from app.providers import MockProvider
+from app.providers import (
+    AIProvider,
+    AIProviderQuotaError,
+    MockProvider,
+)
 
 
 app.dependency_overrides[get_provider] = MockProvider
@@ -76,3 +80,31 @@ def test_clarify_accepts_customer_answers():
     assert data["discovery"]
     assert data["requirements"]
     assert data["validation"]
+
+
+class QuotaMockProvider(AIProvider):
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        raise AIProviderQuotaError(
+            "AI provider quota has been exceeded."
+        )
+
+
+def test_analyze_returns_503_when_ai_quota_is_exceeded():
+    app.dependency_overrides[get_provider] = QuotaMockProvider
+
+    response = client.post(
+        "/analyze",
+        json={
+            "user_request": (
+                "We want to build a customer self-service portal."
+            )
+        },
+    )
+
+    assert response.status_code == 503
+
+    data = response.json()
+
+    assert data["error"] == "AI_PROVIDER_QUOTA_EXCEEDED"
+
+    app.dependency_overrides[get_provider] = MockProvider

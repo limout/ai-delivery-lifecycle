@@ -1,8 +1,13 @@
-from fastapi import FastAPI, Depends
+from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.graph import build_graph
-from app.providers import AIProvider, GeminiProvider
+from app.providers import (
+    AIProvider,
+    AIProviderQuotaError,
+    GeminiProvider,
+)
 
 
 app = FastAPI(
@@ -47,6 +52,20 @@ def run_workflow(
     return graph.invoke(state)
 
 
+def workflow_response(result: dict) -> dict:
+    return {
+        "status": result["validation"]["status"],
+        "discovery": result["discovery"],
+        "requirements": result["requirements"],
+        "validation": result["validation"],
+        "clarification_questions": result.get(
+            "clarification_questions",
+            [],
+        ),
+        "iteration": result.get("iteration"),
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -58,45 +77,45 @@ def health() -> dict:
 def analyze(
     request: AnalyzeRequest,
     provider: AIProvider = Depends(get_provider),
-) -> dict:
-    result = run_workflow(
-        request=request.user_request,
-        provider=provider,
-    )
+):
+    try:
+        result = run_workflow(
+            request=request.user_request,
+            provider=provider,
+        )
 
-    return {
-        "status": result["validation"]["status"],
-        "discovery": result["discovery"],
-        "requirements": result["requirements"],
-        "validation": result["validation"],
-        "clarification_questions": result.get(
-            "clarification_questions",
-            [],
-        ),
-        "iteration": result.get("iteration"),
-    }
+        return workflow_response(result)
+
+    except AIProviderQuotaError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "AI_PROVIDER_QUOTA_EXCEEDED",
+                "message": str(exc),
+            },
+        )
 
 
 @app.post("/clarify")
 def clarify(
     request: ClarifyRequest,
     provider: AIProvider = Depends(get_provider),
-) -> dict:
-    result = run_workflow(
-        request=request.user_request,
-        clarification_answers=request.clarification_answers,
-        iteration=request.iteration,
-        provider=provider,
-    )
+):
+    try:
+        result = run_workflow(
+            request=request.user_request,
+            clarification_answers=request.clarification_answers,
+            iteration=request.iteration,
+            provider=provider,
+        )
 
-    return {
-        "status": result["validation"]["status"],
-        "discovery": result["discovery"],
-        "requirements": result["requirements"],
-        "validation": result["validation"],
-        "clarification_questions": result.get(
-            "clarification_questions",
-            [],
-        ),
-        "iteration": result.get("iteration"),
-    }
+        return workflow_response(result)
+
+    except AIProviderQuotaError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "AI_PROVIDER_QUOTA_EXCEEDED",
+                "message": str(exc),
+            },
+        )
