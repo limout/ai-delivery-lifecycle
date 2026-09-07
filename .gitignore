@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+*.pyc
+AI_Delivery_Agentic_Workflow_3_Day_Roadmap.pdf
