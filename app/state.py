@@ -15,4 +15,10 @@ class DeliveryState(TypedDict, total=False):
     requirements: dict
     validation: dict
 
+    solution: dict
+    delivery_plan: dict
+    estimate: dict
+    proposal: dict
+    sow: dict
+
     iteration: int
