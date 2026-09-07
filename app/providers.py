@@ -195,6 +195,20 @@ class MockProvider(AIProvider):
                 "non_blocking_questions": [],
             }
 
+        if "blocking_issues" in properties and "warnings" in properties and "checks" in properties:
+            return {
+                "status": "READY",
+                "blocking_issues": [],
+                "warnings": [
+                    "Detailed scope and integration constraints should be confirmed before commercial commitment."
+                ],
+                "checks": [
+                    "Mock workflow artifacts are internally consistent.",
+                    "No unsupported confirmed scope is introduced.",
+                    "Estimate remains indicative.",
+                ],
+            }
+
         if "solution_summary" in properties:
             return {
                 "solution_summary": "A customer self-service portal with enterprise authentication and integration with existing systems.",
@@ -219,7 +233,7 @@ class MockProvider(AIProvider):
         if "effort_range" in properties:
             return {
                 "effort_range": "Indicative: 10–16 person-weeks",
-                "duration_range": "Indicative: 8–10 weeks",
+                "duration_range": "Indicative: 6–8 weeks",
                 "confidence": "MEDIUM",
                 "assumptions": ["Required Salesforce and identity access is available.", "Scope remains limited to identified capabilities."],
                 "risks_affecting_estimate": ["Unknown integration complexity", "Security and compliance requirements", "Detailed scope refinement"],

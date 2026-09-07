@@ -42,6 +42,8 @@ def test_graph_reaches_solution_after_timeline_clarification():
     assert "solution" in result
     assert "delivery_plan" in result
     assert "estimate" in result
+    assert "delivery_review" in result
+    assert result["delivery_review"]["status"] == "READY"
     assert "proposal" in result
     assert "sow" in result
 
@@ -70,7 +72,81 @@ def test_complete_project_does_not_stop_for_non_blocking_questions():
         "solution",
         "delivery_plan",
         "estimate",
+        "delivery_review",
         "proposal",
         "sow",
     ):
         assert artifact in result
+
+class ReviewBlockingProvider(MockProvider):
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        if "blocking_issues" in schema.get("properties", {}):
+            return {
+                "status": "BLOCKED",
+                "blocking_issues": ["The preliminary estimate conflicts with the requested timeline."],
+                "warnings": [],
+                "checks": ["Cross-agent consistency check failed."],
+            }
+        return super().generate_json(prompt, schema)
+
+
+def test_graph_stops_before_proposal_when_delivery_review_is_blocked():
+    graph = build_graph(provider=ReviewBlockingProvider())
+
+    result = graph.invoke({
+        "user_request": (
+            "We want to build a customer self-service portal for enterprise customers. "
+            "We currently use Salesforce and want to launch within two months."
+        )
+    })
+
+    assert result["delivery_review"]["status"] == "BLOCKED"
+    assert result["delivery_review"]["blocking_issues"]
+    assert "proposal" not in result
+    assert "sow" not in result
+
+
+
+class DeterministicConflictProvider(MockProvider):
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        properties = set(schema.get("properties", {}))
+        if "functional_requirements" in properties:
+            return {
+                "functional_requirements": [
+                    "The portal must provide customer self-service."
+                ],
+                "non_functional_requirements": [
+                    "The portal must provide 99.9% uptime."
+                ],
+                "acceptance_criteria": [
+                    "The portal achieves 99.9% uptime."
+                ],
+                "open_questions": [],
+                "contradictions": [],
+            }
+        if "effort_range" in properties:
+            return {
+                "effort_range": "Indicative: 400-600 person-days",
+                "duration_range": "Indicative: 12-16 weeks",
+                "confidence": "MEDIUM",
+                "assumptions": [],
+                "risks_affecting_estimate": [],
+            }
+        return super().generate_json(prompt, schema)
+
+
+def test_delivery_review_deterministically_blocks_deadline_and_ungrounded_commitment():
+    graph = build_graph(provider=DeterministicConflictProvider())
+
+    result = graph.invoke({
+        "user_request": (
+            "We want to build a customer self-service portal for enterprise customers. "
+            "We want to launch within two months."
+        )
+    })
+
+    assert result["delivery_review"]["status"] == "BLOCKED"
+    assert any("deadline" in issue.lower() for issue in result["delivery_review"]["blocking_issues"])
+    assert any("99.9%" in issue for issue in result["delivery_review"]["blocking_issues"])
+    assert "proposal" not in result
+    assert "sow" not in result

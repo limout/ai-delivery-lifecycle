@@ -146,3 +146,26 @@ def test_home_page():
     assert response.status_code == 200
     assert "AI Delivery Lifecycle" in response.text
     assert "Customer Request" in response.text
+
+def test_analyze_returns_full_lifecycle_artifacts():
+    response = client.post(
+        "/analyze",
+        json={
+            "user_request": (
+                "We want to build a customer self-service portal for enterprise customers. "
+                "We currently use Salesforce. Enterprise users authenticate through Microsoft Entra ID. "
+                "We want to launch within two months."
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "READY"
+    assert data["solution"]
+    assert data["delivery_plan"]
+    assert data["estimate"]
+    assert data["delivery_review"]
+    assert data["proposal"]
+    assert data["sow"]
+

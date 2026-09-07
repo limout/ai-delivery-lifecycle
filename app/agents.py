@@ -287,6 +287,18 @@ SOW_SCHEMA = {
 }
 
 
+
+DELIVERY_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["READY", "BLOCKED"]},
+        "blocking_issues": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "checks": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["status", "blocking_issues", "warnings", "checks"],
+}
+
 def discovery_agent(
     state: DeliveryState,
     provider: AIProvider,
@@ -373,15 +385,20 @@ IMPORTANT RULES:
 
 1. Only derive requirements supported by the discovery.
 2. Do not invent detailed features.
-3. Distinguish requirements from open questions.
+3. Every concrete customer capability in discovery must be
+   represented by at least one functional requirement when it is
+   specific enough to state as system behavior.
 4. Functional requirements describe what the system should do.
-5. Non-functional requirements describe justified qualities or
-   constraints such as security, performance, availability,
-   accessibility, or compliance.
+5. Non-functional requirements describe only justified qualities or
+   explicit constraints such as security, performance, accessibility,
+   or compliance.
 6. Acceptance criteria must be observable and testable.
-7. If information is insufficient, put it into open_questions.
-8. Identify contradictions.
+7. If information is insufficient, put the missing detail into
+   open_questions rather than inventing an answer.
+8. Identify contradictions between discovery facts and requirements.
 9. Do not treat assumptions as confirmed requirements.
+10. Do not return empty requirement lists when the discovery contains
+    concrete capabilities or constraints.
 """
 
     requirements = provider.generate_json(
@@ -389,10 +406,41 @@ IMPORTANT RULES:
         schema=REQUIREMENTS_SCHEMA,
     )
 
+    has_any_requirements = any(
+        requirements.get(key)
+        for key in (
+            "functional_requirements",
+            "non_functional_requirements",
+            "acceptance_criteria",
+        )
+    )
+
+    if not has_any_requirements and (
+        discovery.get("problem")
+        or discovery.get("business_goal")
+        or discovery.get("users")
+        or discovery.get("constraints")
+    ):
+        retry_prompt = f"""
+The previous requirements response was empty. Re-do the requirements
+analysis using ONLY the discovery below.
+
+DISCOVERY:
+{discovery}
+
+Return at least the concrete functional and/or non-functional
+requirements that are directly supported by the discovery. Do not
+invent features. Put unresolved details into open_questions.
+Acceptance criteria must be testable.
+"""
+        requirements = provider.generate_json(
+            prompt=retry_prompt,
+            schema=REQUIREMENTS_SCHEMA,
+        )
+
     return {
         "requirements": requirements,
     }
-
 
 def validation_agent(
     state: DeliveryState,
@@ -756,4 +804,204 @@ Rules:
 
     return {
         "sow": sow,
+    }
+
+def _flatten_confirmed_discovery(discovery: dict) -> str:
+    """Return only customer-confirmed discovery content for provenance checks."""
+    confirmed_keys = (
+        "problem",
+        "business_goal",
+        "users",
+        "stakeholders",
+        "existing_systems",
+        "constraints",
+    )
+    values = [discovery.get(key, "") for key in confirmed_keys]
+    return " ".join(str(value) for value in values).lower()
+
+
+def _parse_max_weeks(duration_text: str) -> float | None:
+    """Extract the largest week value from an estimate duration range."""
+    import re
+
+    text = str(duration_text or "").lower().replace("–", "-").replace("—", "-")
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*weeks?", text)
+    if matches:
+        return max(float(high) for _, high in matches)
+
+    single = re.findall(r"(\d+(?:\.\d+)?)\s*weeks?", text)
+    if single:
+        return max(float(value) for value in single)
+
+    return None
+
+
+def _parse_max_months(constraints: list[str]) -> float | None:
+    """Extract the smallest explicit month-based deadline from constraints."""
+    import re
+
+    values: list[float] = []
+    for item in constraints or []:
+        text = str(item).lower()
+        for number in re.findall(r"(\d+(?:\.\d+)?)\s*months?", text):
+            values.append(float(number))
+        if "two months" in text:
+            values.append(2.0)
+
+    return min(values) if values else None
+
+
+def _deterministic_delivery_gate(
+    discovery: dict,
+    requirements: dict,
+    estimate: dict,
+) -> tuple[list[str], list[str], list[str]]:
+    """Enforce objective delivery invariants independently of the LLM."""
+    blocking: list[str] = []
+    warnings: list[str] = []
+    checks: list[str] = []
+
+    # 1. Customer deadline must not be shorter than the preliminary estimate.
+    deadline_months = _parse_max_months(discovery.get("constraints", []))
+    estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+
+    if deadline_months is not None and estimate_max_weeks is not None:
+        deadline_weeks = deadline_months * 4.345
+        if estimate_max_weeks > deadline_weeks:
+            blocking.append(
+                "The preliminary estimate exceeds the explicit customer launch deadline. "
+                f"Customer deadline is {deadline_months:g} month(s) while the estimate reaches "
+                f"{estimate_max_weeks:g} weeks."
+            )
+        else:
+            checks.append("Preliminary estimate does not exceed the explicit customer deadline.")
+    else:
+        warnings.append("A machine-checkable customer deadline or estimate duration was not available.")
+
+    # 2. Quantified requirements must be grounded in confirmed discovery.
+    #    This catches invented SLOs, user-volume targets, response times, etc.
+    import re
+
+    confirmed_text = _flatten_confirmed_discovery(discovery)
+    quantified_requirements = [
+        *requirements.get("functional_requirements", []),
+        *requirements.get("non_functional_requirements", []),
+        *requirements.get("acceptance_criteria", []),
+    ]
+    for requirement in quantified_requirements:
+        text = str(requirement)
+        numbers = re.findall(
+            r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\s*(?:users?|customers?|seconds?|ms|minutes?|hours?|days?|weeks?|months?))",
+            text.lower(),
+        )
+        if numbers and not any(token in confirmed_text for token in numbers):
+            blocking.append(
+                f"Requirement contains an ungrounded quantified commitment: {text}"
+            )
+
+    if not any("Requirement contains an ungrounded quantified commitment" in item for item in blocking):
+        checks.append("No ungrounded quantified commitments were detected in requirements.")
+
+    # 3. Unknowns must not silently become confirmed commitments.
+    unknown_text = " ".join(str(item) for item in discovery.get("unknowns", [])).lower()
+    requirement_text = " ".join(str(item) for item in quantified_requirements).lower()
+    unknown_markers = (
+        ("user volume", "user volume"),
+        ("data privacy regulations", "privacy regulations"),
+        ("security and compliance requirements", "compliance"),
+    )
+    for source_phrase, requirement_phrase in unknown_markers:
+        if source_phrase in unknown_text and requirement_phrase in requirement_text:
+            blocking.append(
+                f"A customer unknown ('{source_phrase}') was converted into a confirmed requirement."
+            )
+
+    if not any("customer unknown" in item for item in blocking):
+        checks.append("Customer unknowns were not promoted into confirmed requirements by deterministic checks.")
+
+    return blocking, warnings, checks
+
+
+def delivery_review_agent(
+    state: DeliveryState,
+    provider: AIProvider,
+) -> dict:
+    discovery = state["discovery"]
+    requirements = state["requirements"]
+    solution = state["solution"]
+    delivery_plan = state["delivery_plan"]
+    estimate = state["estimate"]
+
+    prompt = f"""
+You are a senior Delivery Lead performing a cross-agent quality gate
+before a customer proposal and Statement of Work are produced.
+
+Review the artifacts below for grounding, consistency, and delivery
+feasibility.
+
+DISCOVERY:
+{discovery}
+
+REQUIREMENTS:
+{requirements}
+
+SOLUTION:
+{solution}
+
+DELIVERY PLAN:
+{delivery_plan}
+
+ESTIMATE:
+{estimate}
+
+Rules:
+1. A requirement or explicit customer statement is the source of truth.
+2. Flag as BLOCKING any confirmed scope item that cannot be traced to
+   discovery or requirements.
+3. Flag as BLOCKING any direct contradiction between the customer
+   timeline and the proposed delivery duration.
+4. Check that effort and duration are at least plausibly consistent
+   with the delivery plan; flag a material mismatch as BLOCKING.
+5. Estimates remain indicative, but must be internally coherent.
+6. Unresolved detail that can safely remain an assumption is a warning,
+   not a blocker.
+7. Do not invent missing facts while reviewing.
+8. If an objective rule is violated, it MUST be BLOCKED, not READY.
+9. If there are no material blockers, return READY.
+"""
+
+    review = provider.generate_json(
+        prompt=prompt,
+        schema=DELIVERY_REVIEW_SCHEMA,
+    )
+
+    deterministic_blocking, deterministic_warnings, deterministic_checks = _deterministic_delivery_gate(
+        discovery=discovery,
+        requirements=requirements,
+        estimate=estimate,
+    )
+
+    blocking_issues = list(review.get("blocking_issues", []))
+    warnings = list(review.get("warnings", []))
+    checks = list(review.get("checks", []))
+
+    for issue in deterministic_blocking:
+        if issue not in blocking_issues:
+            blocking_issues.append(issue)
+    for warning in deterministic_warnings:
+        if warning not in warnings:
+            warnings.append(warning)
+    for check in deterministic_checks:
+        if check not in checks:
+            checks.append(check)
+
+    status = "BLOCKED" if blocking_issues else "READY"
+
+    return {
+        "delivery_review": {
+            "status": status,
+            "blocking_issues": blocking_issues,
+            "warnings": warnings,
+            "checks": checks,
+        },
     }
