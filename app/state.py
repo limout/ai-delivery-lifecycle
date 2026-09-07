@@ -8,6 +8,7 @@ class DeliveryState(TypedDict, total=False):
 
     user_request: str
     clarification_answers: list[str]
+    clarification_questions: list[str]
 
     discovery: dict
     requirements: dict

@@ -7,30 +7,12 @@ DISCOVERY_SCHEMA = {
     "properties": {
         "problem": {"type": "string"},
         "business_goal": {"type": "string"},
-        "users": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "stakeholders": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "existing_systems": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "constraints": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "assumptions": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "unknowns": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
+        "users": {"type": "array", "items": {"type": "string"}},
+        "stakeholders": {"type": "array", "items": {"type": "string"}},
+        "existing_systems": {"type": "array", "items": {"type": "string"}},
+        "constraints": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "unknowns": {"type": "array", "items": {"type": "string"}},
         "clarification_questions": {
             "type": "array",
             "items": {"type": "string"},
@@ -48,7 +30,6 @@ DISCOVERY_SCHEMA = {
         "clarification_questions",
     ],
 }
-
 
 REQUIREMENTS_SCHEMA = {
     "type": "object",
@@ -83,7 +64,6 @@ REQUIREMENTS_SCHEMA = {
     ],
 }
 
-
 VALIDATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -112,13 +92,6 @@ def discovery_agent(
     state: DeliveryState,
     provider: AIProvider,
 ) -> dict:
-    """
-    AI Discovery Agent.
-
-    Converts the customer request and any clarification answers
-    into structured discovery information.
-    """
-
     request = state["user_request"]
     clarification_answers = state.get("clarification_answers", [])
 
@@ -131,7 +104,11 @@ Previous clarification answers from the customer:
 {clarification_answers}
 
 Use these answers as new customer-provided facts.
+
 Re-evaluate the discovery using the updated information.
+
+Do not treat unanswered questions as answered.
+Do not invent information that is not present in the answers.
 """
 
     prompt = f"""
@@ -165,20 +142,20 @@ Original customer request:
         schema=DISCOVERY_SCHEMA,
     )
 
-    return {"discovery": discovery}
+    result = {
+        "discovery": discovery,
+    }
+
+    if "iteration" in state:
+        result["iteration"] = state["iteration"]
+
+    return result
 
 
 def requirements_agent(
     state: DeliveryState,
     provider: AIProvider,
 ) -> dict:
-    """
-    AI Requirements Agent.
-
-    Takes structured discovery information and converts it into
-    an initial requirements definition.
-    """
-
     discovery = state["discovery"]
 
     prompt = f"""
@@ -211,20 +188,15 @@ IMPORTANT RULES:
         schema=REQUIREMENTS_SCHEMA,
     )
 
-    return {"requirements": requirements}
+    return {
+        "requirements": requirements,
+    }
 
 
 def validation_agent(
     state: DeliveryState,
     provider: AIProvider,
 ) -> dict:
-    """
-    AI Validation Agent.
-
-    Reviews Discovery and Requirements and decides whether the
-    workflow has enough information to continue.
-    """
-
     discovery = state["discovery"]
     requirements = state["requirements"]
 
@@ -265,21 +237,23 @@ IMPORTANT:
         schema=VALIDATION_SCHEMA,
     )
 
-    return {"validation": validation}
+    return {
+        "validation": validation,
+    }
 
 
 def clarification_agent(state: DeliveryState) -> dict:
     """
-    Prepare the clarification request that should be sent to
-    the customer.
+    Prepare the graph output for the customer clarification step.
 
-    The actual customer interaction will be added later through
-    the API/UI.
+    The graph intentionally stops here. The application layer can
+    present these questions to the customer and start the graph
+    again with clarification_answers.
     """
 
     validation = state["validation"]
 
     return {
-        "clarification_answers": [],
+        "clarification_questions": validation.get("questions", []),
         "iteration": state.get("iteration", 1) + 1,
     }

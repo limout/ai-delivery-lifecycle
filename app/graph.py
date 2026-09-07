@@ -13,10 +13,6 @@ from app.state import DeliveryState
 
 
 def route_after_validation(state: DeliveryState) -> str:
-    """
-    Decide where the workflow should go after validation.
-    """
-
     status = state["validation"]["status"]
 
     if status == "READY":
@@ -26,10 +22,6 @@ def route_after_validation(state: DeliveryState) -> str:
 
 
 def build_graph(provider: AIProvider | None = None):
-    """
-    Build the delivery lifecycle graph.
-    """
-
     if provider is None:
         provider = GeminiProvider()
 
@@ -60,6 +52,11 @@ def build_graph(provider: AIProvider | None = None):
         lambda state: {},
     )
 
+    graph.add_node(
+        "needs_info",
+        lambda state: {},
+    )
+
     graph.add_edge(START, "discovery")
     graph.add_edge("discovery", "requirements")
     graph.add_edge("requirements", "validation")
@@ -74,6 +71,7 @@ def build_graph(provider: AIProvider | None = None):
     )
 
     graph.add_edge("ready", END)
-    graph.add_edge("clarification", END)
+    graph.add_edge("clarification", "needs_info")
+    graph.add_edge("needs_info", END)
 
     return graph.compile()
