@@ -19,20 +19,42 @@ from app.state import DeliveryState
 
 
 def route_after_validation(state: DeliveryState) -> str:
-    status = state["validation"]["status"]
-    if status == "READY":
-        return "ready"
-    return "needs_info"
+    """Route from validation based on the agent's decision."""
+    validation = state.get("validation", {}) or {}
+    blocking_questions = validation.get("blocking_questions", []) or []
+    return "needs_info" if blocking_questions else "ready"
 
 
 def route_after_delivery_review(state: DeliveryState) -> str:
-    status = state["delivery_review"]["status"]
-    if status == "READY":
+    """Route from the delivery quality gate using explicit blocking semantics."""
+    review = state.get("delivery_review", {}) or {}
+    if review.get("status") == "READY" and not review.get("blocking_issues"):
         return "ready"
+
+    clarification_questions = review.get("clarification_questions", []) or []
+    if any(
+        isinstance(question, dict) and question.get("blocks_workflow") is True
+        for question in clarification_questions
+    ):
+        return "needs_info"
+
     return "review_blocked"
 
 
 def build_graph(provider: AIProvider | None = None):
+    """
+    Build the agent graph.
+
+    The graph is state-driven: agents produce structured state and
+    conditional routers decide whether to continue, ask the customer,
+    or stop on an internal delivery blocker.
+
+    Human clarification is a graph boundary. The clarification node
+    emits a WAITING_FOR_CUSTOMER state and ends that execution. The API
+    starts the same graph again with the customer's answers; the graph
+    then re-evaluates Discovery -> Requirements -> Validation. This is
+    the lifecycle loop, not a second hard-coded workflow.
+    """
     if provider is None:
         provider = GeminiProvider()
 
@@ -48,10 +70,22 @@ def build_graph(provider: AIProvider | None = None):
     graph.add_node("delivery_review", partial(delivery_review_agent, provider=provider))
     graph.add_node("proposal", partial(proposal_agent, provider=provider))
     graph.add_node("sow", partial(sow_agent, provider=provider))
-    graph.add_node("ready", lambda state: {})
-    graph.add_node("needs_info", lambda state: {})
-    graph.add_node("review_blocked", lambda state: {})
-    graph.add_node("complete", lambda state: {})
+
+    graph.add_node("await_customer", lambda state: {
+        "workflow_status": "NEEDS_INFO",
+        "current_stage": "clarification",
+        "awaiting_customer": True,
+    })
+    graph.add_node("blocked", lambda state: {
+        "workflow_status": "BLOCKED",
+        "current_stage": "delivery_review",
+        "awaiting_customer": False,
+    })
+    graph.add_node("complete", lambda state: {
+        "workflow_status": "COMPLETE",
+        "current_stage": "complete",
+        "awaiting_customer": False,
+    })
 
     graph.add_edge(START, "discovery")
     graph.add_edge("discovery", "requirements")
@@ -61,13 +95,16 @@ def build_graph(provider: AIProvider | None = None):
         "validation",
         route_after_validation,
         {
-            "ready": "ready",
+            "ready": "solution",
             "needs_info": "clarification",
         },
     )
 
-    graph.add_edge("clarification", "needs_info")
-    graph.add_edge("ready", "solution")
+    # Human-in-the-loop boundary. The next /clarify request re-enters
+    # the graph at START with customer answers in state.
+    graph.add_edge("clarification", "await_customer")
+    graph.add_edge("await_customer", END)
+
     graph.add_edge("solution", "delivery_plan")
     graph.add_edge("delivery_plan", "estimate")
     graph.add_edge("estimate", "delivery_review")
@@ -77,14 +114,14 @@ def build_graph(provider: AIProvider | None = None):
         route_after_delivery_review,
         {
             "ready": "proposal",
-            "review_blocked": "review_blocked",
+            "needs_info": "clarification",
+            "review_blocked": "blocked",
         },
     )
 
     graph.add_edge("proposal", "sow")
     graph.add_edge("sow", "complete")
-    graph.add_edge("needs_info", END)
-    graph.add_edge("review_blocked", END)
+    graph.add_edge("blocked", END)
     graph.add_edge("complete", END)
 
     return graph.compile()

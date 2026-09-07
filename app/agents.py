@@ -1,3 +1,4 @@
+import re
 from app.providers import AIProvider
 from app.state import DeliveryState
 
@@ -293,11 +294,246 @@ DELIVERY_REVIEW_SCHEMA = {
     "properties": {
         "status": {"type": "string", "enum": ["READY", "BLOCKED"]},
         "blocking_issues": {"type": "array", "items": {"type": "string"}},
+        "clarification_questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["REQUIRED", "RECOMMENDED", "OPTIONAL"]},
+                    "reason": {"type": "string"},
+                    "blocks_workflow": {"type": "boolean"},
+                },
+                "required": ["question", "priority", "reason", "blocks_workflow"],
+            },
+        },
         "warnings": {"type": "array", "items": {"type": "string"}},
         "checks": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["status", "blocking_issues", "warnings", "checks"],
+    "required": ["status", "blocking_issues", "clarification_questions", "warnings", "checks"],
 }
+
+
+
+def _clarification_records(state: DeliveryState) -> list[dict]:
+    """Return all customer clarification facts available to this run."""
+    records: list[dict] = []
+
+    for item in state.get("clarification_history", []) or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if answer:
+            records.append({"question": question, "answer": answer})
+
+    for item in state.get("clarification_answers", []) or []:
+        text = str(item).strip()
+        if text:
+            records.append({"question": "", "answer": text})
+
+    return records
+
+
+def _clarification_context(state: DeliveryState) -> str:
+    """Format cumulative customer answers for every agent re-entry."""
+    records = _clarification_records(state)
+    if not records:
+        return ""
+
+    lines = []
+    for record in records:
+        if record["question"]:
+            lines.append(
+                f"Question: {record['question']}\nAnswer: {record['answer']}"
+            )
+        else:
+            lines.append(f"Customer answer: {record['answer']}")
+
+    return """
+CUMULATIVE CUSTOMER CLARIFICATION FACTS:
+
+%s
+
+These are authoritative customer-provided facts from previous
+clarification iterations. They remain valid unless a later customer
+answer explicitly contradicts them.
+
+Do not ask the customer again for information already answered here.
+Do not convert an answered question back into an unknown or blocker.
+""" % "\n\n".join(lines)
+
+
+def _answered_clarification_topics(state: DeliveryState) -> set[str]:
+    """Classify topics that the customer has already answered."""
+    text = " ".join(
+        f"{record['question']} {record['answer']}"
+        for record in _clarification_records(state)
+    ).lower()
+
+    topics: set[str] = set()
+
+    if any(marker in text for marker in (
+        "gdpr",
+        "data privacy",
+        "privacy regulation",
+        "compliance",
+        "security requirements",
+        "security and compliance",
+        "encryption in transit",
+        "encryption at rest",
+        "audit logging",
+    )):
+        topics.add("security_compliance")
+
+    if any(marker in text for marker in (
+        "user volume",
+        "registered users",
+        "concurrent users",
+        "expected volume",
+        "expected user volume",
+        "users will",
+    )):
+        topics.add("user_volume")
+
+    if any(marker in text for marker in (
+        "enterprise customer user",
+        "enterprise customer admin",
+        "customer support agent",
+        "internal admin",
+        "user roles",
+        "roles/permissions",
+        "roles and permissions",
+        "role-based access",
+        "rbac",
+    )):
+        topics.add("roles_permissions")
+
+    if "salesforce" in text and any(marker in text for marker in (
+        "integration", "api", "system of record", "existing", "current state"
+    )):
+        topics.add("salesforce_integration")
+
+    if "entra" in text and any(marker in text for marker in (
+        "integration", "api", "authentication", "identity provider", "existing", "current state"
+    )):
+        topics.add("entra_integration")
+
+    return topics
+
+
+def _question_topic(question: str) -> str | None:
+    """Map a clarification question to the canonical topic it resolves."""
+    text = str(question or "").lower()
+
+    if any(marker in text for marker in (
+        "security", "compliance", "data privacy", "privacy requirements", "regulatory"
+    )):
+        return "security_compliance"
+    if any(marker in text for marker in (
+        "user volume", "expected user volume", "traffic", "concurrent users"
+    )):
+        return "user_volume"
+    if any(marker in text for marker in (
+        "user roles", "roles/permissions", "roles and permissions", "permissions"
+    )):
+        return "roles_permissions"
+    if "salesforce" in text and "integration" in text:
+        return "salesforce_integration"
+    if "entra" in text and "integration" in text:
+        return "entra_integration"
+    return None
+
+
+def _filter_answered_questions(questions: list, state: DeliveryState) -> list:
+    """Remove questions whose canonical topic was already answered."""
+    answered = _answered_clarification_topics(state)
+    if not answered:
+        return questions
+
+    filtered = []
+    for item in questions or []:
+        text = item.get("question") if isinstance(item, dict) else str(item)
+        topic = _question_topic(text)
+        if topic and topic in answered:
+            continue
+        filtered.append(item)
+    return filtered
+
+def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
+    """Remove stale discovery unknowns/questions after customer answers."""
+    answered = _answered_clarification_topics(state)
+    if not answered:
+        return discovery
+
+    cleaned = dict(discovery)
+    cleaned["unknowns"] = [
+        item for item in discovery.get("unknowns", []) or []
+        if not (_question_topic(str(item)) in answered)
+    ]
+    cleaned["clarification_questions"] = _filter_answered_questions(
+        discovery.get("clarification_questions", []) or [], state
+    )
+    return cleaned
+
+
+def _filter_answered_requirement_questions(requirements: dict, state: DeliveryState) -> dict:
+    """Remove answered topics from the requirements open-question list."""
+    answered = _answered_clarification_topics(state)
+    if not answered:
+        return requirements
+
+    cleaned = dict(requirements)
+    cleaned["open_questions"] = [
+        item for item in requirements.get("open_questions", []) or []
+        if not (_question_topic(str(item)) in answered)
+    ]
+    return cleaned
+
+
+def _clean_downstream_items(items: list, state: DeliveryState) -> list:
+    """Drop stale clarification/confirmation items from downstream artifacts."""
+    answered = _answered_clarification_topics(state)
+    if not answered:
+        return list(items or [])
+
+    cleaned = []
+    stale_markers = (
+        "clarify", "clarification", "confirm", "confirmation",
+        "determine", "unknown", "uncertainty", "must be confirmed",
+        "needs to be confirmed", "needs confirmation",
+    )
+    for item in items or []:
+        text = str(item)
+        lower = text.lower()
+        topic = _question_topic(lower)
+        if topic in answered and any(marker in lower for marker in stale_markers):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _ground_downstream_artifact(artifact: dict, state: DeliveryState) -> dict:
+    """Prevent downstream agents from carrying answered blockers forward."""
+    if not isinstance(artifact, dict):
+        return artifact
+
+    cleaned = dict(artifact)
+    for key in (
+        "delivery_risks", "dependencies", "next_steps",
+        "risks_affecting_estimate",
+    ):
+        if isinstance(cleaned.get(key), list):
+            cleaned[key] = _clean_downstream_items(cleaned[key], state)
+
+    # Do not carry model-invented documentation claims as customer facts.
+    if isinstance(cleaned.get("assumptions"), list):
+        cleaned["assumptions"] = [
+            item for item in cleaned["assumptions"]
+            if "well-documented" not in str(item).lower()
+            and "well documented" not in str(item).lower()
+        ]
+    return cleaned
 
 def discovery_agent(
     state: DeliveryState,
@@ -305,23 +541,7 @@ def discovery_agent(
 ) -> dict:
 
     request = state["user_request"]
-    clarification_answers = state.get("clarification_answers", [])
-
-    clarification_context = ""
-
-    if clarification_answers:
-        clarification_context = f"""
-Previous clarification answers from the customer:
-
-{clarification_answers}
-
-Use these answers as new customer-provided facts.
-
-Re-evaluate the discovery using the updated information.
-
-Do not treat unanswered questions as answered.
-Do not invent information that is not present in the answers.
-"""
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior software delivery discovery consultant.
@@ -353,6 +573,19 @@ Original customer request:
         prompt=prompt,
         schema=DISCOVERY_SCHEMA,
     )
+    discovery = _filter_answered_discovery(discovery, state)
+
+    # The original request defines enterprise customers as the portal audience.
+    # Clarification about internal roles must not replace that customer audience.
+    source_text = " ".join([
+        str(discovery.get("problem") or ""),
+        str(discovery.get("business_goal") or ""),
+    ]).lower()
+    if "enterprise customers" in source_text:
+        users = list(discovery.get("users", []) or [])
+        if not any("enterprise customer" in str(item).lower() for item in users):
+            users.insert(0, "Enterprise customers")
+        discovery["users"] = users
 
     result = {
         "discovery": discovery,
@@ -362,6 +595,92 @@ Original customer request:
         result["iteration"] = state["iteration"]
 
     return result
+
+
+def _requirements_need_grounding_retry(discovery: dict, requirements: dict) -> bool:
+    """Detect common cases where the model promoted unknowns into requirements."""
+    unknown_text = " ".join(str(item) for item in discovery.get("unknowns", [])).lower()
+    all_requirements = [
+        *requirements.get("functional_requirements", []),
+        *requirements.get("non_functional_requirements", []),
+        *requirements.get("acceptance_criteria", []),
+    ]
+    requirement_text = " ".join(str(item) for item in all_requirements).lower()
+
+    unknown_markers = (
+        "user volume",
+        "data privacy regulations",
+        "security and compliance requirements",
+        "current state of salesforce integration",
+        "current state of entra id integration",
+        "desired user interface",
+    )
+    if any(marker in unknown_text and marker in requirement_text for marker in unknown_markers):
+        return True
+
+    confirmed_text = _flatten_confirmed_discovery(discovery)
+    for requirement in all_requirements:
+        numbers = re.findall(
+            r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\s*(?:users?|customers?|seconds?|ms|minutes?|hours?|days?|weeks?|months?))",
+            str(requirement).lower(),
+        )
+        if numbers and not all(token in confirmed_text for token in numbers):
+            return True
+    return False
+
+
+def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> dict:
+    """Remove unsupported commitments after the model pass."""
+    confirmed_text = _flatten_confirmed_discovery(discovery)
+    unknown_text = " ".join(str(item) for item in discovery.get("unknowns", [])).lower()
+
+    grounded = {
+        "functional_requirements": [],
+        "non_functional_requirements": [],
+        "acceptance_criteria": [],
+        "open_questions": list(requirements.get("open_questions", [])),
+        "contradictions": list(requirements.get("contradictions", [])),
+    }
+
+    unsupported_markers = (
+        "user volume",
+        "data privacy regulations",
+        "security and compliance requirements",
+        "current state of salesforce integration",
+        "current state of entra id integration",
+        "desired user interface",
+        "branding",
+    )
+
+    def is_grounded(text: str) -> bool:
+        lower = text.lower()
+        if any(marker in lower and marker in unknown_text for marker in unsupported_markers):
+            return False
+        numbers = re.findall(
+            r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\s*(?:users?|customers?|seconds?|ms|minutes?|hours?|days?|weeks?|months?))",
+            lower,
+        )
+        return not numbers or all(token in confirmed_text for token in numbers)
+
+    for key in ("functional_requirements", "non_functional_requirements", "acceptance_criteria"):
+        for item in requirements.get(key, []) or []:
+            text = str(item)
+            if is_grounded(text):
+                grounded[key].append(text)
+            else:
+                question = text
+                if "must" in question.lower():
+                    question = re.sub(
+                        r"^The portal must ",
+                        "What should the portal ",
+                        question,
+                        flags=re.I,
+                    )
+                    question = question.rstrip(".") + "?"
+                if question not in grounded["open_questions"]:
+                    grounded["open_questions"].append(question)
+
+    return grounded
 
 
 def requirements_agent(
@@ -406,6 +725,35 @@ IMPORTANT RULES:
         schema=REQUIREMENTS_SCHEMA,
     )
 
+    if _requirements_need_grounding_retry(discovery, requirements):
+        retry_prompt = f"""
+Rebuild the requirements artifact using a strict provenance rule.
+
+DISCOVERY (customer-confirmed facts only):
+{discovery}
+
+PREVIOUS REQUIREMENTS:
+{requirements}
+
+Rules:
+1. A confirmed requirement MUST be directly supported by customer-confirmed discovery facts or explicit customer constraints.
+2. NEVER convert discovery.unknowns into requirements.
+3. NEVER invent numeric commitments such as uptime, response time, user volume, performance targets, or compliance standards.
+4. If a detail is unknown, put the question in open_questions.
+5. Do not turn assumptions into confirmed requirements.
+6. Acceptance criteria may only test grounded requirements.
+7. Keep the customer's explicit launch deadline as a requirement/constraint.
+
+Return the complete requirements schema.
+"""
+        requirements = provider.generate_json(
+            prompt=retry_prompt,
+            schema=REQUIREMENTS_SCHEMA,
+        )
+
+    requirements = _ground_requirements_to_discovery(discovery, requirements)
+    requirements = _filter_answered_requirement_questions(requirements, state)
+
     has_any_requirements = any(
         requirements.get(key)
         for key in (
@@ -437,6 +785,8 @@ Acceptance criteria must be testable.
             prompt=retry_prompt,
             schema=REQUIREMENTS_SCHEMA,
         )
+        requirements = _ground_requirements_to_discovery(discovery, requirements)
+        requirements = _filter_answered_requirement_questions(requirements, state)
 
     return {
         "requirements": requirements,
@@ -464,11 +814,12 @@ REQUIREMENTS:
 
 {requirements}
 
-Your job is NOT to decide whether every question has been answered.
+Your job is to determine whether the project definition is ready
+for the next delivery stage.
 
-Your job is to decide whether there is enough information to
-perform the NEXT stage: solution shaping and preliminary delivery
-planning.
+Do NOT decide whether every question has been answered. Instead,
+decide whether there is enough information to perform the NEXT stage:
+solution shaping and preliminary delivery planning.
 
 Use two categories of uncertainty:
 
@@ -507,6 +858,12 @@ Decision rules:
   blockers.
 - If a question can reasonably be handled as an assumption, risk,
   dependency, or later refinement, classify it as non-blocking.
+- A deadline combined with an unresolved implementation option is NOT
+  a contradiction unless the available evidence demonstrates that the
+  deadline cannot be met under at least one viable implementation option.
+- An unresolved technical dependency is NOT automatically
+  customer-blocking. It becomes blocking only when a customer decision
+  is required before the next stage can produce useful work.
 - Do not invent answers.
 - If requirements contradict discovery, return NEEDS_INFO.
 
@@ -534,21 +891,228 @@ REQUIREMENTS:
         schema=VALIDATION_SCHEMA,
     )
 
+    # Never allow a validation model response to reopen a topic that the
+    # customer has already answered in a previous clarification iteration.
+    validation["questions"] = _filter_answered_questions(
+        validation.get("questions", []) or [],
+        state,
+    )
+    validation["non_blocking_questions"] = _filter_answered_questions(
+        validation.get("non_blocking_questions", []) or [],
+        state,
+    )
+
+    # Deterministic gate: some customer unknowns are sufficiently material
+    # that we must stop before solution/plan/estimate. This is deliberately
+    # a small, explicit set — we do not turn every open question into a blocker.
+    unknowns = [str(item).strip() for item in (discovery.get("unknowns", []) or []) if str(item).strip()]
+    open_questions = [str(item).strip() for item in (requirements.get("open_questions", []) or []) if str(item).strip()]
+    candidate_text = unknowns + open_questions
+
+    blocker_rules = [
+        (
+            ("compliance", "data privacy", "regulatory", "security and compliance"),
+            "What are the applicable security, compliance, and data privacy requirements?",
+            "Required to avoid choosing a solution that cannot satisfy mandatory legal, regulatory, or security constraints.",
+        ),
+        (
+            ("current level of integration with salesforce", "current state of salesforce integration", "salesforce integration"),
+            "What is the current level of integration with Salesforce?",
+            "Required to determine the integration approach and delivery effort rather than assuming the current integration state.",
+        ),
+        (
+            ("current level of integration with microsoft entra", "current state of entra id integration", "entra id integration"),
+            "What is the current level of integration with Microsoft Entra ID?",
+            "Required to determine the authentication/integration approach and delivery effort rather than assuming the current integration state.",
+        ),
+        (
+            ("user roles and permissions", "specific user roles", "user volume", "expected user volume"),
+            "What are the expected user roles/permissions and expected user volume?",
+            "Required to validate the access-control model and make a credible preliminary scalability and delivery assessment.",
+        ),
+    ]
+
+    existing_questions = {
+        str(item).strip().lower()
+        for item in (validation.get("questions", []) or [])
+        if str(item).strip()
+    }
+    blocking_questions = []
+    non_blocking_questions = [
+        str(item).strip()
+        for item in (validation.get("non_blocking_questions", []) or [])
+        if str(item).strip()
+    ]
+
+    # Minimum-scope gate: only stop for a genuinely vague request.
+    # Do not treat every discovery unknown as blocking. A concrete product
+    # capability plus at least one meaningful piece of delivery context is
+    # enough to continue; the remaining details can stay non-blocking.
+    functional_requirements = [
+        str(item).strip()
+        for item in (requirements.get("functional_requirements", []) or [])
+        if str(item).strip()
+    ]
+    capability_text = " ".join(functional_requirements).lower()
+    generic_capability_markers = (
+        "self-service interface",
+        "self service interface",
+        "provide a self-service interface",
+        "provide a self service interface",
+    )
+    has_concrete_capability = bool(functional_requirements) and not all(
+        any(marker in item.lower() for marker in generic_capability_markers)
+        for item in functional_requirements
+    )
+
+    meaningful_context_values = (
+        discovery.get("users", []),
+        discovery.get("stakeholders", []),
+        discovery.get("existing_systems", []),
+        discovery.get("constraints", []),
+    )
+    has_meaningful_context = any(
+        bool(value) for value in meaningful_context_values
+    )
+
+    if (
+        validation.get("status") == "READY"
+        and (not has_concrete_capability or not has_meaningful_context)
+    ):
+        minimum_scope_question = (
+            "What are the main capabilities the portal should provide, "
+            "and who will use it?"
+        )
+        if minimum_scope_question.lower() not in existing_questions:
+            blocking_questions.append(minimum_scope_question)
+            existing_questions.add(minimum_scope_question.lower())
+
+    # Contradictions are always blocking.
+    contradictions = [
+        str(item).strip()
+        for item in (requirements.get("contradictions", []) or [])
+        if str(item).strip()
+    ]
+    for contradiction in contradictions:
+        if contradiction.lower() not in existing_questions:
+            blocking_questions.append(contradiction)
+            existing_questions.add(contradiction.lower())
+
+    # Promote only explicit, material customer unknowns. Do not infer a
+    # blocker merely because the model mentioned a generic open question.
+    # Critically, an answered topic can never become a blocker again.
+    answered_topics = _answered_clarification_topics(state)
+    for unknown in candidate_text:
+        lowered = unknown.lower()
+        for markers, question, reason in blocker_rules:
+            if any(marker in lowered for marker in markers):
+                topic = _question_topic(question)
+                if topic and topic in answered_topics:
+                    break
+                if question.lower() not in existing_questions:
+                    blocking_questions.append(question)
+                    existing_questions.add(question.lower())
+                if question in non_blocking_questions:
+                    non_blocking_questions.remove(question)
+                break
+
+    # Preserve model-selected blockers, but normalize them as strings.
+    for question in (validation.get("questions", []) or []):
+        text = str(question).strip()
+        topic = _question_topic(text)
+        if topic and topic in answered_topics:
+            continue
+        if text and text.lower() not in {q.lower() for q in blocking_questions}:
+            blocking_questions.append(text)
+
+    status = "NEEDS_INFO" if blocking_questions else "READY"
+    reasons = [str(item).strip() for item in (validation.get("reasons", []) or []) if str(item).strip()]
+    if contradictions and not any("contradiction" in r.lower() for r in reasons):
+        reasons.append("Unresolved contradiction(s) must be clarified before the workflow can continue.")
+    if blocking_questions and status == "NEEDS_INFO" and not any("blocking" in r.lower() for r in reasons):
+        reasons.append("Material customer decisions remain unresolved and block the next delivery stage.")
+
+    validation = {
+        "status": status,
+        "reasons": reasons,
+        "questions": blocking_questions,
+        "blocking_questions": blocking_questions,
+        "non_blocking_questions": [
+            q for q in non_blocking_questions
+            if q.lower() not in {b.lower() for b in blocking_questions}
+        ],
+    }
+
     return {
         "validation": validation,
     }
 
 
 def clarification_agent(state: DeliveryState) -> dict:
-    """
-    Prepare the graph output for the customer clarification step.
-    """
+    """Build the human-in-the-loop clarification payload.
 
-    validation = state["validation"]
+    Validation questions remain useful non-blocking questions. Delivery
+    Review questions can be promoted to REQUIRED when a review blocker is
+    explicitly customer-answerable. Purely internal blockers never become
+    customer questions.
+    """
+    validation = state.get("validation", {}) or {}
+    review = state.get("delivery_review", {}) or {}
+    question_map = {}
+
+    def add_question(item, default_priority="RECOMMENDED"):
+        if isinstance(item, str):
+            question = item.strip()
+            if not question:
+                return
+            normalized = {
+                "question": question,
+                "priority": default_priority,
+                "reason": "",
+                "blocks_workflow": default_priority == "REQUIRED",
+            }
+        elif isinstance(item, dict):
+            question = str(item.get("question") or item.get("text") or "").strip()
+            if not question:
+                return
+            blocks = bool(item.get("blocks_workflow", default_priority == "REQUIRED"))
+            normalized = {
+                "question": question,
+                "priority": "REQUIRED" if blocks else str(item.get("priority") or default_priority).upper(),
+                "reason": str(item.get("reason") or ""),
+                "blocks_workflow": blocks,
+            }
+        else:
+            return
+
+        existing = question_map.get(question)
+        if existing is None:
+            question_map[question] = normalized
+        elif normalized["blocks_workflow"]:
+            existing.update({"priority": "REQUIRED", "blocks_workflow": True})
+            if not existing["reason"]:
+                existing["reason"] = normalized["reason"]
+
+    # Clarification is a human-in-the-loop stop. Show the customer only
+    # questions that actually block continuation. Non-blocking questions
+    # remain in validation and are carried forward, not dumped into the UI.
+    for item in validation.get("blocking_questions", []) or validation.get("questions", []) or []:
+        add_question(item, "REQUIRED")
+    for item in review.get("clarification_questions", []) or []:
+        add_question(item, "REQUIRED")
+
+    questions = _filter_answered_questions(list(question_map.values()), state)
+    blocking = [q for q in questions if q["blocks_workflow"]]
+    non_blocking = [q for q in questions if not q["blocks_workflow"]]
 
     return {
-        "clarification_questions": validation.get("questions", []),
-        "iteration": state.get("iteration", 1) + 1,
+        "clarification_questions": questions,
+        "blocking_questions": blocking,
+        "non_blocking_questions": non_blocking,
+        "clarification_history": list(state.get("clarification_history", []) or []),
+        "awaiting_customer": bool(blocking),
+        "workflow_status": "NEEDS_INFO" if blocking else "READY",
+        "current_stage": "clarification" if blocking else "validation",
     }
 
 
@@ -559,6 +1123,7 @@ def solution_shaping_agent(
 
     discovery = state["discovery"]
     requirements = state["requirements"]
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior Solution Architect and Delivery Lead.
@@ -574,6 +1139,8 @@ REQUIREMENTS:
 
 {requirements}
 
+{clarification_context}
+
 Rules:
 
 1. Stay within the information provided.
@@ -588,6 +1155,7 @@ Rules:
         prompt=prompt,
         schema=SOLUTION_SCHEMA,
     )
+    solution = _ground_downstream_artifact(solution, state)
 
     return {
         "solution": solution,
@@ -602,6 +1170,7 @@ def delivery_planning_agent(
     discovery = state["discovery"]
     requirements = state["requirements"]
     solution = state["solution"]
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior Delivery Manager.
@@ -621,6 +1190,8 @@ SOLUTION:
 
 {solution}
 
+{clarification_context}
+
 Rules:
 
 1. Create logical delivery phases.
@@ -635,6 +1206,7 @@ Rules:
         prompt=prompt,
         schema=PLAN_SCHEMA,
     )
+    plan = _ground_downstream_artifact(plan, state)
 
     return {
         "delivery_plan": plan,
@@ -650,6 +1222,7 @@ def estimation_agent(
     requirements = state["requirements"]
     solution = state["solution"]
     delivery_plan = state["delivery_plan"]
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior Delivery Manager preparing a preliminary estimate.
@@ -672,6 +1245,8 @@ DELIVERY PLAN:
 
 {delivery_plan}
 
+{clarification_context}
+
 Produce a preliminary estimate.
 
 IMPORTANT:
@@ -682,12 +1257,94 @@ IMPORTANT:
 4. State assumptions.
 5. State confidence.
 6. Identify risks that could materially change the estimate.
+7. Confidence must reflect the amount of unresolved delivery-critical information.
+   Use LOW confidence when material scope, UX, data, integration, budget,
+   migration, performance, or operational details remain open.
+8. Never describe an unresolved area as "well understood" or "fully defined".
+9. Explicitly distinguish customer-confirmed facts from planning assumptions.
+10. The estimate should be a preliminary planning range, not a commitment.
 """
 
     estimate = provider.generate_json(
         prompt=prompt,
         schema=ESTIMATE_SCHEMA,
     )
+
+    deadline_months = _parse_max_months(discovery.get("constraints", []))
+    estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+    if (
+        deadline_months is not None
+        and estimate_max_weeks is not None
+        and estimate_max_weeks > deadline_months * 4.345
+    ):
+        retry_prompt = f"""
+Recalculate the preliminary estimate using the explicit customer deadline as a hard delivery constraint.
+
+CUSTOMER DISCOVERY:
+{discovery}
+
+REQUIREMENTS:
+{requirements}
+
+SOLUTION:
+{solution}
+
+DELIVERY PLAN:
+{delivery_plan}
+
+PREVIOUS ESTIMATE:
+{estimate}
+
+The customer explicitly requires launch within {deadline_months:g} month(s).
+Produce a realistic range compatible with that target where the confirmed
+scope permits it. The estimate remains indicative, not contractual.
+Do not invent scope or false precision. If the scope genuinely cannot fit,
+state that clearly in risks, but do not inflate the estimate merely because
+more work could be imagined.
+"""
+        estimate = provider.generate_json(
+            prompt=retry_prompt,
+            schema=ESTIMATE_SCHEMA,
+        )
+
+    estimate = _ground_downstream_artifact(estimate, state)
+
+    # Keep the estimate honest when material discovery questions remain open.
+    # A preliminary estimate can still be produced, but its confidence must
+    # not imply that unresolved scope is already fully understood.
+    open_questions = (
+        state.get("requirements", {}) or {}
+    ).get("open_questions", []) or []
+    material_open_markers = (
+        "ui", "user interface", "data storage", "database", "performance",
+        "scalability", "third-party", "integration", "budget", "resource",
+        "migration", "training", "onboarding", "support", "maintenance",
+    )
+    material_open_count = sum(
+        1
+        for question in open_questions
+        if any(marker in str(question).lower() for marker in material_open_markers)
+    )
+    if material_open_count >= 2:
+        estimate["confidence"] = "LOW"
+
+    if isinstance(estimate.get("assumptions"), list):
+        normalized_assumptions = []
+        for item in estimate["assumptions"]:
+            text = str(item)
+            lower = text.lower()
+            if "security and compliance requirements are well understood" in lower:
+                text = (
+                    "The security and compliance baseline is based on current customer input; "
+                    "detailed technical controls may require refinement during solution design."
+                )
+            elif "security and compliance requirements are fully understood" in lower:
+                text = (
+                    "The security and compliance baseline is based on current customer input; "
+                    "detailed technical controls may require refinement during solution design."
+                )
+            normalized_assumptions.append(text)
+        estimate["assumptions"] = normalized_assumptions
 
     return {
         "estimate": estimate,
@@ -704,6 +1361,7 @@ def proposal_agent(
     solution = state["solution"]
     delivery_plan = state["delivery_plan"]
     estimate = state["estimate"]
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior Delivery Manager preparing a customer proposal.
@@ -730,6 +1388,8 @@ ESTIMATE:
 
 {estimate}
 
+{clarification_context}
+
 Rules:
 
 1. Clearly describe the customer problem and proposed solution.
@@ -743,6 +1403,7 @@ Rules:
         prompt=prompt,
         schema=PROPOSAL_SCHEMA,
     )
+    proposal = _ground_downstream_artifact(proposal, state)
 
     return {
         "proposal": proposal,
@@ -759,6 +1420,7 @@ def sow_agent(
     solution = state["solution"]
     delivery_plan = state["delivery_plan"]
     estimate = state["estimate"]
+    clarification_context = _clarification_context(state)
 
     prompt = f"""
 You are a senior Delivery Manager preparing a Statement of Work.
@@ -786,6 +1448,8 @@ ESTIMATE:
 
 {estimate}
 
+{clarification_context}
+
 Rules:
 
 1. Objectives must reflect the business goal.
@@ -801,6 +1465,7 @@ Rules:
         prompt=prompt,
         schema=SOW_SCHEMA,
     )
+    sow = _ground_downstream_artifact(sow, state)
 
     return {
         "sow": sow,
@@ -967,7 +1632,17 @@ Rules:
    not a blocker.
 7. Do not invent missing facts while reviewing.
 8. If an objective rule is violated, it MUST be BLOCKED, not READY.
-9. If there are no material blockers, return READY.
+9. If a blocking issue can be resolved by a concrete customer answer, add
+   an exact clarification question with priority REQUIRED and
+   blocks_workflow=true.
+10. If a blocker is purely internal and does not require a customer decision,
+    leave clarification_questions empty.
+11. Never classify a customer-answerable blocker as RECOMMENDED or OPTIONAL.
+12. Remaining non-blocking open questions may be carried forward as warnings,
+    but they must not be described as unresolved blockers.
+13. If there are no material blockers, return READY.
+14. READY does not mean every project detail is finalized; it means the
+    available information is sufficient to produce a preliminary delivery package.
 """
 
     review = provider.generate_json(
@@ -982,6 +1657,7 @@ Rules:
     )
 
     blocking_issues = list(review.get("blocking_issues", []))
+    clarification_questions = list(review.get("clarification_questions", []))
     warnings = list(review.get("warnings", []))
     checks = list(review.get("checks", []))
 
@@ -995,12 +1671,73 @@ Rules:
         if check not in checks:
             checks.append(check)
 
+    # Deterministic provenance blockers that are answerable by the customer
+    # get an explicit REQUIRED question. This prevents a valid review blocker
+    # from being exposed to the UI as merely a recommended question.
+    issue_question_map = {
+        "user volume": "What is the expected user volume?",
+        "security and compliance requirements": "What are the security and compliance requirements for the portal?",
+        "data privacy regulations": "What are the applicable data privacy and compliance requirements?",
+    }
+
+    existing_question_text = {
+        str(q.get("question", "")).strip().lower()
+        for q in clarification_questions
+        if isinstance(q, dict)
+    }
+
+    for issue in blocking_issues:
+        lowered = str(issue).lower()
+        for marker, question_text in issue_question_map.items():
+            if marker in lowered and question_text.lower() not in existing_question_text:
+                clarification_questions.append({
+                    "question": question_text,
+                    "priority": "REQUIRED",
+                    "reason": "The delivery review identified this customer decision as necessary to resolve the blocking issue.",
+                    "blocks_workflow": True,
+                })
+                existing_question_text.add(question_text.lower())
+                break
+
+    normalized_questions = []
+    # A READY review is not a hidden second clarification gate. Only review
+    # questions attached to actual blocking issues may reach the customer.
+    if blocking_issues:
+        for question in clarification_questions:
+            if not isinstance(question, dict):
+                continue
+            text = str(question.get("question") or question.get("text") or "").strip()
+            if not text:
+                continue
+            blocks = bool(question.get("blocks_workflow", False))
+            normalized_questions.append({
+                "question": text,
+                "priority": "REQUIRED" if blocks else "RECOMMENDED",
+                "reason": str(question.get("reason") or ""),
+                "blocks_workflow": blocks,
+            })
+
+    # Review must not claim that every detail is resolved when requirements
+    # intentionally carry non-blocking open questions forward.
+    open_questions = (requirements or {}).get("open_questions", []) or []
+    if open_questions and not blocking_issues:
+        checks = [
+            check
+            for check in checks
+            if "no unresolved details" not in str(check).lower()
+            and "all are flagged as required clarifications" not in str(check).lower()
+        ]
+        checks.append(
+            f"{len(open_questions)} non-blocking requirement question(s) remain explicitly carried forward as planning assumptions or follow-up items."
+        )
+
     status = "BLOCKED" if blocking_issues else "READY"
 
     return {
         "delivery_review": {
             "status": status,
             "blocking_issues": blocking_issues,
+            "clarification_questions": normalized_questions,
             "warnings": warnings,
             "checks": checks,
         },
