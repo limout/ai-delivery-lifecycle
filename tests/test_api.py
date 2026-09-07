@@ -22,6 +22,17 @@ def test_health():
     }
 
 
+def test_config_returns_mock_provider(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "mock")
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ai_provider": "mock",
+    }
+
+
 def test_analyze_needs_info():
     response = client.post(
         "/analyze",
@@ -108,3 +119,21 @@ def test_analyze_returns_503_when_ai_quota_is_exceeded():
     assert data["error"] == "AI_PROVIDER_QUOTA_EXCEEDED"
 
     app.dependency_overrides[get_provider] = MockProvider
+
+
+def test_mock_provider_is_selected_from_environment(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "mock")
+
+    provider = get_provider()
+
+    assert isinstance(provider, MockProvider)
+
+
+def test_unknown_provider_is_rejected(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "unknown")
+
+    try:
+        get_provider()
+        assert False, "Expected RuntimeError"
+    except RuntimeError as exc:
+        assert "Unsupported AI_PROVIDER" in str(exc)

@@ -1,3 +1,5 @@
+import os
+
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -7,6 +9,7 @@ from app.providers import (
     AIProvider,
     AIProviderQuotaError,
     GeminiProvider,
+    MockProvider,
 )
 
 
@@ -28,7 +31,17 @@ class ClarifyRequest(BaseModel):
 
 
 def get_provider() -> AIProvider:
-    return GeminiProvider()
+    provider_name = os.getenv("AI_PROVIDER", "gemini").lower()
+
+    if provider_name == "mock":
+        return MockProvider()
+
+    if provider_name == "gemini":
+        return GeminiProvider()
+
+    raise RuntimeError(
+        f"Unsupported AI_PROVIDER: {provider_name}"
+    )
 
 
 def run_workflow(
@@ -70,6 +83,16 @@ def workflow_response(result: dict) -> dict:
 def health() -> dict:
     return {
         "status": "ok",
+    }
+
+
+@app.get("/config")
+def config() -> dict:
+    return {
+        "ai_provider": os.getenv(
+            "AI_PROVIDER",
+            "gemini",
+        ).lower(),
     }
 
 
