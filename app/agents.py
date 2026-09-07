@@ -56,43 +56,22 @@ REQUIREMENTS_SCHEMA = {
         "functional_requirements": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Specific system capabilities or user-facing behaviors "
-                "that are supported by the discovery information."
-            ),
         },
         "non_functional_requirements": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Quality attributes or technical constraints such as "
-                "security, performance, availability, accessibility, "
-                "or compliance. Only include justified requirements."
-            ),
         },
         "acceptance_criteria": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Observable conditions that can be used to determine "
-                "whether the requirements have been satisfied."
-            ),
         },
         "open_questions": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Questions that must be answered before the requirements "
-                "can be considered sufficiently defined."
-            ),
         },
         "contradictions": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Contradictions or inconsistencies found in the discovery "
-                "information. Empty if none are identified."
-            ),
         },
     },
     "required": [
@@ -101,6 +80,30 @@ REQUIREMENTS_SCHEMA = {
         "acceptance_criteria",
         "open_questions",
         "contradictions",
+    ],
+}
+
+
+VALIDATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["READY", "NEEDS_INFO"],
+        },
+        "reasons": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "questions": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "status",
+        "reasons",
+        "questions",
     ],
 }
 
@@ -163,8 +166,8 @@ def requirements_agent(
     prompt = f"""
 You are a senior Business Analyst and Software Requirements Engineer.
 
-Your job is to transform structured discovery information into
-an initial requirements definition.
+Transform the structured discovery below into an initial
+requirements definition.
 
 DISCOVERY:
 
@@ -172,19 +175,16 @@ DISCOVERY:
 
 IMPORTANT RULES:
 
-1. Only derive requirements that are supported by the discovery.
-2. Do not invent detailed features simply because they are common
-   for this type of product.
-3. Distinguish clearly between requirements and open questions.
+1. Only derive requirements supported by the discovery.
+2. Do not invent detailed features.
+3. Distinguish requirements from open questions.
 4. Functional requirements describe what the system should do.
-5. Non-functional requirements describe qualities or constraints
-   such as security, performance, availability, accessibility,
-   or compliance.
+5. Non-functional requirements describe justified qualities or
+   constraints such as security, performance, availability,
+   accessibility, or compliance.
 6. Acceptance criteria must be observable and testable.
-7. If discovery information is insufficient, put the missing
-   information into open_questions.
-8. Identify contradictions if the discovery contains conflicting
-   information.
+7. If information is insufficient, put it into open_questions.
+8. Identify contradictions.
 9. Do not treat assumptions as confirmed requirements.
 """
 
@@ -194,3 +194,60 @@ IMPORTANT RULES:
     )
 
     return {"requirements": requirements}
+
+
+def validation_agent(
+    state: DeliveryState,
+    provider: AIProvider,
+) -> dict:
+    """
+    AI Validation Agent.
+
+    Reviews Discovery and Requirements and decides whether the
+    workflow has enough information to continue.
+    """
+
+    discovery = state["discovery"]
+    requirements = state["requirements"]
+
+    prompt = f"""
+You are a senior Delivery Lead reviewing a project before
+solution shaping and estimation.
+
+Review the Discovery and Requirements below.
+
+DISCOVERY:
+
+{discovery}
+
+REQUIREMENTS:
+
+{requirements}
+
+Your job is to decide whether the project definition is
+sufficient to continue.
+
+Return READY only when the information is sufficiently clear
+for the next delivery stage.
+
+Return NEEDS_INFO when important information is still missing.
+
+IMPORTANT:
+
+1. Do not reject a project merely because every possible detail
+   is unknown.
+2. Focus on information that materially affects scope, solution,
+   security, integrations, delivery feasibility, or estimation.
+3. Do not invent answers.
+4. If information is missing, explain why it matters.
+5. Provide concrete clarification questions.
+6. If requirements contradict discovery, return NEEDS_INFO.
+7. Questions should be useful for a real customer conversation.
+"""
+
+    validation = provider.generate_json(
+        prompt=prompt,
+        schema=VALIDATION_SCHEMA,
+    )
+
+    return {"validation": validation}

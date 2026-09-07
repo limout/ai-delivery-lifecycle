@@ -2,17 +2,31 @@ from functools import partial
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agents import discovery_agent, requirements_agent
+from app.agents import (
+    discovery_agent,
+    requirements_agent,
+    validation_agent,
+)
 from app.providers import AIProvider, GeminiProvider
 from app.state import DeliveryState
+
+
+def route_after_validation(state: DeliveryState) -> str:
+    """
+    Decide where the workflow should go after validation.
+    """
+
+    status = state["validation"]["status"]
+
+    if status == "READY":
+        return "ready"
+
+    return "needs_info"
 
 
 def build_graph(provider: AIProvider | None = None):
     """
     Build the delivery lifecycle graph.
-
-    If no provider is supplied, Gemini is used.
-    Tests can inject MockProvider.
     """
 
     if provider is None:
@@ -30,8 +44,35 @@ def build_graph(provider: AIProvider | None = None):
         partial(requirements_agent, provider=provider),
     )
 
+    graph.add_node(
+        "validation",
+        partial(validation_agent, provider=provider),
+    )
+
+    graph.add_node(
+        "ready",
+        lambda state: {},
+    )
+
+    graph.add_node(
+        "needs_info",
+        lambda state: {},
+    )
+
     graph.add_edge(START, "discovery")
     graph.add_edge("discovery", "requirements")
-    graph.add_edge("requirements", END)
+    graph.add_edge("requirements", "validation")
+
+    graph.add_conditional_edges(
+        "validation",
+        route_after_validation,
+        {
+            "ready": "ready",
+            "needs_info": "needs_info",
+        },
+    )
+
+    graph.add_edge("ready", END)
+    graph.add_edge("needs_info", END)
 
     return graph.compile()

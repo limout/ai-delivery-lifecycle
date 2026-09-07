@@ -9,3 +9,4 @@ class DeliveryState(TypedDict, total=False):
     user_request: str
     discovery: dict
     requirements: dict
+    validation: dict

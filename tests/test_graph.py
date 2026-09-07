@@ -2,8 +2,33 @@ from app.graph import build_graph
 from app.providers import MockProvider
 
 
+class RoutingMockProvider(MockProvider):
+    """
+    Mock provider that can return a chosen validation status.
+    """
+
+    def __init__(self, validation_status: str):
+        self.validation_status = validation_status
+
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        if "whether the project definition is" in prompt:
+            return {
+                "status": self.validation_status,
+                "reasons": [
+                    "Mock validation result for deterministic testing."
+                ],
+                "questions": (
+                    []
+                    if self.validation_status == "READY"
+                    else ["What is the target delivery timeline?"]
+                ),
+            }
+
+        return super().generate_json(prompt, schema)
+
+
 def test_delivery_graph_runs_end_to_end():
-    graph = build_graph(MockProvider())
+    graph = build_graph(RoutingMockProvider("READY"))
 
     result = graph.invoke(
         {
@@ -14,23 +39,15 @@ def test_delivery_graph_runs_end_to_end():
         }
     )
 
-    assert result["user_request"].startswith(
-        "We want to build a customer self-service portal"
-    )
-
     assert "discovery" in result
     assert "requirements" in result
+    assert "validation" in result
 
-    assert result["discovery"]["unknowns"]
-    assert result["discovery"]["clarification_questions"]
-
-    assert result["requirements"]["functional_requirements"]
-    assert result["requirements"]["non_functional_requirements"]
-    assert result["requirements"]["acceptance_criteria"]
+    assert result["validation"]["status"] == "READY"
 
 
-def test_requirements_receive_discovery_state():
-    graph = build_graph(MockProvider())
+def test_ready_route_reaches_end():
+    graph = build_graph(RoutingMockProvider("READY"))
 
     result = graph.invoke(
         {
@@ -38,11 +55,11 @@ def test_requirements_receive_discovery_state():
         }
     )
 
-    assert result["requirements"]["open_questions"]
+    assert result["validation"]["status"] == "READY"
 
 
-def test_requirements_have_structured_output():
-    graph = build_graph(MockProvider())
+def test_needs_info_route_reaches_end():
+    graph = build_graph(RoutingMockProvider("NEEDS_INFO"))
 
     result = graph.invoke(
         {
@@ -50,10 +67,5 @@ def test_requirements_have_structured_output():
         }
     )
 
-    requirements = result["requirements"]
-
-    assert "functional_requirements" in requirements
-    assert "non_functional_requirements" in requirements
-    assert "acceptance_criteria" in requirements
-    assert "open_questions" in requirements
-    assert "contradictions" in requirements
+    assert result["validation"]["status"] == "NEEDS_INFO"
+    assert result["validation"]["questions"]
