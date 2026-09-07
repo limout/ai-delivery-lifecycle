@@ -6,33 +6,65 @@
     <title>AI Delivery Lifecycle</title>
 
     <style>
+        * {
+            box-sizing: border-box;
+        }
+
         body {
+            margin: 0;
             font-family: Arial, sans-serif;
-            max-width: 1100px;
-            margin: 40px auto;
-            padding: 0 20px;
-            background: #f5f7fa;
+            background: #f4f6f8;
             color: #1f2937;
         }
 
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px 20px 60px;
+        }
+
+        header {
+            margin-bottom: 28px;
+        }
+
         h1 {
-            margin-bottom: 8px;
+            margin: 0 0 8px;
+            font-size: 30px;
         }
 
         .subtitle {
             color: #6b7280;
-            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 22px;
+            margin-bottom: 18px;
+        }
+
+        .card-title {
+            margin: 0 0 18px;
+            font-size: 19px;
         }
 
         textarea {
             width: 100%;
             min-height: 150px;
             padding: 14px;
-            box-sizing: border-box;
             border: 1px solid #d1d5db;
             border-radius: 8px;
-            font-size: 16px;
+            font: inherit;
+            line-height: 1.5;
             resize: vertical;
+        }
+
+        textarea:focus,
+        input:focus {
+            outline: 2px solid #93c5fd;
+            border-color: #2563eb;
         }
 
         button {
@@ -46,25 +78,32 @@
             cursor: pointer;
         }
 
+        button:hover {
+            background: #1d4ed8;
+        }
+
         button:disabled {
             background: #9ca3af;
             cursor: not-allowed;
         }
 
-        .card {
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            margin-top: 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        .hidden {
+            display: none !important;
+        }
+
+        .status-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 22px;
         }
 
         .status {
             display: inline-block;
-            padding: 6px 10px;
-            border-radius: 6px;
+            padding: 6px 11px;
+            border-radius: 999px;
+            font-size: 13px;
             font-weight: bold;
-            margin-bottom: 15px;
         }
 
         .ready {
@@ -77,70 +116,129 @@
             color: #92400e;
         }
 
-        .error {
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 12px;
-            border-radius: 7px;
-            margin-top: 20px;
+        .iteration {
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+        }
+
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .field {
+            margin-bottom: 18px;
+        }
+
+        .field:last-child {
+            margin-bottom: 0;
+        }
+
+        .field-label {
+            font-size: 13px;
+            font-weight: bold;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 7px;
+        }
+
+        .field-value {
+            line-height: 1.55;
         }
 
         ul {
-            padding-left: 22px;
+            margin: 8px 0 0;
+            padding-left: 21px;
         }
 
-        .hidden {
-            display: none;
+        li {
+            margin-bottom: 7px;
+            line-height: 1.45;
         }
 
-        .section {
-            margin-top: 18px;
+        .empty {
+            color: #9ca3af;
+            font-style: italic;
         }
 
-        .section h3 {
+        .validation-reason {
+            padding: 10px 12px;
+            background: #fffbeb;
+            border-left: 3px solid #f59e0b;
+            border-radius: 5px;
             margin-bottom: 8px;
-        }
-
-        #questions {
-            margin-top: 20px;
+            line-height: 1.45;
         }
 
         .question {
-            margin-bottom: 12px;
+            margin-bottom: 16px;
         }
 
         .question label {
             display: block;
+            margin-bottom: 7px;
             font-weight: bold;
-            margin-bottom: 5px;
+            line-height: 1.45;
         }
 
         .question input {
             width: 100%;
-            padding: 10px;
-            box-sizing: border-box;
+            padding: 11px;
             border: 1px solid #d1d5db;
-            border-radius: 6px;
+            border-radius: 7px;
+            font: inherit;
         }
 
-        pre {
-            white-space: pre-wrap;
-            word-break: break-word;
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+            padding: 13px;
+            border-radius: 8px;
+            margin-bottom: 18px;
+        }
+
+        .loading {
+            color: #6b7280;
+            margin-top: 12px;
+        }
+
+        @media (max-width: 800px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .full-width {
+                grid-column: auto;
+            }
+
+            .container {
+                padding-top: 20px;
+            }
         }
     </style>
 </head>
 
 <body>
 
-    <h1>AI Delivery Lifecycle</h1>
+<div class="container">
 
-    <div class="subtitle">
-        Transform an ambiguous customer request into structured
-        discovery, requirements and delivery validation.
-    </div>
+    <header>
+        <h1>AI Delivery Lifecycle</h1>
+        <div class="subtitle">
+            Transform an ambiguous customer request into structured
+            discovery, requirements and delivery validation.
+        </div>
+    </header>
 
     <div class="card">
-        <h2>Customer Request</h2>
+        <h2 class="card-title">Customer Request</h2>
 
         <textarea
             id="request"
@@ -148,35 +246,123 @@
         ></textarea>
 
         <button id="analyzeButton" onclick="analyze()">
-            Analyze
+            Analyze Request
         </button>
+
+        <div id="loading" class="loading hidden">
+            Running delivery workflow...
+        </div>
     </div>
 
     <div id="error" class="error hidden"></div>
 
-    <div id="result" class="card hidden">
+    <div id="result" class="hidden">
 
-        <div>
-            <span id="status" class="status"></span>
+        <div class="card">
+            <div class="status-row">
+                <span id="status" class="status"></span>
+                <span id="iteration" class="iteration"></span>
+            </div>
+
+            <div class="grid">
+
+                <div class="field">
+                    <div class="field-label">Problem</div>
+                    <div id="problem" class="field-value"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">Business Goal</div>
+                    <div id="businessGoal" class="field-value"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">Users</div>
+                    <div id="users" class="field-value"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">Stakeholders</div>
+                    <div id="stakeholders" class="field-value"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">Existing Systems</div>
+                    <div id="existingSystems" class="field-value"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">Constraints</div>
+                    <div id="constraints" class="field-value"></div>
+                </div>
+
+            </div>
         </div>
 
-        <div class="section">
-            <h3>Discovery</h3>
-            <pre id="discovery"></pre>
+
+        <div class="card">
+            <h2 class="card-title">Requirements</h2>
+
+            <div class="grid">
+
+                <div class="field">
+                    <div class="field-label">
+                        Functional Requirements
+                    </div>
+                    <div id="functionalRequirements"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        Non-Functional Requirements
+                    </div>
+                    <div id="nonFunctionalRequirements"></div>
+                </div>
+
+                <div class="field full-width">
+                    <div class="field-label">
+                        Acceptance Criteria
+                    </div>
+                    <div id="acceptanceCriteria"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        Open Questions
+                    </div>
+                    <div id="openQuestions"></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        Contradictions
+                    </div>
+                    <div id="contradictions"></div>
+                </div>
+
+            </div>
         </div>
 
-        <div class="section">
-            <h3>Requirements</h3>
-            <pre id="requirements"></pre>
+
+        <div class="card">
+            <h2 class="card-title">Validation</h2>
+
+            <div class="field">
+                <div class="field-label">Assessment</div>
+                <div id="validationStatus"></div>
+            </div>
+
+            <div class="field">
+                <div class="field-label">Why</div>
+                <div id="validationReasons"></div>
+            </div>
         </div>
 
-        <div class="section">
-            <h3>Validation</h3>
-            <pre id="validation"></pre>
-        </div>
 
-        <div id="questions" class="section hidden">
-            <h3>Clarification Questions</h3>
+        <div id="questions" class="card hidden">
+            <h2 class="card-title">
+                Clarification Questions
+            </h2>
 
             <div id="questionList"></div>
 
@@ -187,9 +373,13 @@
 
     </div>
 
+</div>
+
+
 <script>
 
 let currentIteration = 1;
+
 
 function showError(message) {
     const element = document.getElementById("error");
@@ -198,38 +388,145 @@ function showError(message) {
     element.classList.remove("hidden");
 }
 
+
 function clearError() {
     document.getElementById("error").classList.add("hidden");
 }
 
+
+function renderList(elementId, items) {
+
+    const element = document.getElementById(elementId);
+
+    element.innerHTML = "";
+
+    if (!items || items.length === 0) {
+        element.innerHTML =
+            '<span class="empty">None identified</span>';
+        return;
+    }
+
+    const list = document.createElement("ul");
+
+    items.forEach(item => {
+        const li = document.createElement("li");
+        li.textContent = item;
+        list.appendChild(li);
+    });
+
+    element.appendChild(list);
+}
+
+
 function renderResult(data) {
 
     const result = document.getElementById("result");
-    const status = document.getElementById("status");
 
     result.classList.remove("hidden");
 
+    const status = document.getElementById("status");
+
     status.textContent = data.status;
 
-    status.className = "status " +
-        (data.status === "READY" ? "ready" : "needs-info");
+    status.className =
+        "status " +
+        (data.status === "READY"
+            ? "ready"
+            : "needs-info");
 
-    document.getElementById("discovery").textContent =
-        JSON.stringify(data.discovery, null, 2);
-
-    document.getElementById("requirements").textContent =
-        JSON.stringify(data.requirements, null, 2);
-
-    document.getElementById("validation").textContent =
-        JSON.stringify(data.validation, null, 2);
 
     currentIteration = data.iteration || 1;
 
-    const questions = data.clarification_questions || [];
-    const questionsContainer = document.getElementById("questions");
-    const questionList = document.getElementById("questionList");
+    document.getElementById("iteration").textContent =
+        `Workflow iteration ${currentIteration}`;
+
+
+    const discovery = data.discovery || {};
+
+    document.getElementById("problem").textContent =
+        discovery.problem || "Not identified";
+
+    document.getElementById("businessGoal").textContent =
+        discovery.business_goal || "Not identified";
+
+
+    renderList("users", discovery.users);
+    renderList("stakeholders", discovery.stakeholders);
+    renderList("existingSystems", discovery.existing_systems);
+    renderList("constraints", discovery.constraints);
+
+
+    const requirements = data.requirements || {};
+
+    renderList(
+        "functionalRequirements",
+        requirements.functional_requirements
+    );
+
+    renderList(
+        "nonFunctionalRequirements",
+        requirements.non_functional_requirements
+    );
+
+    renderList(
+        "acceptanceCriteria",
+        requirements.acceptance_criteria
+    );
+
+    renderList(
+        "openQuestions",
+        requirements.open_questions
+    );
+
+    renderList(
+        "contradictions",
+        requirements.contradictions
+    );
+
+
+    const validation = data.validation || {};
+
+    document.getElementById("validationStatus").textContent =
+        validation.status || data.status;
+
+
+    const reasonsElement =
+        document.getElementById("validationReasons");
+
+    reasonsElement.innerHTML = "";
+
+    if (
+        !validation.reasons ||
+        validation.reasons.length === 0
+    ) {
+        reasonsElement.innerHTML =
+            '<span class="empty">No blocking issues identified.</span>';
+    } else {
+
+        validation.reasons.forEach(reason => {
+
+            const div =
+                document.createElement("div");
+
+            div.className = "validation-reason";
+            div.textContent = reason;
+
+            reasonsElement.appendChild(div);
+        });
+    }
+
+
+    const questions =
+        data.clarification_questions || [];
+
+    const questionsContainer =
+        document.getElementById("questions");
+
+    const questionList =
+        document.getElementById("questionList");
 
     questionList.innerHTML = "";
+
 
     if (questions.length > 0) {
 
@@ -237,15 +534,25 @@ function renderResult(data) {
 
         questions.forEach((question, index) => {
 
-            const wrapper = document.createElement("div");
+            const wrapper =
+                document.createElement("div");
+
             wrapper.className = "question";
 
-            const label = document.createElement("label");
-            label.textContent = question;
 
-            const input = document.createElement("input");
+            const label =
+                document.createElement("label");
+
+            label.textContent =
+                `${index + 1}. ${question}`;
+
+
+            const input =
+                document.createElement("input");
+
             input.type = "text";
             input.id = `answer-${index}`;
+
 
             wrapper.appendChild(label);
             wrapper.appendChild(input);
@@ -254,6 +561,7 @@ function renderResult(data) {
         });
 
     } else {
+
         questionsContainer.classList.add("hidden");
     }
 }
@@ -263,40 +571,51 @@ async function analyze() {
 
     clearError();
 
-    const request = document
-        .getElementById("request")
-        .value
-        .trim();
+    const request =
+        document.getElementById("request").value.trim();
+
 
     if (!request) {
         showError("Please enter a customer request.");
         return;
     }
 
-    const button = document.getElementById("analyzeButton");
+
+    const button =
+        document.getElementById("analyzeButton");
 
     button.disabled = true;
+
     button.textContent = "Analyzing...";
+
+    document
+        .getElementById("loading")
+        .classList.remove("hidden");
+
 
     try {
 
-        const response = await fetch("/analyze", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                user_request: request
-            })
-        });
+        const response =
+            await fetch("/analyze", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    user_request: request
+                })
+            });
+
 
         const data = await response.json();
+
 
         if (!response.ok) {
             throw new Error(
                 data.message || "Workflow failed."
             );
         }
+
 
         renderResult(data);
 
@@ -307,7 +626,13 @@ async function analyze() {
     } finally {
 
         button.disabled = false;
-        button.textContent = "Analyze";
+
+        button.textContent =
+            "Analyze Request";
+
+        document
+            .getElementById("loading")
+            .classList.add("hidden");
     }
 }
 
@@ -316,48 +641,65 @@ async function clarify() {
 
     clearError();
 
-    const request = document
-        .getElementById("request")
-        .value
-        .trim();
+
+    const request =
+        document.getElementById("request").value.trim();
+
 
     const questions =
-        document.querySelectorAll("#questionList input");
+        document.querySelectorAll(
+            "#questionList input"
+        );
+
 
     const answers = [];
 
+
     questions.forEach(input => {
-        if (input.value.trim()) {
-            answers.push(input.value.trim());
+
+        const answer =
+            input.value.trim();
+
+        if (answer) {
+            answers.push(answer);
         }
     });
 
+
     if (answers.length === 0) {
-        showError("Please answer at least one question.");
+        showError(
+            "Please answer at least one question."
+        );
         return;
     }
 
+
     try {
 
-        const response = await fetch("/clarify", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                user_request: request,
-                clarification_answers: answers,
-                iteration: currentIteration
-            })
-        });
+        const response =
+            await fetch("/clarify", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    user_request: request,
+                    clarification_answers: answers,
+                    iteration: currentIteration
+                })
+            });
 
-        const data = await response.json();
+
+        const data =
+            await response.json();
+
 
         if (!response.ok) {
             throw new Error(
                 data.message || "Clarification failed."
             );
         }
+
 
         renderResult(data);
 
