@@ -11,6 +11,7 @@ DISCOVERY_SCHEMA = {
         "users": {"type": "array", "items": {"type": "string"}},
         "stakeholders": {"type": "array", "items": {"type": "string"}},
         "existing_systems": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": "array", "items": {"type": "string"}},
         "constraints": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "unknowns": {"type": "array", "items": {"type": "string"}},
@@ -25,6 +26,7 @@ DISCOVERY_SCHEMA = {
         "users",
         "stakeholders",
         "existing_systems",
+        "scope",
         "constraints",
         "assumptions",
         "unknowns",
@@ -590,10 +592,13 @@ IMPORTANT RULES:
 5. Customer clarification answers are authoritative customer input.
 6. If a previous unknown has now been answered, remove it from
    unknowns where appropriate.
-7. Think like a Delivery Lead preparing the project for requirements
+7. Preserve every concrete customer-stated capability in the explicit
+   scope field. Scope must describe confirmed system capabilities, not
+   inferred implementation details.
+8. Think like a Delivery Lead preparing the project for requirements
    and later estimation.
-8. The input may be vague, incomplete, or informal.
-9. Never state or imply that the current infrastructure is inadequate,
+9. The input may be vague, incomplete, or informal.
+10. Never state or imply that the current infrastructure is inadequate,
    not scalable, or otherwise deficient unless the customer explicitly
    confirmed that fact. If scalability for Black Friday traffic is unknown,
    record it as unconfirmed/unknown rather than as an assumption presented
@@ -610,6 +615,17 @@ Original customer request:
         prompt=prompt,
         schema=DISCOVERY_SCHEMA,
     )
+
+    # Preserve an explicitly labelled customer scope even if the discovery model
+    # omits or weakens it. This is customer provenance, not model inference.
+    explicit_scope_items = _extract_explicit_scope_items(request)
+    if explicit_scope_items:
+        # Explicit customer scope is authoritative. Do not merge model-generated
+        # paraphrases into it, otherwise provenance and downstream grounding become noisy.
+        discovery["scope"] = explicit_scope_items
+    elif not isinstance(discovery.get("scope"), list):
+        discovery["scope"] = []
+
     # Preserve explicit customer timeline facts even if the discovery model omits
     # them from structured constraints. These facts are authoritative provenance
     # for the estimation stage.
@@ -796,6 +812,9 @@ DISCOVERY:
 
 {discovery}
 
+The explicit customer scope in Discovery is authoritative customer input.
+Preserve it when deriving functional requirements.
+
 IMPORTANT RULES:
 
 1. Only derive requirements supported by the discovery.
@@ -848,41 +867,18 @@ Return the complete requirements schema.
         )
 
     requirements = _ground_requirements_to_discovery(discovery, requirements)
+
+    # If the customer explicitly provided concrete scope, preserve that scope as
+    # functional requirements even when the local model returns an empty artifact.
+    # This is deterministic provenance preservation, not feature inference.
+    explicit_scope_items = _extract_explicit_scope_items(state.get("user_request", ""))
+    if explicit_scope_items and not requirements.get("functional_requirements"):
+        functional_requirements = []
+        for item in explicit_scope_items:
+            functional_requirements.extend(_scope_item_to_requirements(item))
+        requirements["functional_requirements"] = functional_requirements
+
     requirements = _filter_answered_requirement_questions(requirements, state)
-
-    has_any_requirements = any(
-        requirements.get(key)
-        for key in (
-            "functional_requirements",
-            "non_functional_requirements",
-            "acceptance_criteria",
-        )
-    )
-
-    if not has_any_requirements and (
-        discovery.get("problem")
-        or discovery.get("business_goal")
-        or discovery.get("users")
-        or discovery.get("constraints")
-    ):
-        retry_prompt = f"""
-The previous requirements response was empty. Re-do the requirements
-analysis using ONLY the discovery below.
-
-DISCOVERY:
-{discovery}
-
-Return at least the concrete functional and/or non-functional
-requirements that are directly supported by the discovery. Do not
-invent features. Put unresolved details into open_questions.
-Acceptance criteria must be testable.
-"""
-        requirements = provider.generate_json(
-            prompt=retry_prompt,
-            schema=REQUIREMENTS_SCHEMA,
-        )
-        requirements = _ground_requirements_to_discovery(discovery, requirements)
-        requirements = _filter_answered_requirement_questions(requirements, state)
 
     return {
         "requirements": requirements,
@@ -1085,19 +1081,62 @@ REQUIREMENTS:
         for item in functional_requirements
     )
 
-    meaningful_context_values = (
-        discovery.get("users", []),
-        discovery.get("stakeholders", []),
-        discovery.get("existing_systems", []),
-        discovery.get("constraints", []),
+    # Requirements can legitimately be empty after deterministic grounding,
+    # even when Discovery already contains enough concrete scope to proceed.
+    # Use Discovery as the fallback source of scope instead of treating an
+    # empty LLM requirements artifact as proof that the request is vague.
+    discovery_scope_text = " ".join(
+        str(discovery.get(key, ""))
+        for key in (
+            "problem",
+            "business_goal",
+            "users",
+            "scope",
+            "existing_systems",
+            "constraints",
+        )
+    ).lower()
+    discovery_capability_markers = (
+        "manage",
+        "submit",
+        "track",
+        "view",
+        "create",
+        "update",
+        "request",
+        "portal",
+        "self-service",
+        "self service",
     )
-    has_meaningful_context = any(
-        bool(value) for value in meaningful_context_values
+    has_discovery_capability = any(
+        marker in discovery_scope_text for marker in discovery_capability_markers
+    )
+
+    # Meaningful delivery context should be concrete rather than a generic
+    # placeholder such as "No specific constraints mentioned". Existing
+    # systems are especially strong evidence that the solution direction is
+    # already grounded.
+    meaningful_constraints = [
+        str(item).strip()
+        for item in (discovery.get("constraints", []) or [])
+        if str(item).strip()
+        and str(item).strip().lower() not in {
+            "no specific constraints mentioned",
+            "no constraints mentioned",
+        }
+    ]
+    has_meaningful_context = bool(
+        discovery.get("existing_systems")
+        or meaningful_constraints
+    )
+
+    has_usable_scope = has_concrete_capability or (
+        has_discovery_capability and has_meaningful_context
     )
 
     if (
         validation.get("status") == "READY"
-        and (not has_concrete_capability or not has_meaningful_context)
+        and not has_usable_scope
     ):
         minimum_scope_question = (
             "What are the main capabilities the portal should provide, "
@@ -1106,38 +1145,6 @@ REQUIREMENTS:
         if minimum_scope_question.lower() not in existing_questions:
             blocking_questions.append(minimum_scope_question)
             existing_questions.add(minimum_scope_question.lower())
-
-    # Explicit lifecycle contract: a request with no customer-provided delivery
-    # timeline must stop for clarification. This is based on authoritative
-    # customer input, not model-generated assumptions.
-    customer_text = " ".join(
-        [
-            str(state.get("user_request") or ""),
-            *[
-                str(item.get("answer") or "")
-                for item in (state.get("clarification_history", []) or [])
-                if isinstance(item, dict)
-            ],
-            *[str(item) for item in (state.get("clarification_answers", []) or [])],
-        ]
-    ).lower()
-
-    timeline_patterns = (
-        r"\b\d+(?:[.,]\d+)?\s*(?:day|days|week|weeks|month|months|year|years)\b",
-        r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:day|days|week|weeks|month|months|year|years)\b",
-        r"\bby\s+(?:q[1-4]|end of|the end of|[a-z]+\s+\d{4})\b",
-    )
-    has_customer_timeline = any(
-        re.search(pattern, customer_text) for pattern in timeline_patterns
-    )
-    if not has_customer_timeline:
-        timeline_question = "What is the target delivery timeline?"
-        if timeline_question.lower() not in {q.lower() for q in blocking_questions}:
-            blocking_questions.append(timeline_question)
-        non_blocking_questions = [
-            q for q in non_blocking_questions
-            if q.lower() != timeline_question.lower()
-        ]
 
     # Contradictions are always blocking.
     contradictions = [
@@ -1991,10 +1998,61 @@ def _flatten_confirmed_discovery(discovery: dict) -> str:
         "users",
         "stakeholders",
         "existing_systems",
+        "scope",
         "constraints",
     )
     values = [discovery.get(key, "") for key in confirmed_keys]
     return " ".join(str(value) for value in values).lower()
+
+
+def _scope_item_to_requirements(scope_item: str) -> list[str]:
+    """Convert explicit customer capabilities into minimal functional requirements."""
+    text = str(scope_item or "").strip().rstrip(".")
+    match = re.match(r"^customers?\s+can\s+(.+)$", text, re.I)
+    if match:
+        capabilities = match.group(1).strip()
+        parts = re.split(r",\s*|\s+and\s+", capabilities, flags=re.I)
+        parts = [part.strip() for part in parts if part.strip()]
+        # Only split a compound list when all resulting parts are short capability
+        # phrases; otherwise preserve the original customer statement verbatim.
+        if len(parts) >= 2 and len(parts) <= 6:
+            return [f"The portal shall allow customers to {part}." for part in parts]
+        return [f"The portal shall allow customers to {capabilities}."]
+    match = re.match(r"^users?\s+can\s+(.+)$", text, re.I)
+    if match:
+        return [f"The portal shall allow users to {match.group(1).strip()}."]
+    return [f"The portal shall support {text[0].lower() + text[1:] if text else text}."]
+
+
+def _extract_explicit_scope_items(request: str) -> list[str]:
+    """Extract explicitly labelled customer scope without inventing capabilities."""
+    text = str(request or "")
+    match = re.search(
+        r"(?:^|\n)\s*scope\s*:\s*(.*?)(?=\n\s*\n|\n\s*(?:business goal|users|stakeholders|existing systems|authentication|security|target delivery timeline|delivery timeline|target timeline|target)\s*:|\Z)",
+        text,
+        re.I | re.S,
+    )
+    if not match:
+        return []
+
+    block = match.group(1).strip()
+    if not block:
+        return []
+
+    # Scope statements are sometimes wrapped across multiple lines. Join those
+    # lines first so a single customer capability is not split accidentally.
+    normalized = " ".join(
+        re.sub(r"^\s*[-*]\s*", "", line).strip()
+        for line in block.splitlines()
+        if line.strip()
+    )
+
+    items: list[str] = []
+    for part in re.split(r"(?<=[.!?])\s+|\s*;\s*", normalized):
+        item = part.strip().rstrip(".")
+        if item and item.lower() not in {existing.lower() for existing in items}:
+            items.append(item)
+    return items
 
 
 def _extract_explicit_timeline_facts(request: str) -> list[str]:
@@ -2021,6 +2079,28 @@ def _extract_explicit_timeline_facts(request: str) -> list[str]:
     )
     if deadline_match:
         facts.append(f"Customer requires completion within {deadline_match.group(1)} month(s).")
+
+    target_timeline_match = re.search(
+        r"\b(?:target\s+delivery\s+timeline|delivery\s+timeline|target\s+timeline|target)\s*[:=-]?\s*"
+        r"(\d+(?:\.\d+)?)\s*months?\b",
+        text,
+        re.I,
+    )
+    if target_timeline_match:
+        facts.append(
+            f"Customer target delivery timeline is {target_timeline_match.group(1)} month(s)."
+        )
+
+    explicit_completion_match = re.search(
+        r"\b(?:launch|complete|completion|deliver|delivery)\s+(?:by|within)\s+"
+        r"(\d+(?:\.\d+)?)\s*months?\b",
+        text,
+        re.I,
+    )
+    if explicit_completion_match and not deadline_match:
+        facts.append(
+            f"Customer requires completion within {explicit_completion_match.group(1)} month(s)."
+        )
 
     return facts
 
@@ -2095,7 +2175,15 @@ def _parse_deadline_months(constraints: list[str]) -> float | None:
     values: list[float] = []
     for item in constraints or []:
         text = str(item).lower()
-        match = re.search(r"(?:within|by|deadline(?: is)?|complete(?:d)? by)[^0-9]{0,40}(\d+(?:\.\d+)?)\s*months?", text)
+        match = re.search(
+            r"(?:within|by|deadline(?: is)?|complete(?:d)? by|"
+            r"target\s+delivery\s+timeline(?:\s+is)?|"
+            r"delivery\s+timeline(?:\s+is)?|"
+            r"target\s+timeline(?:\s+is)?|"
+            r"target(?:\s+delivery)?(?:\s+timeline)?(?:\s+is)?)[^0-9]{0,40}"
+            r"(\d+(?:\.\d+)?)\s*months?",
+            text,
+        )
         if match:
             values.append(float(match.group(1)))
             continue

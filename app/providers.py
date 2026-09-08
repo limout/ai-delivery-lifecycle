@@ -83,6 +83,133 @@ class GeminiProvider(AIProvider):
                 ) from exc
 
 
+class OpenRouterProvider(AIProvider):
+    """OpenRouter provider with strict JSON-schema output support."""
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout: int = 180,
+    ):
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY environment variable is not configured."
+            )
+
+        self.api_key = api_key
+        self.model = model or os.getenv(
+            "OPENROUTER_MODEL",
+            "openrouter/free",
+        )
+        self.base_url = (
+            base_url or os.getenv(
+                "OPENROUTER_BASE_URL",
+                "https://openrouter.ai/api/v1",
+            )
+        ).rstrip("/")
+        self.timeout = timeout
+
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "temperature": 0,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "delivery_lifecycle_output",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        site_url = os.getenv("OPENROUTER_SITE_URL")
+        site_name = os.getenv("OPENROUTER_SITE_NAME", "AI Delivery Lifecycle")
+        if site_url:
+            headers["HTTP-Referer"] = site_url
+        if site_name:
+            headers["X-OpenRouter-Title"] = site_name
+
+        started_at = time.perf_counter()
+        print(
+            f"[OPENROUTER] START model={self.model} "
+            f"prompt_chars={len(prompt)}"
+        )
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise AIProviderError(
+                "Could not connect to OpenRouter."
+            ) from exc
+
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"[OPENROUTER] HTTP DONE model={self.model} "
+            f"elapsed={elapsed:.2f}s status={response.status_code}"
+        )
+
+        if response.status_code in (402, 429):
+            raise AIProviderQuotaError(
+                f"OpenRouter quota/rate limit reached (HTTP {response.status_code})."
+            )
+
+        if response.status_code != 200:
+            raise AIProviderError(
+                f"OpenRouter request failed with status "
+                f"{response.status_code}: {response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise AIProviderError(
+                "OpenRouter returned an invalid HTTP response."
+            ) from exc
+
+        try:
+            raw_text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIProviderError(
+                "OpenRouter returned an unexpected response format."
+            ) from exc
+
+        if not raw_text:
+            raise AIProviderError("OpenRouter returned an empty response.")
+
+        try:
+            result = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise AIProviderError("OpenRouter returned invalid JSON.") from exc
+
+        total_elapsed = time.perf_counter() - started_at
+        usage = data.get("usage") or {}
+        print(
+            f"[OPENROUTER] COMPLETE model={self.model} "
+            f"elapsed={total_elapsed:.2f}s "
+            f"response_chars={len(raw_text)} "
+            f"input_tokens={usage.get('prompt_tokens', '?')} "
+            f"output_tokens={usage.get('completion_tokens', '?')}"
+        )
+        return result
+
+
 class OllamaProvider(AIProvider):
     def __init__(
         self,

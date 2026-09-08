@@ -14,6 +14,7 @@ from app.providers import (
     AIProviderQuotaError,
     GeminiProvider,
     OllamaProvider,
+    OpenRouterProvider,
     MockProvider,
 )
 
@@ -244,6 +245,8 @@ def get_provider() -> AIProvider:
         return MockProvider()
     if provider_name == "ollama":
         return OllamaProvider()
+    if provider_name == "openrouter":
+        return OpenRouterProvider()
     if provider_name == "gemini":
         return GeminiProvider()
 
