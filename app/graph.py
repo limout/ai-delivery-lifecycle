@@ -1,4 +1,5 @@
 from functools import partial
+from typing import Callable
 
 from langgraph.graph import END, START, StateGraph
 
@@ -8,6 +9,7 @@ from app.agents import (
     delivery_review_agent,
     discovery_agent,
     estimation_agent,
+    ai_optimization_agent,
     proposal_agent,
     requirements_agent,
     solution_shaping_agent,
@@ -16,6 +18,9 @@ from app.agents import (
 )
 from app.providers import AIProvider, GeminiProvider
 from app.state import DeliveryState
+
+
+ProgressCallback = Callable[[str, str], None]
 
 
 def route_after_validation(state: DeliveryState) -> str:
@@ -41,13 +46,78 @@ def route_after_delivery_review(state: DeliveryState) -> str:
     return "review_blocked"
 
 
-def build_graph(provider: AIProvider | None = None):
+def _wrap_node(
+    name: str,
+    node: Callable[[DeliveryState], dict],
+    progress_callback: ProgressCallback | None,
+):
+    """Wrap a graph node so the API can expose start/end progress events."""
+
+    def wrapped(state: DeliveryState) -> dict:
+        if progress_callback:
+            progress_callback(name, "running")
+        try:
+            result = node(state)
+        except Exception:
+            if progress_callback:
+                progress_callback(name, "error")
+            raise
+        if progress_callback:
+            progress_callback(name, "complete")
+        return result
+
+    return wrapped
+
+
+
+def build_optimization_graph(
+    provider: AIProvider | None = None,
+    progress_callback: ProgressCallback | None = None,
+):
+    """Build the explicit user-triggered AI delivery optimization graph."""
+    if provider is None:
+        provider = GeminiProvider()
+
+    graph = StateGraph(DeliveryState)
+    graph.add_node(
+        "ai_optimization",
+        _wrap_node(
+            "ai_optimization",
+            partial(ai_optimization_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "optimization_complete",
+        _wrap_node(
+            "optimization_complete",
+            lambda state: {
+                "workflow_status": "COMPLETE",
+                "current_stage": "ai_optimization",
+                "awaiting_customer": False,
+            },
+            progress_callback,
+        ),
+    )
+    graph.add_edge(START, "ai_optimization")
+    graph.add_edge("ai_optimization", "optimization_complete")
+    graph.add_edge("optimization_complete", END)
+    return graph.compile()
+
+def build_graph(
+    provider: AIProvider | None = None,
+    progress_callback: ProgressCallback | None = None,
+):
     """
     Build the agent graph.
 
     The graph is state-driven: agents produce structured state and
     conditional routers decide whether to continue, ask the customer,
     or stop on an internal delivery blocker.
+
+    When progress_callback is provided, every graph node reports a
+    running/complete/error lifecycle event. This is used by the API's
+    streaming endpoint to show the current module while the workflow runs.
 
     Human clarification is a graph boundary. The clarification node
     emits a WAITING_FOR_CUSTOMER state and ends that execution. The API
@@ -60,32 +130,119 @@ def build_graph(provider: AIProvider | None = None):
 
     graph = StateGraph(DeliveryState)
 
-    graph.add_node("discovery", partial(discovery_agent, provider=provider))
-    graph.add_node("requirements", partial(requirements_agent, provider=provider))
-    graph.add_node("validation", partial(validation_agent, provider=provider))
-    graph.add_node("clarification", clarification_agent)
-    graph.add_node("solution", partial(solution_shaping_agent, provider=provider))
-    graph.add_node("delivery_plan", partial(delivery_planning_agent, provider=provider))
-    graph.add_node("estimate", partial(estimation_agent, provider=provider))
-    graph.add_node("delivery_review", partial(delivery_review_agent, provider=provider))
-    graph.add_node("proposal", partial(proposal_agent, provider=provider))
-    graph.add_node("sow", partial(sow_agent, provider=provider))
+    graph.add_node(
+        "discovery",
+        _wrap_node(
+            "discovery",
+            partial(discovery_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "requirements",
+        _wrap_node(
+            "requirements",
+            partial(requirements_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "validation",
+        _wrap_node(
+            "validation",
+            partial(validation_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "clarification",
+        _wrap_node("clarification", clarification_agent, progress_callback),
+    )
+    graph.add_node(
+        "solution",
+        _wrap_node(
+            "solution",
+            partial(solution_shaping_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "delivery_plan",
+        _wrap_node(
+            "delivery_plan",
+            partial(delivery_planning_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "estimate",
+        _wrap_node(
+            "estimate",
+            partial(estimation_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "delivery_review",
+        _wrap_node(
+            "delivery_review",
+            partial(delivery_review_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "proposal",
+        _wrap_node(
+            "proposal",
+            partial(proposal_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "sow",
+        _wrap_node(
+            "sow",
+            partial(sow_agent, provider=provider),
+            progress_callback,
+        ),
+    )
 
-    graph.add_node("await_customer", lambda state: {
-        "workflow_status": "NEEDS_INFO",
-        "current_stage": "clarification",
-        "awaiting_customer": True,
-    })
-    graph.add_node("blocked", lambda state: {
-        "workflow_status": "BLOCKED",
-        "current_stage": "delivery_review",
-        "awaiting_customer": False,
-    })
-    graph.add_node("complete", lambda state: {
-        "workflow_status": "COMPLETE",
-        "current_stage": "complete",
-        "awaiting_customer": False,
-    })
+    graph.add_node(
+        "await_customer",
+        _wrap_node(
+            "await_customer",
+            lambda state: {
+                "workflow_status": "NEEDS_INFO",
+                "current_stage": "clarification",
+                "awaiting_customer": True,
+            },
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "blocked",
+        _wrap_node(
+            "blocked",
+            lambda state: {
+                "workflow_status": "BLOCKED",
+                "current_stage": "delivery_review",
+                "awaiting_customer": False,
+            },
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "complete",
+        _wrap_node(
+            "complete",
+            lambda state: {
+                "workflow_status": "COMPLETE",
+                "current_stage": "complete",
+                "awaiting_customer": False,
+            },
+            progress_callback,
+        ),
+    )
 
     graph.add_edge(START, "discovery")
     graph.add_edge("discovery", "requirements")

@@ -4,9 +4,7 @@ from typing import TypedDict
 class DeliveryState(TypedDict, total=False):
     user_request: str
     clarification_answers: list[str]
-    clarification_questions: list[dict]
-    blocking_questions: list[dict]
-    non_blocking_questions: list[dict]
+    clarification_questions: list[str]
     clarification_history: list[dict]
     discovery: dict
     requirements: dict
@@ -14,6 +12,7 @@ class DeliveryState(TypedDict, total=False):
     solution: dict
     delivery_plan: dict
     estimate: dict
+    ai_optimization: dict
     delivery_review: dict
     proposal: dict
     sow: dict

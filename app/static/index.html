@@ -115,6 +115,9 @@
 
         button:hover { background: #1d4ed8; }
         button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .action-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .optimize-button { background:#7c3aed; }
+        .optimize-button:hover { background:#6d28d9; }
 
         .hidden { display: none !important; }
 
@@ -593,6 +596,21 @@
             h1 { font-size: 27px; }
         }
     
+    .ai-optimization-panel{margin-top:22px;border:1px solid #ddd6fe;border-radius:14px;padding:18px;background:#faf9ff}
+    .ai-optimization-header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+    .ai-optimization-header h3{margin:0 0 4px;font-size:17px}
+    .ai-optimization-panel button{margin-top:0}
+    .optimization-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}
+    .optimization-card{border:1px solid var(--border);border-radius:12px;padding:14px;background:#fff}
+    .optimization-card.highlight{border-color:#c4b5fd;background:#fff}
+    .optimization-card-title{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:800;color:var(--muted);margin-bottom:7px}
+    .optimization-card-value{font-size:20px;font-weight:800;line-height:1.25}
+    .optimization-status{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800;margin-top:8px}
+    .optimization-status.feasible{background:#dcfce7;color:#166534}
+    .optimization-status.gap{background:#fee2e2;color:#991b1b}
+    .optimization-status.neutral{background:#f1f5f9;color:#475569}
+    @media (max-width:900px){.optimization-grid{grid-template-columns:1fr}}
+
     .question-priority{display:inline-flex;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:800;margin-bottom:8px}
     .priority-required{background:#fee2e2;color:#b91c1c}
     .priority-recommended{background:#fef3c7;color:#92400e}
@@ -629,7 +647,10 @@
             placeholder="Example: We want to build a customer self-service portal for enterprise customers..."
         ></textarea>
 
-        <button id="analyzeButton" onclick="analyze()">Analyze Request</button>
+        <div class="action-row">
+            <button id="analyzeButton" onclick="analyze()">Analyze Request</button>
+            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
+        </div>
 
         <div id="loading" class="loading hidden">
             Running delivery workflow…
@@ -824,8 +845,18 @@
 
             <section id="panel-estimate" class="artifact-panel">
                 <h2 class="card-title">Estimate</h2>
-                <div class="section-kicker">Preliminary delivery estimate and assumptions.</div>
+                <div class="section-kicker">Standard delivery estimate — independent human-only baseline.</div>
                 <div id="estimateContent"></div>
+                <div class="ai-optimization-panel">
+                    <div class="ai-optimization-header">
+                        <div>
+                            <h3>AI Delivery Optimization</h3>
+                            <div class="section-kicker">Optional AI-native delivery scenario. It never replaces the standard estimate.</div>
+                        </div>
+                        <button id="optimizeButtonPanel" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
+                    </div>
+                    <div id="aiOptimizationContent"><span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span></div>
+                </div>
             </section>
 
             <section id="panel-delivery_review" class="artifact-panel">
@@ -1210,6 +1241,70 @@
         `;
     }
 
+    function renderEstimate(data) {
+        const container = document.getElementById("estimateContent");
+        if (!container) return;
+        renderObject("estimateContent", data);
+
+        const optimizeButtons = [
+            document.getElementById("optimizeButton"),
+            document.getElementById("optimizeButtonPanel")
+        ].filter(Boolean);
+        const canOptimize = !!data && typeof data === "object" && !!data.duration_range;
+        optimizeButtons.forEach(button => {
+            button.disabled = !canOptimize;
+        });
+    }
+
+    function renderAIOptimization(data) {
+        const container = document.getElementById("aiOptimizationContent");
+        if (!container) return;
+
+        if (!data || typeof data !== "object") {
+            container.innerHTML = '<span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span>';
+            return;
+        }
+
+        const status = String(data.deadline_feasibility || "NOT_DEMONSTRATED").toUpperCase();
+        const statusClass = status === "FEASIBLE" || status === "FEASIBLE_WITH_CONDITIONS"
+            ? "feasible"
+            : status === "NOT_DEMONSTRATED"
+                ? "gap"
+                : "neutral";
+
+        const statusLabel = status.replaceAll("_", " ");
+        const gap = data.deadline_gap || "0";
+        const cards = [
+            ["Customer estimate", data.customer_baseline_duration || "Not provided"],
+            ["Standard estimate", data.standard_duration_range || "Not available"],
+            ["AI-optimized estimate", data.duration_range || "Not demonstrated"]
+        ];
+
+        container.innerHTML = `
+            <div class="optimization-grid">
+                ${cards.map((item, index) => `
+                    <div class="optimization-card ${index === 2 ? "highlight" : ""}">
+                        <div class="optimization-card-title">${escapeHtml(item[0])}</div>
+                        <div class="optimization-card-value">${escapeHtml(String(item[1]))}</div>
+                    </div>
+                `).join("")}
+            </div>
+            <div class="document-grid" style="margin-top:14px">
+                ${renderDocumentSection("Deadline", data.customer_deadline || "Not provided")}
+                <section class="document-section"><h4>Deadline feasibility</h4><p><span class="optimization-status ${statusClass}">${escapeHtml(statusLabel)}</span></p></section>
+                ${renderDocumentSection("Delivery gap", gap || "0")}
+                ${renderDocumentSection("AI effort", data.effort_range || "Not demonstrated")}
+                ${renderDocumentSection("Team model", data.optimization_team_model || "Not provided")}
+                ${renderDocumentSection("Confidence", data.confidence || "LOW")}
+                ${renderDocumentSection("Optimization summary", data.optimization_summary || "Not provided")}
+                ${renderDocumentSection("Optimization levers", data.optimization_levers || [])}
+                ${renderDocumentSection("Feasibility conditions", data.feasibility_conditions || [])}
+                ${renderDocumentSection("Scope trade-offs", data.scope_tradeoffs || [])}
+                ${renderDocumentSection("Recommendations", data.recommendations || [], true)}
+            </div>
+        `;
+    }
+
     function renderResult(data) {
         currentData = data;
 
@@ -1302,7 +1397,8 @@
 
         renderObject("solutionContent", data.solution);
         renderObject("deliveryPlanContent", data.delivery_plan);
-        renderObject("estimateContent", data.estimate);
+        renderEstimate(data.estimate);
+        renderAIOptimization(data.ai_optimization);
         renderDeliveryReview(data.delivery_review);
         renderProposal(data.proposal);
         renderSow(data.sow);
@@ -1524,7 +1620,187 @@
       });
     }
 
-async function analyze() {
+function updateRunningStatus(message) {
+        const loading = document.getElementById("loading");
+        if (!loading) return;
+        loading.classList.remove("hidden");
+        loading.textContent = message;
+    }
+
+    function formatRunningStatus(stageEvents) {
+        const parts = ["Running workflow…"];
+
+        stageEvents.forEach(item => {
+            const icon = item.status === "complete"
+                ? "✓"
+                : item.status === "error"
+                    ? "✕"
+                    : "●";
+
+            // Show timing only once, when the stage has actually completed.
+            // The value is cumulative workflow time: e.g. 5s · 10s · 15s.
+            const elapsed = item.status === "complete" && typeof item.elapsed === "number"
+                ? ` ${Math.round(item.elapsed)}s`
+                : "";
+
+            parts.push(`${icon} ${item.label}${elapsed}`);
+        });
+
+        return parts.join(" · ");
+    }
+
+    async function consumeWorkflowStream(url, body, onResult) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream"
+            },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            let message = "Workflow failed.";
+            try {
+                const data = await response.json();
+                message = data.message || data.error || message;
+            } catch (_) {
+                // Keep the generic message if the server did not return JSON.
+            }
+            throw new Error(message);
+        }
+
+        if (!response.body) {
+            throw new Error("Streaming is not supported by this browser.");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let eventName = "message";
+        let eventData = [];
+        const stageEvents = [];
+
+        const dispatchEvent = () => {
+            if (!eventData.length) return false;
+
+            const raw = eventData.join("\n");
+            eventData = [];
+
+            let payload;
+            try {
+                payload = JSON.parse(raw);
+            } catch (_) {
+                eventName = "message";
+                return false;
+            }
+
+            if (eventName === "started") {
+                updateRunningStatus("Running workflow…");
+            } else if (eventName === "stage") {
+                const existingIndex = stageEvents.findIndex(
+                    item => item.stage === payload.stage
+                );
+
+                if (existingIndex >= 0) {
+                    stageEvents[existingIndex] = payload;
+                } else {
+                    stageEvents.push(payload);
+                }
+
+                updateRunningStatus(
+                    formatRunningStatus(stageEvents)
+                );
+            } else if (eventName === "result") {
+                onResult(payload);
+            } else if (eventName === "error") {
+                throw new Error(payload.message || "Workflow failed.");
+            }
+
+            eventName = "message";
+            return true;
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() || "";
+
+            for (const block of blocks) {
+                const lines = block.split("\n");
+                eventName = "message";
+                eventData = [];
+
+                lines.forEach(line => {
+                    if (line.startsWith("event:")) {
+                        eventName = line.slice(6).trim();
+                    } else if (line.startsWith("data:")) {
+                        eventData.push(line.slice(5).trimStart());
+                    }
+                });
+
+                dispatchEvent();
+            }
+        }
+
+        if (buffer.trim()) {
+            const lines = buffer.split("\n");
+            eventName = "message";
+            eventData = [];
+            lines.forEach(line => {
+                if (line.startsWith("event:")) {
+                    eventName = line.slice(6).trim();
+                } else if (line.startsWith("data:")) {
+                    eventData.push(line.slice(5).trimStart());
+                }
+            });
+            dispatchEvent();
+        }
+    }
+
+    async function optimizeWithAI() {
+        clearError();
+
+        const request = document.getElementById("request").value.trim();
+        if (!request) {
+            showError("Please enter a customer request first.");
+            return;
+        }
+        if (!currentData || !currentData.estimate) {
+            showError("Run Analyze Request first so the standard estimate is available.");
+            return;
+        }
+
+        const buttons = [
+            document.getElementById("optimizeButton"),
+            document.getElementById("optimizeButtonPanel")
+        ].filter(Boolean);
+        buttons.forEach(button => {
+            button.disabled = true;
+            button.textContent = "Optimizing…";
+        });
+        updateRunningStatus("Running AI optimization…");
+
+        try {
+            await consumeWorkflowStream(
+                "/optimize/stream",
+                { user_request: request, analysis: currentData },
+                renderResult
+            );
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            buttons.forEach(button => {
+                button.disabled = false;
+                button.textContent = "Optimize with AI";
+            });
+        }
+    }
+
+    async function analyze() {
         clearError();
 
         const request =
@@ -1540,38 +1816,19 @@ async function analyze() {
 
         button.disabled = true;
         button.textContent = "Analyzing…";
-
-        document
-            .getElementById("loading")
-            .classList.remove("hidden");
+        updateRunningStatus("Running workflow…");
 
         try {
-            const response = await fetch("/analyze", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    user_request: request
-                })
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(
-                    data.message || data.error || "Workflow failed."
-                );
-            }
-
-            renderResult(data);
-
+            await consumeWorkflowStream(
+                "/analyze/stream",
+                { user_request: request },
+                renderResult
+            );
         } catch (error) {
             showError(error.message);
         } finally {
             button.disabled = false;
             button.textContent = "Analyze Request";
-
             document
                 .getElementById("loading")
                 .classList.add("hidden");
@@ -1601,10 +1858,7 @@ async function analyze() {
                         ? strong.textContent.replace(/^\d+\.\s*/, "").trim()
                         : `Question ${Number(input.dataset.questionIndex || 0) + 1}`;
                 }
-                answers.push({
-                    question: questionText,
-                    answer: answer
-                });
+                answers.push(`${questionText}: ${answer}`);
             }
         });
 
@@ -1621,38 +1875,29 @@ async function analyze() {
 
         button.disabled = true;
         button.textContent = "Re-running workflow…";
+        updateRunningStatus("Running workflow…");
 
         try {
-            const response = await fetch("/clarify", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
+            await consumeWorkflowStream(
+                "/clarify/stream",
+                {
                     user_request: request,
-                    answers: answers,
+                    clarification_answers: answers,
+                    iteration: currentIteration,
                     clarification_history: currentData && Array.isArray(currentData.clarification_history)
                         ? currentData.clarification_history
-                        : [],
-                    iteration: currentIteration
-                })
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(
-                    data.message || data.error || "Clarification failed."
-                );
-            }
-
-            renderResult(data);
-
+                        : []
+                },
+                renderResult
+            );
         } catch (error) {
             showError(error.message);
         } finally {
             button.disabled = false;
             button.textContent = "Submit Answers & Re-run";
+            document
+                .getElementById("loading")
+                .classList.add("hidden");
         }
     }
 
