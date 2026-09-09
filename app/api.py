@@ -3,8 +3,11 @@ import os
 import queue
 import threading
 import time
+import hashlib
+import urllib.error
+import urllib.request
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -14,11 +17,95 @@ from app.providers import (
     AIProviderQuotaError,
     GeminiProvider,
     OllamaProvider,
-    OpenRouterProvider,
     MockProvider,
 )
 
 router = APIRouter()
+
+
+RATE_LIMIT_TTL_SECONDS = 24 * 60 * 60
+
+
+def _rate_limit_enabled() -> bool:
+    """Enable the public daily limit only in the deployed environment."""
+    environment = os.getenv("APP_ENV", "local").strip().lower()
+    return environment not in {"local", "development", "dev", "test"}
+
+
+def _whitelisted_ips() -> set[str]:
+    """Return IPs that are never subject to the public rate limit."""
+    raw = os.getenv("RATE_LIMIT_WHITELIST_IPS", "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _client_ip(request: Request) -> str:
+    # Render sits behind a proxy. Use the forwarded client IP when present.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_key(scope: str, ip: str) -> str:
+    digest = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    return f"limout-ai:{scope}:{digest}"
+
+
+_rate_limit_memory: dict[str, float] = {}
+
+
+def _claim_daily_run(scope: str, ip: str) -> bool:
+    """Allow one public run per IP every 24 hours.
+
+    Local development and explicitly whitelisted IPs bypass the limiter.
+    When Upstash is configured, the claim survives application restarts.
+    """
+    if not _rate_limit_enabled() or ip in _whitelisted_ips():
+        return True
+
+    key = _rate_limit_key(scope, ip)
+    url = os.getenv("UPSTASH_REDIS_REST_URL")
+    token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+
+    if url and token:
+        try:
+            payload = json.dumps([
+                "SET", key, "1", "EX", str(RATE_LIMIT_TTL_SECONDS), "NX"
+            ]).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            return result.get("result") == "OK"
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            print(f"[RATE_LIMIT] Upstash unavailable: {exc}")
+
+    now = time.time()
+    last = _rate_limit_memory.get(key)
+    if last is not None and now - last < RATE_LIMIT_TTL_SECONDS:
+        return False
+    _rate_limit_memory[key] = now
+    return True
+
+
+def _rate_limit_response(scope: str) -> JSONResponse:
+    label = "analysis" if scope == "analyze" else "AI optimization"
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "DAILY_RATE_LIMIT_EXCEEDED",
+            "message": f"One {label} run per IP is allowed every 24 hours.",
+            "retry_after_seconds": RATE_LIMIT_TTL_SECONDS,
+        },
+        headers={"Retry-After": str(RATE_LIMIT_TTL_SECONDS)},
+    )
 
 
 STAGE_LABELS = {
@@ -245,8 +332,6 @@ def get_provider() -> AIProvider:
         return MockProvider()
     if provider_name == "ollama":
         return OllamaProvider()
-    if provider_name == "openrouter":
-        return OpenRouterProvider()
     if provider_name == "gemini":
         return GeminiProvider()
 
@@ -348,52 +433,6 @@ def workflow_response(result: dict) -> dict:
     if not clarification_questions:
         clarification_questions = review.get("clarification_questions", [])
 
-    # Validation is the source of truth for structured blockers.  The graph
-    # may keep these fields nested under `validation`, so normalize them at
-    # the API boundary instead of silently returning empty arrays.
-    blocking_questions = result.get("blocking_questions", [])
-    if not blocking_questions:
-        blocking_questions = validation.get("blocking_questions", [])
-
-    non_blocking_questions = result.get("non_blocking_questions", [])
-    if not non_blocking_questions:
-        non_blocking_questions = validation.get("non_blocking_questions", [])
-
-    # A workflow waiting for customer input must expose structured blockers.
-    # Validation may represent blocking_questions as plain strings, while the
-    # API contract exposes the richer clarification-question objects.
-    if status == "NEEDS_INFO" and not blocking_questions:
-        blocking_questions = list(clarification_questions)
-
-    structured_blocking_questions = []
-    clarification_by_question = {
-        str(item.get("question", "")).strip().lower(): item
-        for item in clarification_questions
-        if isinstance(item, dict) and item.get("question")
-    }
-
-    for item in blocking_questions:
-        if isinstance(item, dict):
-            structured_blocking_questions.append(item)
-            continue
-
-        question = str(item).strip()
-        if not question:
-            continue
-
-        existing = clarification_by_question.get(question.lower())
-        if existing:
-            structured_blocking_questions.append(existing)
-        else:
-            structured_blocking_questions.append({
-                "question": question,
-                "priority": "REQUIRED",
-                "reason": "Customer input is required before the workflow can continue.",
-                "blocks_workflow": True,
-            })
-
-    blocking_questions = structured_blocking_questions
-
     return {
         "status": status,
         "workflow_status": status,
@@ -403,8 +442,8 @@ def workflow_response(result: dict) -> dict:
         "requirements": result.get("requirements"),
         "validation": validation,
         "clarification_questions": clarification_questions,
-        "blocking_questions": blocking_questions,
-        "non_blocking_questions": non_blocking_questions,
+        "blocking_questions": result.get("blocking_questions", []),
+        "non_blocking_questions": result.get("non_blocking_questions", []),
         "clarification_history": result.get("clarification_history", []),
         "iteration": result.get("iteration", 1),
         "solution": result.get("solution"),
@@ -430,8 +469,12 @@ def config() -> dict:
 @router.post("/analyze/stream")
 def analyze_stream(
     request: AnalyzeRequest,
+    http_request: Request,
     provider: AIProvider = Depends(get_provider),
 ):
+    if not _claim_daily_run("analyze", _client_ip(http_request)):
+        return _rate_limit_response("analyze")
+
     return StreamingResponse(
         _stream_workflow(
             request=request.user_request,
@@ -452,6 +495,7 @@ def analyze_stream(
 @router.post("/optimize/stream")
 def optimize_stream(
     request: OptimizeRequest,
+    http_request: Request,
     provider: AIProvider = Depends(get_provider),
 ):
     if not request.analysis.get("estimate"):
@@ -462,6 +506,9 @@ def optimize_stream(
                 "message": "Run Analyze Request first so the standard estimate is available.",
             },
         )
+
+    if not _claim_daily_run("optimize", _client_ip(http_request)):
+        return _rate_limit_response("optimize")
 
     return StreamingResponse(
         _stream_optimization(
@@ -481,8 +528,12 @@ def optimize_stream(
 @router.post("/analyze")
 def analyze(
     request: AnalyzeRequest,
+    http_request: Request,
     provider: AIProvider = Depends(get_provider),
 ):
+    if not _claim_daily_run("analyze", _client_ip(http_request)):
+        return _rate_limit_response("analyze")
+
     try:
         result = run_workflow(
             request=request.user_request,
