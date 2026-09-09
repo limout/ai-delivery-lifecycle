@@ -31,17 +31,19 @@ def route_after_validation(state: DeliveryState) -> str:
 
 
 def route_after_delivery_review(state: DeliveryState) -> str:
-    """Route from the delivery quality gate using explicit blocking semantics."""
-    review = state.get("delivery_review", {}) or {}
-    if review.get("status") == "READY" and not review.get("blocking_issues"):
-        return "ready"
+    """Route the final delivery gate without reopening customer clarification.
 
-    clarification_questions = review.get("clarification_questions", []) or []
-    if any(
-        isinstance(question, dict) and question.get("blocks_workflow") is True
-        for question in clarification_questions
-    ):
-        return "needs_info"
+    Validation owns the customer-question boundary. Delivery Review is a
+    deterministic delivery gate: if it has a blocker, the workflow stops as
+    BLOCKED; if it has no blocker, the workflow continues to Proposal. LLM
+    questions and advisory diagnostics must never create a new clarification
+    loop here.
+    """
+    review = state.get("delivery_review", {}) or {}
+    blocking_issues = review.get("blocking_issues", []) or []
+
+    if not blocking_issues and review.get("status") == "READY":
+        return "ready"
 
     return "review_blocked"
 
@@ -271,7 +273,6 @@ def build_graph(
         route_after_delivery_review,
         {
             "ready": "proposal",
-            "needs_info": "clarification",
             "review_blocked": "blocked",
         },
     )

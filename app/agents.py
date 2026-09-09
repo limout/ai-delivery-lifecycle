@@ -11,7 +11,6 @@ DISCOVERY_SCHEMA = {
         "users": {"type": "array", "items": {"type": "string"}},
         "stakeholders": {"type": "array", "items": {"type": "string"}},
         "existing_systems": {"type": "array", "items": {"type": "string"}},
-        "scope": {"type": "array", "items": {"type": "string"}},
         "constraints": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "unknowns": {"type": "array", "items": {"type": "string"}},
@@ -26,7 +25,6 @@ DISCOVERY_SCHEMA = {
         "users",
         "stakeholders",
         "existing_systems",
-        "scope",
         "constraints",
         "assumptions",
         "unknowns",
@@ -592,13 +590,10 @@ IMPORTANT RULES:
 5. Customer clarification answers are authoritative customer input.
 6. If a previous unknown has now been answered, remove it from
    unknowns where appropriate.
-7. Preserve every concrete customer-stated capability in the explicit
-   scope field. Scope must describe confirmed system capabilities, not
-   inferred implementation details.
-8. Think like a Delivery Lead preparing the project for requirements
+7. Think like a Delivery Lead preparing the project for requirements
    and later estimation.
-9. The input may be vague, incomplete, or informal.
-10. Never state or imply that the current infrastructure is inadequate,
+8. The input may be vague, incomplete, or informal.
+9. Never state or imply that the current infrastructure is inadequate,
    not scalable, or otherwise deficient unless the customer explicitly
    confirmed that fact. If scalability for Black Friday traffic is unknown,
    record it as unconfirmed/unknown rather than as an assumption presented
@@ -615,17 +610,6 @@ Original customer request:
         prompt=prompt,
         schema=DISCOVERY_SCHEMA,
     )
-
-    # Preserve an explicitly labelled customer scope even if the discovery model
-    # omits or weakens it. This is customer provenance, not model inference.
-    explicit_scope_items = _extract_explicit_scope_items(request)
-    if explicit_scope_items:
-        # Explicit customer scope is authoritative. Do not merge model-generated
-        # paraphrases into it, otherwise provenance and downstream grounding become noisy.
-        discovery["scope"] = explicit_scope_items
-    elif not isinstance(discovery.get("scope"), list):
-        discovery["scope"] = []
-
     # Preserve explicit customer timeline facts even if the discovery model omits
     # them from structured constraints. These facts are authoritative provenance
     # for the estimation stage.
@@ -762,6 +746,94 @@ def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> di
                 if question not in grounded["open_questions"]:
                     grounded["open_questions"].append(question)
 
+    # Some model-generated "contradictions" are actually non-blocking
+    # refinement questions. In particular, a customer statement such as
+    # "simple and easy to use" is a valid high-level UX goal; the absence of
+    # a detailed design system or measurable UX criteria does not prevent
+    # preliminary solution shaping or delivery planning.
+    normalized_contradictions = []
+    normalized_open_questions = list(grounded["open_questions"])
+    for item in grounded["contradictions"]:
+        text = str(item).strip()
+        lower = text.lower()
+        is_non_blocking_ux_gap = (
+            ("simple and easy to use" in lower or "easy to use" in lower)
+            and any(
+                marker in lower
+                for marker in (
+                    "ux/ui", "ui/ux", "ux", "ui", "design system",
+                    "guidelines", "specific", "test", "criteria",
+                )
+            )
+            and any(
+                marker in lower
+                for marker in (
+                    "no specific", "not provided", "not specified",
+                    "no ", "lack", "without", "there are no",
+                )
+            )
+        )
+        # A high-level feature scope and an unresolved sub-scope are not a
+        # contradiction. For example, knowing that the portal can submit
+        # service requests while the exact request types are still TBD is
+        # sufficient for preliminary solution shaping.
+        is_non_blocking_scope_gap = (
+            any(marker in lower for marker in (
+                "service requests", "service request", "initial mvp", "mvp scope"
+            ))
+            and any(marker in lower for marker in (
+                "unknown", "undetermined", "undetermined", "not determined",
+                "specific types", "specific type", "which types", "types"
+            ))
+            and any(marker in lower for marker in (
+                "assumes", "assumption", "features", "includes", "scope"
+            ))
+        )
+        # An architectural assumption such as "Salesforce can be integrated using
+        # standard APIs" is not contradicted by not yet knowing the exact API
+        # endpoint/data-model choice or peak traffic. Those are solution-shaping
+        # investigation items. The assumption is explicitly provisional, so it
+        # must not become a customer blocker merely because the model wants more
+        # technical certainty for the estimate.
+        is_non_blocking_technical_gap = (
+            any(marker in lower for marker in (
+                "salesforce", "entra id", "microsoft entra",
+                "standard api", "standard apis", "api integration",
+                "integration method", "integration approach",
+            ))
+            and any(marker in lower for marker in (
+                "assumption", "assumes", "unknown", "unknowns",
+                "exact api", "exact integration", "integration method",
+                "technical certainty", "peak traffic", "concurrency",
+            ))
+            and any(marker in lower for marker in (
+                "not known", "unknown", "undetermined", "uncertain",
+                "creates a contradiction", "contradiction",
+            ))
+        )
+        is_non_blocking_contradiction = (
+            is_non_blocking_ux_gap
+            or is_non_blocking_scope_gap
+            or is_non_blocking_technical_gap
+        )
+        if is_non_blocking_contradiction:
+            # Keep the underlying refinement question as non-blocking when it
+            # already exists; do not turn a scope clarification into a UX
+            # question.
+            if is_non_blocking_ux_gap:
+                follow_up = (
+                    "Are there existing UI/UX design systems or brand guidelines "
+                    "the portal should follow, and how should simplicity be evaluated?"
+                )
+                if follow_up not in normalized_open_questions:
+                    normalized_open_questions.append(follow_up)
+            continue
+        if text and text not in normalized_contradictions:
+            normalized_contradictions.append(text)
+
+    grounded["open_questions"] = normalized_open_questions
+    grounded["contradictions"] = normalized_contradictions
+
     # Do not leave acceptance criteria referring to thresholds that are still open.
     normalized_acceptance = []
     for item in grounded["acceptance_criteria"]:
@@ -811,9 +883,6 @@ requirements definition.
 DISCOVERY:
 
 {discovery}
-
-The explicit customer scope in Discovery is authoritative customer input.
-Preserve it when deriving functional requirements.
 
 IMPORTANT RULES:
 
@@ -867,18 +936,41 @@ Return the complete requirements schema.
         )
 
     requirements = _ground_requirements_to_discovery(discovery, requirements)
-
-    # If the customer explicitly provided concrete scope, preserve that scope as
-    # functional requirements even when the local model returns an empty artifact.
-    # This is deterministic provenance preservation, not feature inference.
-    explicit_scope_items = _extract_explicit_scope_items(state.get("user_request", ""))
-    if explicit_scope_items and not requirements.get("functional_requirements"):
-        functional_requirements = []
-        for item in explicit_scope_items:
-            functional_requirements.extend(_scope_item_to_requirements(item))
-        requirements["functional_requirements"] = functional_requirements
-
     requirements = _filter_answered_requirement_questions(requirements, state)
+
+    has_any_requirements = any(
+        requirements.get(key)
+        for key in (
+            "functional_requirements",
+            "non_functional_requirements",
+            "acceptance_criteria",
+        )
+    )
+
+    if not has_any_requirements and (
+        discovery.get("problem")
+        or discovery.get("business_goal")
+        or discovery.get("users")
+        or discovery.get("constraints")
+    ):
+        retry_prompt = f"""
+The previous requirements response was empty. Re-do the requirements
+analysis using ONLY the discovery below.
+
+DISCOVERY:
+{discovery}
+
+Return at least the concrete functional and/or non-functional
+requirements that are directly supported by the discovery. Do not
+invent features. Put unresolved details into open_questions.
+Acceptance criteria must be testable.
+"""
+        requirements = provider.generate_json(
+            prompt=retry_prompt,
+            schema=REQUIREMENTS_SCHEMA,
+        )
+        requirements = _ground_requirements_to_discovery(discovery, requirements)
+        requirements = _filter_answered_requirement_questions(requirements, state)
 
     return {
         "requirements": requirements,
@@ -1013,63 +1105,69 @@ REQUIREMENTS:
         state,
     )
 
-    # Deterministic gate: some customer unknowns are sufficiently material
-    # that we must stop before solution/plan/estimate. This is deliberately
-    # a small, explicit set — we do not turn every open question into a blocker.
-    unknowns = [str(item).strip() for item in (discovery.get("unknowns", []) or []) if str(item).strip()]
-    open_questions = [str(item).strip() for item in (requirements.get("open_questions", []) or []) if str(item).strip()]
-    candidate_text = unknowns + open_questions
-
-    blocker_rules = [
-        (
-            ("target delivery timeline", "delivery timeline", "target timeline"),
-            "What is the target delivery timeline?",
-            "Required to determine whether the next delivery stage can be planned against a concrete customer constraint.",
-        ),
-        (
-            ("compliance", "data privacy", "regulatory", "security and compliance"),
-            "What are the applicable security, compliance, and data privacy requirements?",
-            "Required to avoid choosing a solution that cannot satisfy mandatory legal, regulatory, or security constraints.",
-        ),
-        (
-            ("current level of integration with salesforce", "current state of salesforce integration", "salesforce integration"),
-            "What is the current level of integration with Salesforce?",
-            "Required to determine the integration approach and delivery effort rather than assuming the current integration state.",
-        ),
-        (
-            ("current level of integration with microsoft entra", "current state of entra id integration", "entra id integration"),
-            "What is the current level of integration with Microsoft Entra ID?",
-            "Required to determine the authentication/integration approach and delivery effort rather than assuming the current integration state.",
-        ),
-        (
-            ("user roles and permissions", "specific user roles", "user volume", "expected user volume"),
-            "What are the expected user roles/permissions and expected user volume?",
-            "Required to validate the access-control model and make a credible preliminary scalability and delivery assessment.",
-        ),
-    ]
-
-    existing_questions = {
-        str(item).strip().lower()
+    # Deterministic lifecycle gate.
+    #
+    # IMPORTANT: LLM-generated questions and contradictions are signals, not
+    # routing decisions. A model can reasonably ask for more detail forever.
+    # The gate therefore blocks only on objective lifecycle prerequisites that
+    # are required before preliminary solution shaping can produce a useful
+    # result. Everything else is carried forward as a non-blocking question,
+    # assumption, risk, dependency, or investigation item.
+    model_questions = [
+        str(item).strip()
         for item in (validation.get("questions", []) or [])
         if str(item).strip()
-    }
-    blocking_questions = []
-    non_blocking_questions = [
+    ]
+    model_non_blocking = [
         str(item).strip()
         for item in (validation.get("non_blocking_questions", []) or [])
         if str(item).strip()
     ]
 
-    # Minimum-scope gate: only stop for a genuinely vague request.
-    # Do not treat every discovery unknown as blocking. A concrete product
-    # capability plus at least one meaningful piece of delivery context is
-    # enough to continue; the remaining details can stay non-blocking.
+    non_blocking_questions = list(dict.fromkeys(model_non_blocking))
+    blocking_questions = []
+    existing_questions = {q.lower() for q in non_blocking_questions}
+
+    # Customer-confirmed delivery timeline is an objective prerequisite for
+    # this lifecycle. It must come from the request/clarification history, not
+    # from an LLM-generated requirement or assumption.
+    customer_text = " ".join(
+        [
+            str(state.get("user_request") or ""),
+            *[
+                str(item.get("answer") or "")
+                for item in (state.get("clarification_history", []) or [])
+                if isinstance(item, dict)
+            ],
+            *[str(item) for item in (state.get("clarification_answers", []) or [])],
+        ]
+    ).lower()
+
+    timeline_patterns = (
+        r"\b\d+(?:[.,]\d+)?\s*(?:day|days|week|weeks|month|months|year|years)\b",
+        r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:day|days|week|weeks|month|months|year|years)\b",
+        r"\bby\s+(?:q[1-4]|end of|the end of|[a-z]+\s+\d{4})\b",
+    )
+    has_customer_timeline = any(
+        re.search(pattern, customer_text) for pattern in timeline_patterns
+    )
+
+    if not has_customer_timeline:
+        timeline_question = "What is the target delivery timeline?"
+        blocking_questions.append(timeline_question)
+        non_blocking_questions = [
+            q for q in non_blocking_questions
+            if q.lower() != timeline_question.lower()
+        ]
+
+    # Minimum-scope gate: stop only when there is genuinely no concrete
+    # capability and no meaningful delivery context. Do not require detailed
+    # service-request types, RBAC, traffic, UX, Salesforce API details, etc.
     functional_requirements = [
         str(item).strip()
         for item in (requirements.get("functional_requirements", []) or [])
         if str(item).strip()
     ]
-    capability_text = " ".join(functional_requirements).lower()
     generic_capability_markers = (
         "self-service interface",
         "self service interface",
@@ -1080,139 +1178,91 @@ REQUIREMENTS:
         any(marker in item.lower() for marker in generic_capability_markers)
         for item in functional_requirements
     )
-
-    # Requirements can legitimately be empty after deterministic grounding,
-    # even when Discovery already contains enough concrete scope to proceed.
-    # Use Discovery as the fallback source of scope instead of treating an
-    # empty LLM requirements artifact as proof that the request is vague.
-    discovery_scope_text = " ".join(
-        str(discovery.get(key, ""))
-        for key in (
-            "problem",
-            "business_goal",
-            "users",
-            "scope",
-            "existing_systems",
-            "constraints",
-        )
-    ).lower()
-    discovery_capability_markers = (
-        "manage",
-        "submit",
-        "track",
-        "view",
-        "create",
-        "update",
-        "request",
-        "portal",
-        "self-service",
-        "self service",
+    meaningful_context_values = (
+        discovery.get("users", []),
+        discovery.get("stakeholders", []),
+        discovery.get("existing_systems", []),
+        discovery.get("constraints", []),
     )
-    has_discovery_capability = any(
-        marker in discovery_scope_text for marker in discovery_capability_markers
-    )
+    has_meaningful_context = any(bool(value) for value in meaningful_context_values)
 
-    # Meaningful delivery context should be concrete rather than a generic
-    # placeholder such as "No specific constraints mentioned". Existing
-    # systems are especially strong evidence that the solution direction is
-    # already grounded.
-    meaningful_constraints = [
-        str(item).strip()
-        for item in (discovery.get("constraints", []) or [])
-        if str(item).strip()
-        and str(item).strip().lower() not in {
-            "no specific constraints mentioned",
-            "no constraints mentioned",
-        }
-    ]
-    has_meaningful_context = bool(
-        discovery.get("existing_systems")
-        or meaningful_constraints
-    )
-
-    has_usable_scope = has_concrete_capability or (
-        has_discovery_capability and has_meaningful_context
-    )
-
-    if (
-        validation.get("status") == "READY"
-        and not has_usable_scope
-    ):
+    if not has_concrete_capability or not has_meaningful_context:
         minimum_scope_question = (
             "What are the main capabilities the portal should provide, "
             "and who will use it?"
         )
-        if minimum_scope_question.lower() not in existing_questions:
+        if minimum_scope_question.lower() not in {q.lower() for q in blocking_questions}:
             blocking_questions.append(minimum_scope_question)
-            existing_questions.add(minimum_scope_question.lower())
 
-    # Contradictions are always blocking.
-    contradictions = [
+    # The validation model may report contradictions, security/compliance
+    # questions, technical unknowns, performance questions, or other concerns.
+    # None of these is automatically a customer blocker. In particular:
+    #   * a high-level scalability goal can be planned with scenarios/ranges;
+    #   * missing performance SLAs can be investigated during solution shaping;
+    #   * baseline security can be treated as a solution constraint while
+    #     specific compliance obligations are investigated;
+    #   * integration details are solution-shaping work;
+    #   * scope sub-types, UX, RBAC and volume are refinement inputs.
+    #
+    # Most importantly, an LLM-generated "contradiction" is not evidence of a
+    # customer-confirmed conflict. Requirements were already grounded against
+    # discovery, so the contradiction field is retained as a diagnostic but
+    # does not route the workflow into clarification. This prevents an
+    # unbounded loop of one-off phrase exceptions.
+    diagnostic_questions = model_questions + [
         str(item).strip()
-        for item in (requirements.get("contradictions", []) or [])
+        for item in (requirements.get("open_questions", []) or [])
+        if str(item).strip()
+    ] + [
+        str(item).strip()
+        for item in (discovery.get("unknowns", []) or [])
         if str(item).strip()
     ]
-    for contradiction in contradictions:
-        if contradiction.lower() not in existing_questions:
-            blocking_questions.append(contradiction)
-            existing_questions.add(contradiction.lower())
 
-    # Promote only explicit, material customer unknowns. Do not infer a
-    # blocker merely because the model mentioned a generic open question.
-    # Critically, an answered topic can never become a blocker again.
+    for question in diagnostic_questions:
+        if not question:
+            continue
+        lower = question.lower()
+        if lower not in {q.lower() for q in blocking_questions} and lower not in existing_questions:
+            non_blocking_questions.append(question)
+            existing_questions.add(lower)
+
+    # Preserve the roles/volume follow-up even if the model omitted it.
+    roles_volume_question = "What are the expected user roles/permissions and expected user volume?"
+    if roles_volume_question.lower() not in {q.lower() for q in non_blocking_questions}:
+        non_blocking_questions.append(roles_volume_question)
+
+    # A customer-confirmed answer must never be reopened as a blocker.
     answered_topics = _answered_clarification_topics(state)
-    for unknown in candidate_text:
-        lowered = unknown.lower()
-        for markers, question, reason in blocker_rules:
-            if any(marker in lowered for marker in markers):
-                topic = _question_topic(question)
-                if topic and topic in answered_topics:
-                    break
-                if question.lower() not in existing_questions:
-                    blocking_questions.append(question)
-                    existing_questions.add(question.lower())
-                if question in non_blocking_questions:
-                    non_blocking_questions.remove(question)
-                break
-
-    # Do not blindly preserve model-selected blockers. The model can identify
-    # uncertainty, but routing remains deterministic: only explicit contradictions,
-    # the minimum-scope gate, and the material customer-decision rules above can block.
-    for question in (validation.get("questions", []) or []):
-        text = str(question).strip()
-        if not text:
-            continue
-        topic = _question_topic(text)
-        if topic and topic in answered_topics:
-            continue
-        lower_text = text.lower()
-        if lower_text not in {q.lower() for q in blocking_questions} and lower_text not in {q.lower() for q in non_blocking_questions}:
-            non_blocking_questions.append(text)
+    blocking_questions = [
+        q for q in blocking_questions
+        if not (_question_topic(q) and _question_topic(q) in answered_topics)
+    ]
 
     status = "NEEDS_INFO" if blocking_questions else "READY"
     reasons = [str(item).strip() for item in (validation.get("reasons", []) or []) if str(item).strip()]
+    contradictory_ready_markers = (
+        "not ready", "not yet ready", "blocking uncertainties",
+        "critical missing details", "prevent the next stage",
+        "cannot proceed", "must be clarified before",
+        "unresolved contradiction", "material customer decisions remain unresolved",
+    )
+    reasons = [
+        r for r in reasons
+        if not any(marker in r.lower() for marker in contradictory_ready_markers)
+    ]
     if status == "READY":
-        contradictory_ready_markers = (
-            "not ready", "not yet ready", "blocking uncertainties",
-            "critical missing details", "prevent the next stage",
-            "cannot proceed", "must be clarified before",
-        )
-        reasons = [
-            r for r in reasons
-            if not any(marker in r.lower() for marker in contradictory_ready_markers)
-        ]
-        if not reasons:
+        if not reasons or not any(
+            marker in " ".join(reasons).lower()
+            for marker in ("preliminary", "proceed", "ready", "sufficient")
+        ):
             reasons.append(
                 "The project has enough grounded information for preliminary solution shaping and delivery planning; remaining unknowns are carried forward as non-blocking questions."
             )
-        elif not any(marker in " ".join(reasons).lower() for marker in ("preliminary", "proceed", "ready", "sufficient")):
-            reasons.append(
-                "The next delivery stage can proceed using explicit assumptions while remaining questions are carried forward as non-blocking follow-ups."
-            )
-    if contradictions and not any("contradiction" in r.lower() for r in reasons):
-        reasons.append("Unresolved contradiction(s) must be clarified before the workflow can continue.")
-    if blocking_questions and status == "NEEDS_INFO" and not any("blocking" in r.lower() for r in reasons):
-        reasons.append("Material customer decisions remain unresolved and block the next delivery stage.")
+    else:
+        reasons.append(
+            "A required lifecycle prerequisite is missing and must be clarified before the next stage."
+        )
 
     validation = {
         "status": status,
@@ -1233,13 +1283,12 @@ REQUIREMENTS:
 def clarification_agent(state: DeliveryState) -> dict:
     """Build the human-in-the-loop clarification payload.
 
-    Validation questions remain useful non-blocking questions. Delivery
-    Review questions can be promoted to REQUIRED when a review blocker is
-    explicitly customer-answerable. Purely internal blockers never become
-    customer questions.
+    Validation is the only stage that can create customer clarification.
+    Delivery Review blockers are deterministic delivery-gate failures and
+    must not reopen customer clarification. Review diagnostics remain in
+    the review payload instead of becoming new customer questions.
     """
     validation = state.get("validation", {}) or {}
-    review = state.get("delivery_review", {}) or {}
     question_map = {}
 
     def add_question(item, default_priority="RECOMMENDED"):
@@ -1278,9 +1327,7 @@ def clarification_agent(state: DeliveryState) -> dict:
     # Clarification is a human-in-the-loop stop. Show the customer only
     # questions that actually block continuation. Non-blocking questions
     # remain in validation and are carried forward, not dumped into the UI.
-    for item in validation.get("blocking_questions", []) or validation.get("questions", []) or []:
-        add_question(item, "REQUIRED")
-    for item in review.get("clarification_questions", []) or []:
+    for item in validation.get("blocking_questions", []) or []:
         add_question(item, "REQUIRED")
 
     questions = _filter_answered_questions(list(question_map.values()), state)
@@ -1653,7 +1700,7 @@ Rules:
 7. Use parallelism only where work can genuinely overlap.
 8. Do not invent cloud providers, technologies, traffic volumes, SLA targets,
    team size, budget or dates that are not supported by the project.
-9. The optimized duration should never be slower than the standard estimate unless there is a concrete, evidence-based reason tied to the actual workstreams. If AI reduces effort but does not change the critical path, keep the standard duration range rather than inventing a longer duration.
+9. The optimized duration does NOT have to meet the customer deadline.
 10. If the optimized scenario is still longer than the customer deadline,
     explicitly calculate the delivery gap and identify realistic scope/capacity/
     sequencing trade-offs that could close it. Do not pretend the deadline is met.
@@ -1780,31 +1827,6 @@ Rules:
         result["deadline_feasibility"] = "NOT_DEMONSTRATED"
 
     optimized_max_weeks = _parse_max_weeks(result["duration_range"])
-    standard_max_weeks = _parse_max_weeks(standard_duration)
-
-    # An optimization scenario must not silently become slower than the
-    # standard scenario. AI may reduce effort without shortening the critical
-    # path, so the conservative outcome in that case is to keep the standard
-    # duration rather than invent a slower schedule.
-    if (
-        optimized_max_weeks is not None
-        and standard_max_weeks is not None
-        and optimized_max_weeks > standard_max_weeks
-    ):
-        result["duration_range"] = standard_duration
-        optimized_max_weeks = standard_max_weeks
-        result["optimization_summary"] = (
-            "The AI-optimized scenario reduces delivery effort through the identified "
-            "automation and parallelization opportunities, but the available evidence "
-            "does not demonstrate a shorter critical-path duration. The schedule therefore "
-            "remains aligned with the standard estimate rather than claiming a slower AI "
-            "delivery scenario."
-        )
-        result["recommendations"] = [
-            *result["recommendations"],
-            "Use AI to reduce delivery effort while keeping the standard critical-path schedule unless further evidence supports additional compression.",
-        ]
-
     deadline_months = _parse_deadline_months(
         discovery.get("constraints", [])
     )
@@ -1913,19 +1935,6 @@ Rules:
     )
     proposal = _ground_downstream_artifact(proposal, state)
 
-    # Keep deadline language mathematically consistent with the parsed ranges.
-    # In particular, do not allow the LLM to claim that a 2-month target is
-    # shorter than a 4–6 week baseline.
-    if isinstance(proposal, dict):
-        customer_deadline = str(estimate.get("customer_deadline") or "").strip()
-        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "").strip()
-        standard_fit = str(estimate.get("standard_deadline_fit") or "").upper()
-        if customer_deadline and baseline_duration and standard_fit == "FITS":
-            proposal["timeline"] = (
-                f"Customer target: {customer_deadline}; current indicative baseline: "
-                f"{baseline_duration}. The baseline fits within the stated customer target."
-            )
-
     # Do not let a preliminary proposal turn an unproven accelerated target
     # into a delivery commitment. Keep the customer target visible, but make
     # the current baseline and feasibility status explicit.
@@ -2015,16 +2024,6 @@ Rules:
     )
     sow = _ground_downstream_artifact(sow, state)
 
-    if isinstance(sow, dict):
-        customer_deadline = str(estimate.get("customer_deadline") or "").strip()
-        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "").strip()
-        standard_fit = str(estimate.get("standard_deadline_fit") or "").upper()
-        if customer_deadline and baseline_duration and standard_fit == "FITS":
-            sow["timeline"] = (
-                f"Customer target: {customer_deadline}; current indicative baseline: "
-                f"{baseline_duration}. The baseline fits within the stated customer target."
-            )
-
     if isinstance(sow, dict) and estimate.get("deadline_feasibility") == "NOT_DEMONSTRATED":
         customer_deadline = str(estimate.get("customer_deadline") or "")
         baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "")
@@ -2046,61 +2045,10 @@ def _flatten_confirmed_discovery(discovery: dict) -> str:
         "users",
         "stakeholders",
         "existing_systems",
-        "scope",
         "constraints",
     )
     values = [discovery.get(key, "") for key in confirmed_keys]
     return " ".join(str(value) for value in values).lower()
-
-
-def _scope_item_to_requirements(scope_item: str) -> list[str]:
-    """Convert explicit customer capabilities into minimal functional requirements."""
-    text = str(scope_item or "").strip().rstrip(".")
-    match = re.match(r"^customers?\s+can\s+(.+)$", text, re.I)
-    if match:
-        capabilities = match.group(1).strip()
-        parts = re.split(r",\s*|\s+and\s+", capabilities, flags=re.I)
-        parts = [part.strip() for part in parts if part.strip()]
-        # Only split a compound list when all resulting parts are short capability
-        # phrases; otherwise preserve the original customer statement verbatim.
-        if len(parts) >= 2 and len(parts) <= 6:
-            return [f"The portal shall allow customers to {part}." for part in parts]
-        return [f"The portal shall allow customers to {capabilities}."]
-    match = re.match(r"^users?\s+can\s+(.+)$", text, re.I)
-    if match:
-        return [f"The portal shall allow users to {match.group(1).strip()}."]
-    return [f"The portal shall support {text[0].lower() + text[1:] if text else text}."]
-
-
-def _extract_explicit_scope_items(request: str) -> list[str]:
-    """Extract explicitly labelled customer scope without inventing capabilities."""
-    text = str(request or "")
-    match = re.search(
-        r"(?:^|\n)\s*scope\s*:\s*(.*?)(?=\n\s*\n|\n\s*(?:business goal|users|stakeholders|existing systems|authentication|security|target delivery timeline|delivery timeline|target timeline|target)\s*:|\Z)",
-        text,
-        re.I | re.S,
-    )
-    if not match:
-        return []
-
-    block = match.group(1).strip()
-    if not block:
-        return []
-
-    # Scope statements are sometimes wrapped across multiple lines. Join those
-    # lines first so a single customer capability is not split accidentally.
-    normalized = " ".join(
-        re.sub(r"^\s*[-*]\s*", "", line).strip()
-        for line in block.splitlines()
-        if line.strip()
-    )
-
-    items: list[str] = []
-    for part in re.split(r"(?<=[.!?])\s+|\s*;\s*", normalized):
-        item = part.strip().rstrip(".")
-        if item and item.lower() not in {existing.lower() for existing in items}:
-            items.append(item)
-    return items
 
 
 def _extract_explicit_timeline_facts(request: str) -> list[str]:
@@ -2127,28 +2075,6 @@ def _extract_explicit_timeline_facts(request: str) -> list[str]:
     )
     if deadline_match:
         facts.append(f"Customer requires completion within {deadline_match.group(1)} month(s).")
-
-    target_timeline_match = re.search(
-        r"\b(?:target\s+delivery\s+timeline|delivery\s+timeline|target\s+timeline|target)\s*[:=-]?\s*"
-        r"(\d+(?:\.\d+)?)\s*months?\b",
-        text,
-        re.I,
-    )
-    if target_timeline_match:
-        facts.append(
-            f"Customer target delivery timeline is {target_timeline_match.group(1)} month(s)."
-        )
-
-    explicit_completion_match = re.search(
-        r"\b(?:launch|complete|completion|deliver|delivery)\s+(?:by|within)\s+"
-        r"(\d+(?:\.\d+)?)\s*months?\b",
-        text,
-        re.I,
-    )
-    if explicit_completion_match and not deadline_match:
-        facts.append(
-            f"Customer requires completion within {explicit_completion_match.group(1)} month(s)."
-        )
 
     return facts
 
@@ -2217,31 +2143,62 @@ def _parse_customer_estimated_months(constraints: list[str]) -> float | None:
 
 
 def _parse_deadline_months(constraints: list[str]) -> float | None:
-    """Extract the required deadline, excluding the customer's baseline estimate."""
+    """Extract an explicit customer delivery deadline from constraints.
+
+    Supports conventional deadline wording and target-delivery wording.
+    Bare duration estimates are intentionally ignored.
+    """
     import re
 
+    number_words = {
+        "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
+        "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0,
+        "nine": 9.0, "ten": 10.0,
+    }
     values: list[float] = []
-    for item in constraints or []:
-        text = str(item).lower()
-        match = re.search(
-            r"(?:within|by|deadline(?: is)?|complete(?:d)? by|"
-            r"target\s+delivery\s+timeline(?:\s+is)?|"
-            r"delivery\s+timeline(?:\s+is)?|"
-            r"target\s+timeline(?:\s+is)?|"
-            r"target(?:\s+delivery)?(?:\s+timeline)?(?:\s+is)?)[^0-9]{0,40}"
-            r"(\d+(?:\.\d+)?)\s*months?",
-            text,
-        )
-        if match:
-            values.append(float(match.group(1)))
-            continue
-        if "estimated" in text:
-            prefix = text.split("estimated", 1)[0]
-            match = re.search(r"(\d+(?:\.\d+)?)\s*months?", prefix)
-            if match:
-                values.append(float(match.group(1)))
-    return min(values) if values else None
 
+    prefixes = (
+        r"within",
+        r"by",
+        r"deadline",
+        r"complete(?:d)?\s+by",
+        r"target\s+(?:delivery\s+)?timeline",
+        r"delivery\s+timeline",
+        r"target\s+delivery",
+    )
+    prefix_pattern = "(?:" + "|".join(prefixes) + ")"
+
+    # The optional connector deliberately allows the natural forms:
+    # "timeline is 2 months", "timeline of 2 months",
+    # "deadline: 2 months", and "within 2 months".
+    connector = r"(?:\s+(?:is|of))?\s*[:\-]?\s*"
+
+    numeric_pattern = re.compile(
+        prefix_pattern
+        + connector
+        + r"(\d+(?:[.,]\d+)?)\s*months?\b"
+    )
+    word_pattern = re.compile(
+        prefix_pattern
+        + connector
+        + r"(" + "|".join(number_words) + r")\s*months?\b"
+    )
+
+    for item in constraints or []:
+        text = str(item).strip().lower()
+        if not text:
+            continue
+
+        match = numeric_pattern.search(text)
+        if match:
+            values.append(float(match.group(1).replace(",", ".")))
+            continue
+
+        word_match = word_pattern.search(text)
+        if word_match:
+            values.append(number_words[word_match.group(1)])
+
+    return min(values) if values else None
 
 def _normalize_effort_range(value: object) -> str:
     """Reject duration-like effort values that cannot be interpreted as effort."""
@@ -2277,7 +2234,6 @@ def _deterministic_delivery_gate(
     discovery: dict,
     requirements: dict,
     estimate: dict,
-    ai_optimization: dict | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Enforce objective delivery invariants independently of the LLM."""
     blocking: list[str] = []
@@ -2286,9 +2242,7 @@ def _deterministic_delivery_gate(
 
     # 1. Deadline feasibility is an assessment, not an automatic customer blocker.
     deadline_months = _parse_deadline_months(discovery.get("constraints", []))
-    standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
-    ai_max_weeks = _parse_max_weeks((ai_optimization or {}).get("duration_range", ""))
-    estimate_max_weeks = ai_max_weeks if ai_optimization and ai_max_weeks is not None else standard_max_weeks
+    estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
     customer_baseline_months = _parse_customer_estimated_months(discovery.get("constraints", []))
 
     if deadline_months is not None and estimate_max_weeks is not None:
@@ -2307,16 +2261,12 @@ def _deterministic_delivery_gate(
                     "before claiming the target is achievable."
                 )
         elif estimate_max_weeks > deadline_weeks:
-            scenario_label = "AI-optimized delivery scenario" if ai_optimization else "standard delivery scenario"
             warnings.append(
-                f"The current {scenario_label} exceeds the explicit customer deadline; "
+                "The current AI delivery scenario exceeds the explicit customer deadline; "
                 "this is a feasibility risk, not by itself a customer clarification blocker."
             )
         else:
-            scenario_label = "AI-optimized delivery scenario" if ai_optimization else "standard delivery scenario"
-            checks.append(
-                f"The current {scenario_label} does not exceed the explicit customer deadline."
-            )
+            checks.append("The current delivery scenario does not exceed the explicit customer deadline.")
     else:
         warnings.append("A machine-checkable customer deadline or estimate duration was not available.")
 
@@ -2397,9 +2347,6 @@ DELIVERY PLAN:
 ESTIMATE:
 {estimate}
 
-AI OPTIMIZATION (when explicitly requested):
-{ai_optimization or "not requested"}
-
 Rules:
 1. A requirement or explicit customer statement is the source of truth.
 2. Flag as BLOCKING any confirmed scope item that cannot be traced to
@@ -2449,15 +2396,23 @@ Rules:
         discovery=discovery,
         requirements=requirements,
         estimate=estimate,
-        ai_optimization=ai_optimization,
     )
 
+    # The LLM review is advisory. It can identify risks, inconsistencies and
+    # questions, but it must not create a customer blocker by itself. Otherwise
+    # every newly-worded uncertainty (scope detail, traffic, integration
+    # maturity, compliance detail, etc.) can reopen clarification indefinitely.
+    # Only deterministic invariants below are allowed to populate
+    # blocking_issues.
     blocking_issues = []
     warnings = list(review.get("warnings", []))
     checks = list(review.get("checks", []))
     deadline_review_removed = False
+
     for issue in (review.get("blocking_issues", []) or []):
         text = str(issue).strip()
+        if not text:
+            continue
         lower = text.lower()
         deadline_related = (
             "deadline" in lower
@@ -2471,15 +2426,15 @@ Rules:
             )
         )
 
-        # The standard Analyze Request flow does not run AI optimization.
-        # Therefore a gap between the standard estimate and customer deadline
-        # is an assessment/warning, not a customer blocker. Only the explicit
-        # Optimize with AI action can produce a deadline-feasibility blocker.
+        # A model-reported deadline gap is advisory in the standard Analyze
+        # flow. AI optimization is optional and is assessed separately.
         if not ai_optimization and deadline_related:
             deadline_review_removed = True
             continue
 
-        blocking_issues.append(text)
+        advisory = f"Delivery review advisory: {text}"
+        if advisory.lower() not in {str(w).lower() for w in warnings}:
+            warnings.append(advisory)
 
     clarification_questions = list(review.get("clarification_questions", []))
     if not ai_optimization:
@@ -2509,31 +2464,7 @@ Rules:
             filtered_questions.append(question)
         clarification_questions = filtered_questions
 
-    # Remove stale LLM statements that contradict machine-checkable deadline math.
-    deadline_months = _parse_deadline_months(discovery.get("constraints", []))
-    standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
-    if deadline_months is not None and standard_max_weeks is not None:
-        deadline_weeks = deadline_months * 4.345
-        if standard_max_weeks <= deadline_weeks:
-            warnings = [
-                warning
-                for warning in warnings
-                if not (
-                    "standard" in str(warning).lower()
-                    and "longer" in str(warning).lower()
-                    and "deadline" in str(warning).lower()
-                )
-            ]
-
-    if ai_optimization:
-        warnings = [
-            warning
-            for warning in warnings
-            if "ai-optimized scenario is not provided" not in str(warning).lower()
-            and "ai-optimized scenario is not available" not in str(warning).lower()
-        ]
-
-    if deadline_review_removed and not ai_optimization:
+    if deadline_review_removed:
         warnings.append(
             "The standard delivery estimate does not demonstrate the customer's target deadline. "
             "AI optimization is optional and must be run separately before assessing whether AI-native "
