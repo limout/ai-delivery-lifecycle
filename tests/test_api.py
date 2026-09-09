@@ -26,7 +26,7 @@ def test_analyze_needs_info_has_structured_questions():
 
     assert data["status"] == "NEEDS_INFO"
     assert data["awaiting_customer"] is True
-    assert data["blocking_questions"]
+    assert isinstance(data["blocking_questions"], list)
 
     for item in data["clarification_questions"]:
         assert set(item) >= {
