@@ -227,6 +227,10 @@ class OllamaProvider(AIProvider):
             "prompt": prompt,
             "stream": False,
             "format": schema,
+            # Qwen3 enables reasoning by default. For structured agent output
+            # we do not need hidden chain-of-thought; disabling it prevents
+            # clarification re-runs from getting stuck in long reasoning.
+            "think": False,
             "options": {"temperature": 0},
         }
 

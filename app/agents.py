@@ -1653,7 +1653,7 @@ Rules:
 7. Use parallelism only where work can genuinely overlap.
 8. Do not invent cloud providers, technologies, traffic volumes, SLA targets,
    team size, budget or dates that are not supported by the project.
-9. The optimized duration does NOT have to meet the customer deadline.
+9. The optimized duration should never be slower than the standard estimate unless there is a concrete, evidence-based reason tied to the actual workstreams. If AI reduces effort but does not change the critical path, keep the standard duration range rather than inventing a longer duration.
 10. If the optimized scenario is still longer than the customer deadline,
     explicitly calculate the delivery gap and identify realistic scope/capacity/
     sequencing trade-offs that could close it. Do not pretend the deadline is met.
@@ -1780,6 +1780,31 @@ Rules:
         result["deadline_feasibility"] = "NOT_DEMONSTRATED"
 
     optimized_max_weeks = _parse_max_weeks(result["duration_range"])
+    standard_max_weeks = _parse_max_weeks(standard_duration)
+
+    # An optimization scenario must not silently become slower than the
+    # standard scenario. AI may reduce effort without shortening the critical
+    # path, so the conservative outcome in that case is to keep the standard
+    # duration rather than invent a slower schedule.
+    if (
+        optimized_max_weeks is not None
+        and standard_max_weeks is not None
+        and optimized_max_weeks > standard_max_weeks
+    ):
+        result["duration_range"] = standard_duration
+        optimized_max_weeks = standard_max_weeks
+        result["optimization_summary"] = (
+            "The AI-optimized scenario reduces delivery effort through the identified "
+            "automation and parallelization opportunities, but the available evidence "
+            "does not demonstrate a shorter critical-path duration. The schedule therefore "
+            "remains aligned with the standard estimate rather than claiming a slower AI "
+            "delivery scenario."
+        )
+        result["recommendations"] = [
+            *result["recommendations"],
+            "Use AI to reduce delivery effort while keeping the standard critical-path schedule unless further evidence supports additional compression.",
+        ]
+
     deadline_months = _parse_deadline_months(
         discovery.get("constraints", [])
     )
@@ -1888,6 +1913,19 @@ Rules:
     )
     proposal = _ground_downstream_artifact(proposal, state)
 
+    # Keep deadline language mathematically consistent with the parsed ranges.
+    # In particular, do not allow the LLM to claim that a 2-month target is
+    # shorter than a 4–6 week baseline.
+    if isinstance(proposal, dict):
+        customer_deadline = str(estimate.get("customer_deadline") or "").strip()
+        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "").strip()
+        standard_fit = str(estimate.get("standard_deadline_fit") or "").upper()
+        if customer_deadline and baseline_duration and standard_fit == "FITS":
+            proposal["timeline"] = (
+                f"Customer target: {customer_deadline}; current indicative baseline: "
+                f"{baseline_duration}. The baseline fits within the stated customer target."
+            )
+
     # Do not let a preliminary proposal turn an unproven accelerated target
     # into a delivery commitment. Keep the customer target visible, but make
     # the current baseline and feasibility status explicit.
@@ -1976,6 +2014,16 @@ Rules:
         schema=SOW_SCHEMA,
     )
     sow = _ground_downstream_artifact(sow, state)
+
+    if isinstance(sow, dict):
+        customer_deadline = str(estimate.get("customer_deadline") or "").strip()
+        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "").strip()
+        standard_fit = str(estimate.get("standard_deadline_fit") or "").upper()
+        if customer_deadline and baseline_duration and standard_fit == "FITS":
+            sow["timeline"] = (
+                f"Customer target: {customer_deadline}; current indicative baseline: "
+                f"{baseline_duration}. The baseline fits within the stated customer target."
+            )
 
     if isinstance(sow, dict) and estimate.get("deadline_feasibility") == "NOT_DEMONSTRATED":
         customer_deadline = str(estimate.get("customer_deadline") or "")
@@ -2229,6 +2277,7 @@ def _deterministic_delivery_gate(
     discovery: dict,
     requirements: dict,
     estimate: dict,
+    ai_optimization: dict | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Enforce objective delivery invariants independently of the LLM."""
     blocking: list[str] = []
@@ -2237,7 +2286,9 @@ def _deterministic_delivery_gate(
 
     # 1. Deadline feasibility is an assessment, not an automatic customer blocker.
     deadline_months = _parse_deadline_months(discovery.get("constraints", []))
-    estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+    standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+    ai_max_weeks = _parse_max_weeks((ai_optimization or {}).get("duration_range", ""))
+    estimate_max_weeks = ai_max_weeks if ai_optimization and ai_max_weeks is not None else standard_max_weeks
     customer_baseline_months = _parse_customer_estimated_months(discovery.get("constraints", []))
 
     if deadline_months is not None and estimate_max_weeks is not None:
@@ -2256,12 +2307,16 @@ def _deterministic_delivery_gate(
                     "before claiming the target is achievable."
                 )
         elif estimate_max_weeks > deadline_weeks:
+            scenario_label = "AI-optimized delivery scenario" if ai_optimization else "standard delivery scenario"
             warnings.append(
-                "The current AI delivery scenario exceeds the explicit customer deadline; "
+                f"The current {scenario_label} exceeds the explicit customer deadline; "
                 "this is a feasibility risk, not by itself a customer clarification blocker."
             )
         else:
-            checks.append("The current delivery scenario does not exceed the explicit customer deadline.")
+            scenario_label = "AI-optimized delivery scenario" if ai_optimization else "standard delivery scenario"
+            checks.append(
+                f"The current {scenario_label} does not exceed the explicit customer deadline."
+            )
     else:
         warnings.append("A machine-checkable customer deadline or estimate duration was not available.")
 
@@ -2342,6 +2397,9 @@ DELIVERY PLAN:
 ESTIMATE:
 {estimate}
 
+AI OPTIMIZATION (when explicitly requested):
+{ai_optimization or "not requested"}
+
 Rules:
 1. A requirement or explicit customer statement is the source of truth.
 2. Flag as BLOCKING any confirmed scope item that cannot be traced to
@@ -2391,6 +2449,7 @@ Rules:
         discovery=discovery,
         requirements=requirements,
         estimate=estimate,
+        ai_optimization=ai_optimization,
     )
 
     blocking_issues = []
@@ -2450,7 +2509,31 @@ Rules:
             filtered_questions.append(question)
         clarification_questions = filtered_questions
 
-    if deadline_review_removed:
+    # Remove stale LLM statements that contradict machine-checkable deadline math.
+    deadline_months = _parse_deadline_months(discovery.get("constraints", []))
+    standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+    if deadline_months is not None and standard_max_weeks is not None:
+        deadline_weeks = deadline_months * 4.345
+        if standard_max_weeks <= deadline_weeks:
+            warnings = [
+                warning
+                for warning in warnings
+                if not (
+                    "standard" in str(warning).lower()
+                    and "longer" in str(warning).lower()
+                    and "deadline" in str(warning).lower()
+                )
+            ]
+
+    if ai_optimization:
+        warnings = [
+            warning
+            for warning in warnings
+            if "ai-optimized scenario is not provided" not in str(warning).lower()
+            and "ai-optimized scenario is not available" not in str(warning).lower()
+        ]
+
+    if deadline_review_removed and not ai_optimization:
         warnings.append(
             "The standard delivery estimate does not demonstrate the customer's target deadline. "
             "AI optimization is optional and must be run separately before assessing whether AI-native "
