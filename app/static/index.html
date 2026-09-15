@@ -757,7 +757,7 @@
 
         <div class="action-row">
             <button id="analyzeButton" onclick="analyze()">Analyze delivery request</button>
-            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optional: Optimize with AI</button>
+            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
         </div>
 
         <div id="loading" class="loading hidden">
@@ -875,7 +875,6 @@
                 <button class="artifact-tab" data-tab="solution" onclick="selectTab('solution')">Solution</button>
                 <button class="artifact-tab" data-tab="delivery_plan" onclick="selectTab('delivery_plan')">Delivery Plan</button>
                 <button class="artifact-tab" data-tab="estimate" onclick="selectTab('estimate')">Estimate</button>
-                <button class="artifact-tab" data-tab="ai_optimization" id="tab-ai_optimization" hidden onclick="selectTab('ai_optimization')">AI-assisted scenario</button>
                 <button class="artifact-tab" data-tab="delivery_review" onclick="selectTab('delivery_review')">Review</button>
                 <button class="artifact-tab" data-tab="proposal" onclick="selectTab('proposal')">Proposal</button>
                 <button class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
@@ -1010,29 +1009,18 @@
                 </div>
                 <p class="disclaimer artifact-screen" id="estimateDisclaimer"></p>
                 <div class="artifact-screen" id="estimateContent"></div>
-                <div class="ai-optimization-panel artifact-screen no-print">
+                <div class="ai-optimization-panel artifact-screen">
                     <div class="ai-optimization-header">
                         <div>
                             <h3>AI Delivery Optimization</h3>
-                            <div class="section-kicker">Optional AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
+                            <div class="section-kicker">AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
                         </div>
-                        <button id="optimizeButtonPanel" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
+                        <button id="optimizeButtonPanel" class="optimize-button no-print" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
                     </div>
-                    <p class="section-kicker" id="aiScenarioHint">Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.</p>
-                    <div id="estimateAiSummary"></div>
+                    <p class="section-kicker" id="aiScenarioHint">Run Optimize with AI to compare an AI-assisted scenario. Copying this estimate does not include that scenario.</p>
+                    <div id="aiOptimizationContent"></div>
                 </div>
                 <pre class="artifact-print-sheet" data-print-sheet="estimate"></pre>
-            </section>
-
-            <section id="panel-ai_optimization" class="artifact-panel">
-                <h2 class="card-title">Optional AI-assisted scenario</h2>
-                <div class="section-kicker">Separate from the independent estimate. Scenario analysis only — not a guaranteed acceleration.</div>
-                <div class="artifact-toolbar no-print" data-artifact-toolbar="ai_optimization" hidden>
-                    <button type="button" class="secondary-button" data-copy-artifact="ai_optimization">Copy text</button>
-                    <button type="button" class="secondary-button" data-print-artifact="ai_optimization">Print / save as PDF</button>
-                </div>
-                <div class="artifact-screen" id="aiOptimizationContent"><span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span></div>
-                <pre class="artifact-print-sheet" data-print-sheet="ai_optimization"></pre>
             </section>
 
             <section id="panel-delivery_review" class="artifact-panel">
@@ -1366,7 +1354,70 @@
         currentArtifactTab = tabName;
     }
 
+    function formatExportSection(title, value) {
+        if (Array.isArray(value)) {
+            const items = value.map(item => String(item).trim()).filter(Boolean);
+            if (!items.length) return "";
+            return `${title}\n${items.map(item => `- ${item}`).join("\n")}`;
+        }
+        const body = value === null || value === undefined ? "" : String(value).trim();
+        if (!body) return "";
+        return `${title}\n${body}`;
+    }
+
+    function formatAiScenarioExportText(data) {
+        if (!data || typeof data !== "object") return "";
+        const duration = String(data.duration_range || "").trim();
+        if (!duration) return "";
+        const status = String(data.deadline_feasibility || "NOT_DEMONSTRATED").replaceAll("_", " ");
+        const parts = [
+            "AI-ASSISTED SCENARIO",
+            "AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.",
+            formatExportSection("AI-assisted duration", duration),
+            formatExportSection("Customer estimate", data.customer_baseline_duration),
+            formatExportSection("Independent estimate", data.standard_duration_range),
+            formatExportSection("AI effort", data.effort_range),
+            formatExportSection("Deadline", data.customer_deadline),
+            formatExportSection("Deadline feasibility", status),
+            formatExportSection("Delivery gap", data.deadline_gap),
+            formatExportSection("Confidence", data.confidence),
+            formatExportSection("Team model", data.optimization_team_model),
+            formatExportSection("Optimization summary", data.optimization_summary),
+            formatExportSection("Optimization levers", data.optimization_levers || []),
+            formatExportSection("Feasibility conditions", data.feasibility_conditions || []),
+            formatExportSection("Scope trade-offs", data.scope_tradeoffs || []),
+            formatExportSection("Recommendations", data.recommendations || [])
+        ];
+        return parts.filter(Boolean).join("\n\n") + "\n";
+    }
+
+    function visibleEstimateAiText() {
+        const panel = document.querySelector("#panel-estimate .ai-optimization-panel");
+        if (!panel) return "";
+        const clone = panel.cloneNode(true);
+        clone.querySelectorAll("button, .optimize-button, .artifact-toolbar, [hidden]").forEach(node => node.remove());
+        const hint = clone.querySelector("#aiScenarioHint");
+        if (hint) hint.remove();
+        const content = clone.querySelector("#aiOptimizationContent");
+        if (!content || !content.innerText.trim()) return "";
+        return clone.innerText.replace(/\n{3,}/g, "\n\n").trim();
+    }
+
+    function estimateExportText(data) {
+        const source = data || currentData || {};
+        const texts = source.artifact_texts || {};
+        const baseline = texts.estimate || "";
+        if (!hasAiOptimizationResult(source)) return baseline;
+        const fromDom = visibleEstimateAiText();
+        const fromState = formatAiScenarioExportText(source.ai_optimization);
+        const ai = fromState || fromDom;
+        if (!ai) return baseline;
+        if (!baseline) return ai;
+        return `${baseline.trim()}\n\n${ai.trim()}\n`;
+    }
+
     function artifactText(name) {
+        if (name === "estimate") return estimateExportText(currentData);
         const texts = (currentData && currentData.artifact_texts) || {};
         if (texts[name]) return texts[name];
         if (name === "assessment") {
@@ -1387,7 +1438,7 @@
 
     function preferredTabAfterResult(data, source) {
         if (source === "optimize" && hasAiOptimizationResult(data)) {
-            return "ai_optimization";
+            return "estimate";
         }
         const review = data && data.delivery_review;
         if (review && String(review.status || "").toUpperCase() === "BLOCKED") {
@@ -1397,9 +1448,6 @@
     }
 
     function artifactIsAvailable(name, data) {
-        if (name === "ai_optimization") {
-            return hasAiOptimizationResult(data);
-        }
         const texts = (data && data.artifact_texts) || {};
         if (texts[name]) return true;
         if (name === "assessment") {
@@ -1411,7 +1459,7 @@
     function updateArtifactActions(data) {
         const names = [
             "assessment", "solution", "delivery_plan", "estimate",
-            "ai_optimization", "proposal", "sow"
+            "proposal", "sow"
         ];
         names.forEach(name => {
             const available = artifactIsAvailable(name, data);
@@ -1419,16 +1467,9 @@
                 bar.hidden = !available;
             });
         });
-        const aiTab = document.getElementById("tab-ai_optimization");
-        if (aiTab) {
-            aiTab.hidden = !artifactIsAvailable("ai_optimization", data);
-        }
         const hint = document.getElementById("aiScenarioHint");
         if (hint) {
             hint.hidden = hasAiOptimizationResult(data);
-            hint.textContent = hasAiOptimizationResult(data)
-                ? "The AI-assisted scenario is on its own tab. Copying this estimate does not include that scenario."
-                : "Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.";
         }
     }
 
@@ -1554,41 +1595,15 @@
                 "Indicative estimate — based on the information provided, not a delivery commitment or quote."
             );
         }
-        renderEstimateAiSummary(currentData && currentData.ai_optimization);
-    }
-
-    function renderEstimateAiSummary(data) {
-        const container = document.getElementById("estimateAiSummary");
-        if (!container) return;
-        if (!hasAiOptimizationResult(currentData)) {
-            container.innerHTML = "";
-            return;
-        }
-        const opt = (data && typeof data === "object") ? data : {};
-        const status = String(opt.deadline_feasibility || "NOT_DEMONSTRATED").toUpperCase();
-        container.innerHTML = `
-            <p class="section-kicker">Optional AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</p>
-            <div class="document-grid" style="margin-top:12px">
-                ${renderDocumentSection("Duration", opt.duration_range || "Not demonstrated")}
-                ${renderDocumentSection("Deadline", opt.customer_deadline || "Not provided")}
-                ${renderDocumentSection("Deadline feasibility", status.replaceAll("_", " "))}
-                ${renderDocumentSection("Confidence", opt.confidence || "LOW")}
-                ${renderDocumentSection("Optimization summary", opt.optimization_summary || "Not provided", true)}
-            </div>
-            <button type="button" class="secondary-button" id="viewAiScenarioButton" style="margin-top:14px">View full AI-assisted scenario</button>
-        `;
-        const viewButton = document.getElementById("viewAiScenarioButton");
-        if (viewButton) {
-            viewButton.onclick = () => selectTab("ai_optimization");
-        }
+        renderAIOptimization(currentData && currentData.ai_optimization);
     }
 
     function renderAIOptimization(data) {
         const container = document.getElementById("aiOptimizationContent");
         if (!container) return;
 
-        if (!data || typeof data !== "object") {
-            container.innerHTML = '<span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span>';
+        if (!hasAiOptimizationResult(currentData) || !data || typeof data !== "object") {
+            container.innerHTML = "";
             return;
         }
 
@@ -1604,7 +1619,7 @@
         const cards = [
             ["Customer estimate", data.customer_baseline_duration || "Not provided"],
             ["Independent estimate", data.standard_duration_range || "Not available"],
-            ["Optional AI-assisted scenario", data.duration_range || "Not demonstrated"]
+            ["AI-assisted scenario", data.duration_range || "Not demonstrated"]
         ];
 
         container.innerHTML = `
@@ -2105,7 +2120,7 @@ function updateRunningStatus(message) {
         } finally {
             buttons.forEach(button => {
                 button.disabled = false;
-                button.textContent = "Optional: Optimize with AI";
+                button.textContent = "Optimize with AI";
             });
             document.getElementById("loading").classList.add("hidden");
         }

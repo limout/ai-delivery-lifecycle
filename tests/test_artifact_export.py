@@ -21,7 +21,6 @@ COPY_PRINT_ARTIFACTS = (
     "solution",
     "delivery_plan",
     "estimate",
-    "ai_optimization",
     "proposal",
     "sow",
 )
@@ -36,7 +35,8 @@ def test_home_page_has_copy_and_print_actions_for_each_artifact():
         assert f'data-print-artifact="{name}"' in html
         assert f'data-artifact-toolbar="{name}"' in html
         assert f'data-print-sheet="{name}"' in html
-    assert 'data-tab="ai_optimization"' in html
+    assert 'data-tab="ai_optimization"' not in html
+    assert 'data-copy-artifact="ai_optimization"' not in html
     assert "function copyArtifact" in html
     assert "function printArtifact" in html
     assert "artifact-panel.printing" in html

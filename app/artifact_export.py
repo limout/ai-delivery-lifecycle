@@ -80,7 +80,7 @@ def format_estimate_text(estimate: dict | None, disclaimer: str = "") -> str:
         return ""
     parts = [
         "INDEPENDENT ESTIMATE",
-        "Baseline human-led estimate. This is not the optional AI-assisted scenario.",
+        "Baseline human-led estimate. This is not the AI-assisted scenario.",
         _section("Duration", duration),
         _section("Effort", estimate.get("baseline_effort_range") or estimate.get("effort_range")),
         _section("Confidence", estimate.get("confidence")),
