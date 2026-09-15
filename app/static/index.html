@@ -277,7 +277,13 @@
             color: var(--muted);
             line-height: 1.45;
         }
-        .assessment-toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
+        .assessment-toolbar, .artifact-toolbar {
+            display:flex;
+            gap:10px;
+            flex-wrap:wrap;
+            margin-bottom: 14px;
+        }
+        .artifact-print-sheet { display: none; }
         .secondary-button { background:#fff; color:var(--blue); border:1px solid #bfdbfe; }
         .secondary-button:hover { background: var(--blue-soft); }
         .assessment-pre {
@@ -303,26 +309,30 @@
         }
         @media print {
             header, .no-print, #error, #questions, .lifecycle-card, .artifact-tabs,
-            .json-details, #verdict, .assessment-toolbar, #assessmentText {
+            .json-details, #verdict, .assessment-toolbar, .artifact-toolbar {
                 display: none !important;
             }
-            #result, #panel-assessment { display: block !important; }
+            #result { display: block !important; }
             .artifact-panel { display: none !important; }
-            #panel-assessment.artifact-panel { display: block !important; }
+            .artifact-panel.printing { display: block !important; }
+            .artifact-panel.printing .artifact-screen { display: none !important; }
+            .artifact-panel.printing .card-title,
+            .artifact-panel.printing .section-kicker,
+            .artifact-panel.printing .disclaimer { display: none !important; }
             body { background: #fff; color: #111; }
-            .container { padding: 0.4in; max-width: none; }
-            #printAssessment {
+            .container { padding: 0.5in; max-width: none; }
+            .artifact-print-sheet {
+                display: none;
+            }
+            .artifact-panel.printing .artifact-print-sheet {
                 display: block !important;
                 font-family: Georgia, "Times New Roman", serif;
-                font-size: 10.5pt;
-                line-height: 1.28;
+                font-size: 11pt;
+                line-height: 1.4;
                 white-space: pre-wrap;
                 margin: 0;
             }
-            #printAssessment h2, #panel-assessment .card-title,
-            #panel-assessment .section-kicker { display: none !important; }
         }
-        #printAssessment { display: none; }
 
         @media (max-width: 900px) {
             .verdict-metrics { grid-template-columns: 1fr 1fr; }
@@ -865,6 +875,7 @@
                 <button class="artifact-tab" data-tab="solution" onclick="selectTab('solution')">Solution</button>
                 <button class="artifact-tab" data-tab="delivery_plan" onclick="selectTab('delivery_plan')">Delivery Plan</button>
                 <button class="artifact-tab" data-tab="estimate" onclick="selectTab('estimate')">Estimate</button>
+                <button class="artifact-tab" data-tab="ai_optimization" id="tab-ai_optimization" hidden onclick="selectTab('ai_optimization')">AI-assisted scenario</button>
                 <button class="artifact-tab" data-tab="delivery_review" onclick="selectTab('delivery_review')">Review</button>
                 <button class="artifact-tab" data-tab="proposal" onclick="selectTab('proposal')">Proposal</button>
                 <button class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
@@ -872,13 +883,15 @@
 
             <section id="panel-assessment" class="artifact-panel active">
                 <h2 class="card-title">Delivery assessment</h2>
-                <div class="section-kicker">One-page view you can copy or print for a Delivery Lead.</div>
-                <div class="assessment-toolbar no-print">
-                    <button type="button" class="secondary-button" onclick="copyAssessment()">Copy assessment</button>
-                    <button type="button" class="secondary-button" onclick="window.print()">Print / save as PDF</button>
+                <div class="section-kicker">Readable view you can copy or print for a Delivery Lead.</div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="assessment" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="assessment">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="assessment">Print / save as PDF</button>
                 </div>
-                <pre id="assessmentText" class="assessment-pre"></pre>
-                <pre id="printAssessment" class="print-assessment"></pre>
+                <div class="artifact-screen">
+                    <pre id="assessmentText" class="assessment-pre"></pre>
+                </div>
+                <pre class="artifact-print-sheet" data-print-sheet="assessment" id="printAssessment"></pre>
             </section>
 
             <section id="panel-discovery" class="artifact-panel">
@@ -969,21 +982,35 @@
             <section id="panel-solution" class="artifact-panel">
                 <h2 class="card-title">Solution</h2>
                 <div class="section-kicker">Initial solution shape derived from validated requirements.</div>
-                <div id="solutionContent"></div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="solution" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="solution">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="solution">Print / save as PDF</button>
+                </div>
+                <div class="artifact-screen" id="solutionContent"></div>
+                <pre class="artifact-print-sheet" data-print-sheet="solution"></pre>
             </section>
 
             <section id="panel-delivery_plan" class="artifact-panel">
                 <h2 class="card-title">Delivery Plan</h2>
                 <div class="section-kicker">Proposed delivery approach, phases, dependencies and sequencing.</div>
-                <div id="deliveryPlanContent"></div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="delivery_plan" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="delivery_plan">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="delivery_plan">Print / save as PDF</button>
+                </div>
+                <div class="artifact-screen" id="deliveryPlanContent"></div>
+                <pre class="artifact-print-sheet" data-print-sheet="delivery_plan"></pre>
             </section>
 
             <section id="panel-estimate" class="artifact-panel">
                 <h2 class="card-title">Estimate</h2>
                 <div class="section-kicker">Independent human-only baseline. Not a delivery commitment or quote.</div>
-                <p class="disclaimer" id="estimateDisclaimer"></p>
-                <div id="estimateContent"></div>
-                <div class="ai-optimization-panel">
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="estimate" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="estimate">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="estimate">Print / save as PDF</button>
+                </div>
+                <p class="disclaimer artifact-screen" id="estimateDisclaimer"></p>
+                <div class="artifact-screen" id="estimateContent"></div>
+                <div class="ai-optimization-panel artifact-screen no-print">
                     <div class="ai-optimization-header">
                         <div>
                             <h3>AI Delivery Optimization</h3>
@@ -991,8 +1018,20 @@
                         </div>
                         <button id="optimizeButtonPanel" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
                     </div>
-                    <div id="aiOptimizationContent"><span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span></div>
+                    <p class="section-kicker" id="aiScenarioHint">Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.</p>
                 </div>
+                <pre class="artifact-print-sheet" data-print-sheet="estimate"></pre>
+            </section>
+
+            <section id="panel-ai_optimization" class="artifact-panel">
+                <h2 class="card-title">Optional AI-assisted scenario</h2>
+                <div class="section-kicker">Separate from the independent estimate. Scenario analysis only — not a guaranteed acceleration.</div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="ai_optimization" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="ai_optimization">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="ai_optimization">Print / save as PDF</button>
+                </div>
+                <div class="artifact-screen" id="aiOptimizationContent"><span class="empty">Run Analyze Request first, then optimize the delivery approach with AI.</span></div>
+                <pre class="artifact-print-sheet" data-print-sheet="ai_optimization"></pre>
             </section>
 
             <section id="panel-delivery_review" class="artifact-panel">
@@ -1004,13 +1043,23 @@
             <section id="panel-proposal" class="artifact-panel">
                 <h2 class="card-title">Proposal</h2>
                 <div class="section-kicker">Business-facing proposal generated from the lifecycle state.</div>
-                <div id="proposalContent"></div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="proposal" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="proposal">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="proposal">Print / save as PDF</button>
+                </div>
+                <div class="artifact-screen" id="proposalContent"></div>
+                <pre class="artifact-print-sheet" data-print-sheet="proposal"></pre>
             </section>
 
             <section id="panel-sow" class="artifact-panel">
                 <h2 class="card-title">Statement of Work</h2>
                 <div class="section-kicker">Final structured delivery scope and commercial artifact.</div>
-                <div id="sowContent"></div>
+                <div class="artifact-toolbar no-print" data-artifact-toolbar="sow" hidden>
+                    <button type="button" class="secondary-button" data-copy-artifact="sow">Copy text</button>
+                    <button type="button" class="secondary-button" data-print-artifact="sow">Print / save as PDF</button>
+                </div>
+                <div class="artifact-screen" id="sowContent"></div>
+                <pre class="artifact-print-sheet" data-print-sheet="sow"></pre>
             </section>
 
             <details class="json-details">
@@ -1034,6 +1083,7 @@
 <script>
     let currentIteration = 1;
     let currentData = null;
+    let currentArtifactTab = "assessment";
 
     const STAGES = [
         "discovery",
@@ -1310,8 +1360,85 @@
                 "active",
                 panel.id === `panel-${tabName}`
             );
+            panel.classList.remove("printing");
         });
+        currentArtifactTab = tabName;
     }
+
+    function artifactText(name) {
+        const texts = (currentData && currentData.artifact_texts) || {};
+        if (texts[name]) return texts[name];
+        if (name === "assessment") {
+            return (currentData && currentData.assessment_text) || "";
+        }
+        return "";
+    }
+
+    function artifactIsAvailable(name, data) {
+        const texts = (data && data.artifact_texts) || {};
+        if (texts[name]) return true;
+        if (name === "assessment") {
+            return !!(data && (data.assessment_text || data.assessment));
+        }
+        return false;
+    }
+
+    function updateArtifactActions(data) {
+        const names = [
+            "assessment", "solution", "delivery_plan", "estimate",
+            "ai_optimization", "proposal", "sow"
+        ];
+        names.forEach(name => {
+            const available = artifactIsAvailable(name, data);
+            document.querySelectorAll(`[data-artifact-toolbar="${name}"]`).forEach(bar => {
+                bar.hidden = !available;
+            });
+        });
+        const aiTab = document.getElementById("tab-ai_optimization");
+        if (aiTab) {
+            aiTab.hidden = !artifactIsAvailable("ai_optimization", data);
+        }
+        const hint = document.getElementById("aiScenarioHint");
+        if (hint) {
+            hint.textContent = artifactIsAvailable("ai_optimization", data)
+                ? "The AI-assisted scenario is on its own tab. Copying this estimate does not include that scenario."
+                : "Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.";
+        }
+    }
+
+    async function copyArtifact(name) {
+        const text = artifactText(name);
+        if (!text) {
+            showError("This artifact is not available to copy yet.");
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch (_) {
+            showError("Copy failed. Select the artifact text manually.");
+        }
+    }
+
+    function printArtifact(name) {
+        const text = artifactText(name);
+        if (!text) {
+            showError("This artifact is not available to print yet.");
+            return;
+        }
+        document.querySelectorAll(".artifact-panel").forEach(panel => {
+            panel.classList.toggle("printing", panel.id === `panel-${name}`);
+        });
+        document.querySelectorAll("[data-print-sheet]").forEach(sheet => {
+            sheet.textContent = sheet.getAttribute("data-print-sheet") === name ? text : "";
+        });
+        window.print();
+    }
+
+    window.addEventListener("afterprint", () => {
+        document.querySelectorAll(".artifact-panel").forEach(panel => {
+            panel.classList.remove("printing");
+        });
+    });
 
     function renderDocumentSection(title, value, full = false) {
         if (value === null || value === undefined || value === "") return "";
@@ -1687,19 +1814,15 @@
         const pre = document.getElementById("assessmentText");
         if (!pre) return;
         pre.textContent = data.assessment_text || "Assessment is not available yet.";
-        const printNode = document.getElementById("printAssessment");
+        const printNode = document.querySelector('[data-print-sheet="assessment"]');
         if (printNode) {
-            printNode.textContent = data.print_assessment_text || data.assessment_text || "";
+            printNode.textContent = data.assessment_text || data.print_assessment_text || "";
         }
+        updateArtifactActions(data);
     }
 
     async function copyAssessment() {
-        const text = document.getElementById("assessmentText")?.textContent || "";
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch (_) {
-            showError("Copy failed. Select the assessment text manually.");
-        }
+        await copyArtifact("assessment");
     }
 
     function renderClarificationQuestions(questions) {
@@ -2056,6 +2179,20 @@ function updateRunningStatus(message) {
     if (clarifyButton) {
         clarifyButton.addEventListener("click", clarify);
     }
+
+    document.addEventListener("click", event => {
+        const copyBtn = event.target.closest("[data-copy-artifact]");
+        if (copyBtn) {
+            event.preventDefault();
+            copyArtifact(copyBtn.getAttribute("data-copy-artifact"));
+            return;
+        }
+        const printBtn = event.target.closest("[data-print-artifact]");
+        if (printBtn) {
+            event.preventDefault();
+            printArtifact(printBtn.getAttribute("data-print-artifact"));
+        }
+    });
 </script>
 </body>
 </html>

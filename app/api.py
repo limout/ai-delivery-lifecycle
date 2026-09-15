@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.graph import build_graph, build_optimization_graph
+from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
 from app.evidence import is_numeric_duration
 from app.providers import (
@@ -669,6 +670,7 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
     payload["assessment"] = assessment
     payload["assessment_text"] = format_assessment_text(assessment)
     payload["print_assessment_text"] = format_print_assessment(assessment)
+    payload["artifact_texts"] = build_artifact_texts(payload)
     return payload
 
 
