@@ -17,6 +17,7 @@ from app.agents import (
     validation_agent,
 )
 from app.providers import AIProvider, GeminiProvider
+from app.resume import apply_clarification_facts, route_after_start
 from app.state import DeliveryState
 
 
@@ -123,15 +124,20 @@ def build_graph(
 
     Human clarification is a graph boundary. The clarification node
     emits a WAITING_FOR_CUSTOMER state and ends that execution. The API
-    starts the same graph again with the customer's answers; the graph
-    then re-evaluates Discovery -> Requirements -> Validation. This is
-    the lifecycle loop, not a second hard-coded workflow.
+    resumes the same graph with the customer's answers. When the answers
+    only resolve unknowns or metadata (for example timeline), Discovery
+    and Requirements are preserved and Validation continues. When answers
+    materially change scope, Discovery and Requirements are regenerated.
     """
     if provider is None:
         provider = GeminiProvider()
 
     graph = StateGraph(DeliveryState)
 
+    graph.add_node(
+        "apply_clarification",
+        _wrap_node("apply_clarification", apply_clarification_facts, progress_callback),
+    )
     graph.add_node(
         "discovery",
         _wrap_node(
@@ -246,7 +252,15 @@ def build_graph(
         ),
     )
 
-    graph.add_edge(START, "discovery")
+    graph.add_conditional_edges(
+        START,
+        route_after_start,
+        {
+            "discovery": "discovery",
+            "apply_clarification": "apply_clarification",
+        },
+    )
+    graph.add_edge("apply_clarification", "validation")
     graph.add_edge("discovery", "requirements")
     graph.add_edge("requirements", "validation")
 
@@ -259,8 +273,8 @@ def build_graph(
         },
     )
 
-    # Human-in-the-loop boundary. The next /clarify request re-enters
-    # the graph at START with customer answers in state.
+    # Human-in-the-loop boundary. The next /clarify request resumes
+    # with stored upstream artifacts unless scope has changed.
     graph.add_edge("clarification", "await_customer")
     graph.add_edge("await_customer", END)
 

@@ -20,3 +20,8 @@ class DeliveryState(TypedDict, total=False):
     current_stage: str
     workflow_status: str
     awaiting_customer: bool
+    resume_after_clarification: bool
+    regenerate_upstream: bool
+    new_clarification_records: list[dict]
+    skipped_nodes: list[str]
+    execution: dict

@@ -500,6 +500,162 @@ class MockProvider(AIProvider):
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
         prompt_lower = prompt.lower()
+        required = tuple((schema or {}).get("required") or [])
+
+        if required == (
+            "duration_range",
+            "effort_range",
+            "confidence",
+            "optimization_summary",
+            "optimization_levers",
+            "feasibility_conditions",
+            "optimization_team_model",
+            "deadline_feasibility",
+            "deadline_gap",
+            "scope_tradeoffs",
+            "recommendations",
+        ) or "ai delivery optimization" in prompt_lower:
+            return {
+                "duration_range": "4-6 weeks",
+                "effort_range": "30-50 person-days",
+                "confidence": "LOW",
+                "optimization_summary": (
+                    "An optional AI-assisted scenario may reduce elapsed time for "
+                    "boilerplate and test generation. It is not a guaranteed outcome."
+                ),
+                "optimization_levers": [
+                    "Generate boilerplate and tests with AI assistance"
+                ],
+                "feasibility_conditions": [
+                    "Existing team capacity and scope remain unchanged"
+                ],
+                "optimization_team_model": (
+                    "AI-assisted delivery using the existing delivery team; exact team "
+                    "capacity is not established."
+                ),
+                "deadline_feasibility": "NOT_DEMONSTRATED",
+                "deadline_gap": "",
+                "scope_tradeoffs": [],
+                "recommendations": [
+                    "Treat the AI scenario as optional and compare it with the independent estimate."
+                ],
+            }
+
+        if required == (
+            "effort_range",
+            "duration_range",
+            "confidence",
+            "assumptions",
+            "risks_affecting_estimate",
+        ) or "standard delivery estimate" in prompt_lower:
+            duration = "6-10 weeks"
+            if "1 month" in prompt_lower or "within 1 month" in prompt_lower:
+                duration = "8-12 weeks"
+            if "6 months" in prompt_lower or "target delivery timeline: 6 months" in prompt_lower:
+                duration = "6-8 weeks"
+            return {
+                "effort_range": "40-80 person-days",
+                "duration_range": duration,
+                "confidence": "MEDIUM",
+                "assumptions": [
+                    "Scope remains as described in the current discovery."
+                ],
+                "risks_affecting_estimate": [
+                    "Unresolved integration detail may widen the range."
+                ],
+                "baseline_variance_explanation": "",
+            }
+
+        if required == (
+            "solution_summary",
+            "key_capabilities",
+            "integration_approach",
+            "technical_considerations",
+            "delivery_risks",
+            "dependencies",
+            "assumptions",
+        ) or "initial solution shaping" in prompt_lower:
+            return {
+                "solution_summary": "A self-service interface for enterprise customers.",
+                "key_capabilities": ["Submit and track service requests"],
+                "integration_approach": ["Use existing systems identified in discovery"],
+                "technical_considerations": ["Authentication and access control"],
+                "delivery_risks": ["Integration detail is not fully confirmed"],
+                "dependencies": ["Access to existing customer systems"],
+                "assumptions": ["Enterprise authentication will be required"],
+            }
+
+        if required == (
+            "delivery_phases",
+            "workstreams",
+            "dependencies",
+            "milestones",
+            "team_roles",
+            "delivery_risks",
+        ) or "initial delivery plan" in prompt_lower:
+            return {
+                "delivery_phases": ["Foundation", "Build", "Launch"],
+                "workstreams": ["Application", "Integrations"],
+                "dependencies": ["Access to existing systems"],
+                "milestones": ["Foundation complete", "Pilot ready"],
+                "team_roles": ["Delivery lead", "Engineers"],
+                "delivery_risks": ["External system availability"],
+            }
+
+        if required == (
+            "status",
+            "blocking_issues",
+            "clarification_questions",
+            "warnings",
+            "checks",
+        ) or "cross-agent quality gate" in prompt_lower:
+            return {
+                "status": "READY",
+                "blocking_issues": [],
+                "clarification_questions": [],
+                "warnings": ["Estimate is indicative only"],
+                "checks": ["No ungrounded quantified commitments were assumed by the mock review"],
+            }
+
+        if required == (
+            "executive_summary",
+            "scope",
+            "delivery_approach",
+            "timeline",
+            "assumptions",
+            "risks",
+            "next_steps",
+        ) or "preparing a customer proposal" in prompt_lower:
+            return {
+                "executive_summary": "Preliminary proposal for a self-service delivery.",
+                "scope": ["Self-service request handling"],
+                "delivery_approach": ["Phased delivery"],
+                "timeline": "See independent estimate",
+                "assumptions": ["Scope remains stable"],
+                "risks": ["Integration uncertainty"],
+                "next_steps": ["Review the independent estimate with the delivery owner"],
+            }
+
+        if required == (
+            "objectives",
+            "deliverables",
+            "in_scope",
+            "out_of_scope",
+            "dependencies",
+            "acceptance",
+            "timeline",
+            "assumptions",
+        ) or "statement of work" in prompt_lower:
+            return {
+                "objectives": ["Enable enterprise self-service"],
+                "deliverables": ["Self-service portal increment"],
+                "in_scope": ["Request submission and tracking"],
+                "out_of_scope": ["Unconfirmed additional products"],
+                "dependencies": ["Existing system access"],
+                "acceptance": ["Authorized users can submit a request"],
+                "timeline": "See independent estimate",
+                "assumptions": ["Indicative timeline only"],
+            }
 
         if "requirements definition" in prompt_lower:
             has_salesforce = "Salesforce" in prompt

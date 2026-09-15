@@ -1,6 +1,16 @@
 import re
 from app.providers import AIProvider
 from app.state import DeliveryState
+from app.evidence import (
+    is_estimable,
+    material_evidence_gaps,
+)
+from app.timeline import (
+    WEEKS_PER_MONTH,
+    deadline_source_texts,
+    parse_customer_estimate,
+    parse_requested_deadline,
+)
 
 
 DISCOVERY_SCHEMA = {
@@ -358,6 +368,14 @@ def _clarification_records(state: DeliveryState) -> list[dict]:
         if answer:
             records.append({"question": question, "answer": answer})
 
+    for item in state.get("new_clarification_records", []) or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if answer:
+            records.append({"question": question, "answer": answer})
+
     for item in state.get("clarification_answers", []) or []:
         text = str(item).strip()
         if text:
@@ -457,6 +475,11 @@ def _question_topic(question: str) -> str | None:
     """Map a clarification question to the canonical topic it resolves."""
     text = str(question or "").lower()
 
+    if any(marker in text for marker in (
+        "first release", "first-release", "in scope", "out of scope",
+        "main capabilities", "core function",
+    )):
+        return "first_release_scope"
     if any(marker in text for marker in (
         "security", "compliance", "data privacy", "privacy requirements", "regulatory"
     )):
@@ -1128,9 +1151,15 @@ REQUIREMENTS:
     blocking_questions = []
     existing_questions = {q.lower() for q in non_blocking_questions}
 
-    # Customer-confirmed delivery timeline is an objective prerequisite for
-    # this lifecycle. It must come from the request/clarification history, not
-    # from an LLM-generated requirement or assumption.
+    # Evidence gate: block only on material gaps required for a responsible
+    # estimate or deadline assessment. A missing deadline is not by itself a
+    # blocker; a known deadline does not make an undefined product estimable.
+    evidence_gaps = material_evidence_gaps(state)
+    for gap in evidence_gaps:
+        if gap.question.lower() not in {q.lower() for q in blocking_questions}:
+            blocking_questions.append(gap.question)
+
+    timeline_question = "What is the target delivery timeline?"
     customer_text = " ".join(
         [
             str(state.get("user_request") or ""),
@@ -1142,57 +1171,10 @@ REQUIREMENTS:
             *[str(item) for item in (state.get("clarification_answers", []) or [])],
         ]
     ).lower()
-
-    timeline_patterns = (
-        r"\b\d+(?:[.,]\d+)?\s*(?:day|days|week|weeks|month|months|year|years)\b",
-        r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:day|days|week|weeks|month|months|year|years)\b",
-        r"\bby\s+(?:q[1-4]|end of|the end of|[a-z]+\s+\d{4})\b",
-    )
-    has_customer_timeline = any(
-        re.search(pattern, customer_text) for pattern in timeline_patterns
-    )
-
-    if not has_customer_timeline:
-        timeline_question = "What is the target delivery timeline?"
-        blocking_questions.append(timeline_question)
-        non_blocking_questions = [
-            q for q in non_blocking_questions
-            if q.lower() != timeline_question.lower()
-        ]
-
-    # Minimum-scope gate: stop only when there is genuinely no concrete
-    # capability and no meaningful delivery context. Do not require detailed
-    # service-request types, RBAC, traffic, UX, Salesforce API details, etc.
-    functional_requirements = [
-        str(item).strip()
-        for item in (requirements.get("functional_requirements", []) or [])
-        if str(item).strip()
-    ]
-    generic_capability_markers = (
-        "self-service interface",
-        "self service interface",
-        "provide a self-service interface",
-        "provide a self service interface",
-    )
-    has_concrete_capability = bool(functional_requirements) and not all(
-        any(marker in item.lower() for marker in generic_capability_markers)
-        for item in functional_requirements
-    )
-    meaningful_context_values = (
-        discovery.get("users", []),
-        discovery.get("stakeholders", []),
-        discovery.get("existing_systems", []),
-        discovery.get("constraints", []),
-    )
-    has_meaningful_context = any(bool(value) for value in meaningful_context_values)
-
-    if not has_concrete_capability or not has_meaningful_context:
-        minimum_scope_question = (
-            "What are the main capabilities the portal should provide, "
-            "and who will use it?"
-        )
-        if minimum_scope_question.lower() not in {q.lower() for q in blocking_questions}:
-            blocking_questions.append(minimum_scope_question)
+    has_customer_timeline = bool(parse_requested_deadline([customer_text]))
+    if not has_customer_timeline and timeline_question.lower() not in existing_questions:
+        non_blocking_questions.append(timeline_question)
+        existing_questions.add(timeline_question.lower())
 
     # The validation model may report contradictions, security/compliance
     # questions, technical unknowns, performance questions, or other concerns.
@@ -1234,9 +1216,11 @@ REQUIREMENTS:
 
     # A customer-confirmed answer must never be reopened as a blocker.
     answered_topics = _answered_clarification_topics(state)
+    gap_questions = {gap.question.lower() for gap in evidence_gaps}
     blocking_questions = [
         q for q in blocking_questions
-        if not (_question_topic(q) and _question_topic(q) in answered_topics)
+        if q.lower() in gap_questions
+        or not (_question_topic(q) and _question_topic(q) in answered_topics)
     ]
 
     status = "NEEDS_INFO" if blocking_questions else "READY"
@@ -1260,9 +1244,13 @@ REQUIREMENTS:
                 "The project has enough grounded information for preliminary solution shaping and delivery planning; remaining unknowns are carried forward as non-blocking questions."
             )
     else:
-        reasons.append(
-            "A required lifecycle prerequisite is missing and must be clarified before the next stage."
-        )
+        for gap in evidence_gaps:
+            if gap.reason not in reasons:
+                reasons.append(gap.reason)
+        if not any("not yet" in r.lower() or "missing" in r.lower() for r in reasons):
+            reasons.append(
+                "Material scope or integration evidence is missing, so a numeric estimate is not yet responsible."
+            )
 
     validation = {
         "status": status,
@@ -1273,6 +1261,8 @@ REQUIREMENTS:
             q for q in non_blocking_questions
             if q.lower() not in {b.lower() for b in blocking_questions}
         ],
+        "estimable": not blocking_questions,
+        "missing_evidence": [gap.reason for gap in evidence_gaps],
     }
 
     return {
@@ -1475,6 +1465,43 @@ def estimation_agent(
     delivery_plan = state["delivery_plan"]
     clarification_context = _clarification_context(state)
 
+    timeline_sources = deadline_source_texts(
+        user_request=str(state.get("user_request") or ""),
+        discovery=discovery,
+        clarification_history=state.get("clarification_history"),
+        clarification_answers=state.get("clarification_answers"),
+    )
+    requested_deadline = parse_requested_deadline(timeline_sources)
+    customer_estimate = parse_customer_estimate(timeline_sources)
+    customer_deadline_text = requested_deadline.display if requested_deadline is not None else ""
+    customer_baseline_text = customer_estimate.display if customer_estimate is not None else ""
+
+    if not is_estimable(state):
+        gaps = material_evidence_gaps(state)
+        return {
+            "estimate": {
+                "effort_range": "",
+                "duration_range": "Not yet estimable",
+                "baseline_duration_range": "Not yet estimable",
+                "baseline_effort_range": "",
+                "confidence": "LOW",
+                "assumptions": [gap.reason for gap in gaps],
+                "risks_affecting_estimate": [],
+                "customer_deadline": customer_deadline_text,
+                "customer_baseline_duration": customer_baseline_text,
+                "customer_deadline_weeks": (
+                    requested_deadline.weeks if requested_deadline is not None else None
+                ),
+                "standard_deadline_fit": "NOT_DEMONSTRATED",
+                "not_yet_estimable": True,
+                "missing_evidence": [gap.reason for gap in gaps],
+                "baseline_variance_explanation": (
+                    "No independent numeric estimate is produced until the missing "
+                    "material evidence is provided."
+                ),
+            }
+        }
+
     prompt = f"""
 You are a senior Delivery Manager preparing a preliminary STANDARD delivery estimate.
 
@@ -1524,14 +1551,35 @@ IMPORTANT:
         discovery.get("constraints", [])
     )
     deadline_months = _parse_deadline_months(discovery.get("constraints", []))
+    timeline_sources = deadline_source_texts(
+        user_request=str(state.get("user_request") or ""),
+        discovery=discovery,
+        clarification_history=state.get("clarification_history"),
+        clarification_answers=state.get("clarification_answers"),
+    )
+    requested_deadline = parse_requested_deadline(timeline_sources)
+    customer_estimate = parse_customer_estimate(timeline_sources)
 
     customer_baseline_text = (
-        f"{customer_estimated_months:g} months"
-        if customer_estimated_months is not None else ""
+        customer_estimate.display
+        if customer_estimate is not None
+        else (
+            f"{customer_estimated_months:g} months"
+            if customer_estimated_months is not None else ""
+        )
     )
     customer_deadline_text = (
-        f"{deadline_months:g} month" + ("" if deadline_months == 1 else "s")
-        if deadline_months is not None else ""
+        requested_deadline.display
+        if requested_deadline is not None
+        else (
+            f"{deadline_months:g} month" + ("" if deadline_months == 1 else "s")
+            if deadline_months is not None else ""
+        )
+    )
+    deadline_weeks = (
+        requested_deadline.weeks
+        if requested_deadline is not None
+        else (deadline_months * WEEKS_PER_MONTH if deadline_months is not None else None)
     )
 
     # Customer-provided baseline and deadline are metadata, not part of our
@@ -1543,9 +1591,10 @@ IMPORTANT:
 
     # This field belongs to the standard estimate only. Do not allow the model
     # to turn the customer's deadline into an optimization rationale here.
-    if customer_estimated_months is not None:
+    if customer_estimate is not None or customer_estimated_months is not None:
+        shown = customer_baseline_text or f"{customer_estimated_months:g} months"
         estimate["baseline_variance_explanation"] = (
-            f"The customer-provided estimate is {customer_estimated_months:g} months and is kept "
+            f"The customer-provided estimate is {shown} and is kept "
             "as a separate reference point. The standard estimate is an independent "
             "traditional human-led delivery assessment and is not adjusted to fit the "
             "customer deadline."
@@ -1560,9 +1609,9 @@ IMPORTANT:
     # Compare the standard estimate with the deadline only as a simple factual
     # indicator. This is NOT AI feasibility and does not imply an optimized plan.
     standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
-    if deadline_months is None or standard_max_weeks is None:
+    if deadline_weeks is None or standard_max_weeks is None:
         estimate["standard_deadline_fit"] = "NOT_DEMONSTRATED"
-    elif standard_max_weeks <= deadline_months * 4.345:
+    elif standard_max_weeks <= deadline_weeks + 1e-6:
         estimate["standard_deadline_fit"] = "FITS"
     else:
         estimate["standard_deadline_fit"] = "EXCEEDS"
@@ -1620,6 +1669,15 @@ IMPORTANT:
     estimate["customer_deadline"] = customer_deadline_text
     estimate["baseline_duration_range"] = str(estimate.get("duration_range") or "").strip()
     estimate["baseline_effort_range"] = str(estimate.get("effort_range") or "").strip()
+    standard_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
+    if deadline_weeks is None or standard_max_weeks is None:
+        estimate["standard_deadline_fit"] = "NOT_DEMONSTRATED"
+    elif standard_max_weeks <= deadline_weeks + 1e-6:
+        estimate["standard_deadline_fit"] = "FITS"
+    else:
+        estimate["standard_deadline_fit"] = "EXCEEDS"
+    if deadline_weeks is not None:
+        estimate["customer_deadline_weeks"] = deadline_weeks
 
     return {"estimate": estimate}
 
@@ -1637,16 +1695,21 @@ def ai_optimization_agent(
     clarification_context = _clarification_context(state)
 
     customer_baseline = str(estimate.get("customer_baseline_duration") or "").strip()
-    if not customer_baseline:
-        customer_months = _parse_customer_estimated_months(discovery.get("constraints", []))
-        if customer_months is not None:
-            customer_baseline = f"{customer_months:g} months"
-
     customer_deadline = str(estimate.get("customer_deadline") or "").strip()
+    timeline_sources = deadline_source_texts(
+        user_request=str(state.get("user_request") or ""),
+        discovery=discovery,
+        clarification_history=state.get("clarification_history"),
+        clarification_answers=state.get("clarification_answers"),
+    )
+    if not customer_baseline:
+        customer_estimate = parse_customer_estimate(timeline_sources)
+        if customer_estimate is not None:
+            customer_baseline = customer_estimate.display
     if not customer_deadline:
-        deadline_months = _parse_deadline_months(discovery.get("constraints", []))
-        if deadline_months is not None:
-            customer_deadline = f"{deadline_months:g} month" + ("" if deadline_months == 1 else "s")
+        requested_deadline = parse_requested_deadline(timeline_sources)
+        if requested_deadline is not None:
+            customer_deadline = requested_deadline.display
     standard_duration = str(
         estimate.get("baseline_duration_range") or estimate.get("duration_range") or ""
     ).strip()
@@ -1827,17 +1890,19 @@ Rules:
         result["deadline_feasibility"] = "NOT_DEMONSTRATED"
 
     optimized_max_weeks = _parse_max_weeks(result["duration_range"])
-    deadline_months = _parse_deadline_months(
-        discovery.get("constraints", [])
+    requested_deadline = parse_requested_deadline(timeline_sources)
+    deadline_weeks = (
+        requested_deadline.weeks
+        if requested_deadline is not None
+        else estimate.get("customer_deadline_weeks")
     )
-    if deadline_months is None:
+    if deadline_weeks is None:
         result["deadline_feasibility"] = "NOT_APPLICABLE"
         result["deadline_gap"] = ""
     elif optimized_max_weeks is None:
         result["deadline_feasibility"] = "NOT_DEMONSTRATED"
     else:
-        deadline_weeks = deadline_months * 4.345
-        if optimized_max_weeks <= deadline_weeks:
+        if optimized_max_weeks <= deadline_weeks + 1e-6:
             if result["feasibility_conditions"]:
                 result["deadline_feasibility"] = "FEASIBLE_WITH_CONDITIONS"
             else:
@@ -1851,7 +1916,7 @@ Rules:
 
     if not result["optimization_levers"]:
         result["deadline_feasibility"] = (
-            "NOT_APPLICABLE" if deadline_months is None else "NOT_DEMONSTRATED"
+            "NOT_APPLICABLE" if deadline_weeks is None else "NOT_DEMONSTRATED"
         )
         result["optimization_summary"] = (
             result["optimization_summary"]
@@ -1867,7 +1932,22 @@ Rules:
             "the identified automation and parallelization levers, but the current "
             "duration range does not demonstrate that the customer deadline can be met. "
             "Closing the remaining gap requires explicit scope, sequencing, or capacity "
-            "decisions supported by project evidence."
+            "decisions supported by project evidence. This is optional scenario analysis, "
+            "not a guaranteed acceleration."
+        )
+    elif result["deadline_feasibility"] in {"FEASIBLE", "FEASIBLE_WITH_CONDITIONS"}:
+        prefix = (
+            "Under the assumptions below, an AI-assisted approach could reduce the "
+            "estimated duration. This is scenario analysis, not a commitment. "
+        )
+        summary = result["optimization_summary"]
+        if "not a commitment" not in summary.lower() and "scenario analysis" not in summary.lower():
+            result["optimization_summary"] = prefix + summary
+        result["optimization_summary"] = re.sub(
+            r"\bguarantees?\b",
+            "does not guarantee",
+            result["optimization_summary"],
+            flags=re.I,
         )
 
     # Never allow the optimizer to silently mutate the standard estimate.
@@ -1920,13 +2000,15 @@ Rules:
 3. Use the estimate as indicative.
 4. Include assumptions and risks.
 5. Include practical next steps.
-6. If the customer deadline is shorter than the baseline estimate and
-   deadline_feasibility is NOT_DEMONSTRATED, do NOT describe the deadline
-   as an achieved delivery commitment. Present it as the customer's target
-   and clearly distinguish it from the current indicative baseline.
+6. Use estimate.standard_deadline_fit as the only deadline verdict for the
+   independent estimate. Values are FITS, EXCEEDS, or NOT_DEMONSTRATED.
+   If the fit is EXCEEDS or NOT_DEMONSTRATED, do NOT describe the customer
+   deadline as an achieved delivery commitment. Present it as the customer's
+   target and clearly distinguish it from the independent indicative estimate.
 7. If an AI-optimized scenario is explicitly provided and marked
    FEASIBLE_WITH_CONDITIONS, describe it as a conditional accelerated option,
-   not a guaranteed commitment.
+   not a guaranteed commitment. Never treat AI optimization as a substitute
+   for the independent estimate.
 """
 
     proposal = provider.generate_json(
@@ -1934,33 +2016,8 @@ Rules:
         schema=PROPOSAL_SCHEMA,
     )
     proposal = _ground_downstream_artifact(proposal, state)
-
-    # Do not let a preliminary proposal turn an unproven accelerated target
-    # into a delivery commitment. Keep the customer target visible, but make
-    # the current baseline and feasibility status explicit.
-    if isinstance(proposal, dict) and estimate.get("deadline_feasibility") == "NOT_DEMONSTRATED":
-        customer_deadline = str(estimate.get("customer_deadline") or "")
-        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "")
-        if customer_deadline and baseline_duration:
-            proposal["timeline"] = (
-                f"Customer target: {customer_deadline}; current indicative baseline: "
-                f"{baseline_duration}. AI-optimized feasibility is not yet demonstrated."
-            )
-        if isinstance(proposal.get("executive_summary"), str):
-            summary = proposal["executive_summary"]
-            lowered = summary.lower()
-            commitment_markers = (
-                "complete within one month",
-                "completed within one month",
-                "migration within one month",
-                "within 1 month",
-            )
-            if any(marker in lowered for marker in commitment_markers):
-                proposal["executive_summary"] = (
-                    summary + " The one-month customer target remains subject to an "
-                    "AI-optimized delivery scenario and feasibility validation; it is not "
-                    "yet demonstrated by the current baseline."
-                )
+    if isinstance(proposal, dict):
+        proposal = _apply_deadline_honesty(proposal, estimate)
 
     return {
         "proposal": proposal,
@@ -2023,19 +2080,37 @@ Rules:
         schema=SOW_SCHEMA,
     )
     sow = _ground_downstream_artifact(sow, state)
-
-    if isinstance(sow, dict) and estimate.get("deadline_feasibility") == "NOT_DEMONSTRATED":
-        customer_deadline = str(estimate.get("customer_deadline") or "")
-        baseline_duration = str(estimate.get("baseline_duration_range") or estimate.get("duration_range") or "")
-        if customer_deadline and baseline_duration:
-            sow["timeline"] = (
-                f"Customer target: {customer_deadline}; current indicative baseline: "
-                f"{baseline_duration}. Accelerated feasibility is not yet demonstrated."
-            )
+    if isinstance(sow, dict):
+        sow = _apply_deadline_honesty(sow, estimate)
 
     return {
         "sow": sow,
     }
+
+def _apply_deadline_honesty(document: dict, estimate: dict) -> dict:
+    """Force proposal/SOW timeline text to match standard_deadline_fit."""
+    from app.assessment import deadline_honesty_timeline, standard_deadline_fit
+
+    fit = standard_deadline_fit(estimate)
+    document["timeline"] = deadline_honesty_timeline(estimate)
+    summary = document.get("executive_summary")
+    if isinstance(summary, str) and fit in {"EXCEEDS", "NOT_DEMONSTRATED"}:
+        commitment_markers = (
+            "complete within",
+            "completed within",
+            "delivered within",
+            "will be done by",
+            "guaranteed",
+            "commit to deliver by",
+        )
+        if any(marker in summary.lower() for marker in commitment_markers):
+            document["executive_summary"] = (
+                summary.rstrip()
+                + " The requested deadline is not a demonstrated delivery commitment; "
+                f"the independent estimate assessment is {fit.replace('_', ' ')}."
+            )
+    return document
+
 
 def _flatten_confirmed_discovery(discovery: dict) -> str:
     """Return only customer-confirmed discovery content for provenance checks."""
@@ -2052,30 +2127,14 @@ def _flatten_confirmed_discovery(discovery: dict) -> str:
 
 
 def _extract_explicit_timeline_facts(request: str) -> list[str]:
-    """Extract explicit customer timeline statements for provenance preservation."""
-    import re
-
-    text = str(request or "")
+    """Extract explicit customer deadline and estimate statements for provenance."""
     facts: list[str] = []
-
-    estimate_match = re.search(
-        r"([^.!?\n]{0,160}\b(?:estimated|estimate)\b[^.!?\n]{0,100}\b\d+(?:\.\d+)?\s*months?[^.!?\n]*)",
-        text,
-        re.I,
-    )
-    if estimate_match:
-        sentence = re.sub(r"\s+", " ", estimate_match.group(1)).strip(" ,;:")
-        if sentence:
-            facts.append(sentence)
-
-    deadline_match = re.search(
-        r"\bwithin\s+(\d+(?:\.\d+)?)\s*months?\b",
-        text,
-        re.I,
-    )
-    if deadline_match:
-        facts.append(f"Customer requires completion within {deadline_match.group(1)} month(s).")
-
+    deadline = parse_requested_deadline([request])
+    estimate = parse_customer_estimate([request])
+    if deadline:
+        facts.append(f"Target delivery timeline: {deadline.display}")
+    if estimate:
+        facts.append(f"Customer-provided estimate: {estimate.display}")
     return facts
 
 
@@ -2109,96 +2168,21 @@ def _parse_max_weeks(duration_text: str) -> float | None:
 
 def _parse_customer_estimated_months(constraints: list[str]) -> float | None:
     """Extract the customer's stated baseline estimate separately from the deadline."""
-    import re
-
-    for item in constraints or []:
-        text = str(item).lower()
-
-        # Common form: "within 1 month instead of 3 months estimated by developers".
-        match = re.search(
-            r"instead of\s+(\d+(?:\.\d+)?)\s*months?\s+estimated",
-            text,
-        )
-        if match:
-            return float(match.group(1))
-
-        # Common form: "developers estimated 3 months" / "estimated at 3 months".
-        match = re.search(
-            r"\bestimat(?:e|ed)\b[^0-9]{0,100}"
-            r"(\d+(?:\.\d+)?)\s*months?",
-            text,
-        )
-        if match:
-            return float(match.group(1))
-
-        # Also handle "3 months estimated by developers".
-        match = re.search(
-            r"(\d+(?:\.\d+)?)\s*months?\s+estimated(?:\s+by)?",
-            text,
-        )
-        if match:
-            return float(match.group(1))
-
-    return None
+    span = parse_customer_estimate(list(constraints or []))
+    if span is None:
+        return None
+    return span.weeks / WEEKS_PER_MONTH
 
 
 def _parse_deadline_months(constraints: list[str]) -> float | None:
     """Extract an explicit customer delivery deadline from constraints.
 
-    Supports conventional deadline wording and target-delivery wording.
-    Bare duration estimates are intentionally ignored.
+    Supports days, weeks, and months. Bare duration estimates are ignored.
     """
-    import re
-
-    number_words = {
-        "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
-        "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0,
-        "nine": 9.0, "ten": 10.0,
-    }
-    values: list[float] = []
-
-    prefixes = (
-        r"within",
-        r"by",
-        r"deadline",
-        r"complete(?:d)?\s+by",
-        r"target\s+(?:delivery\s+)?timeline",
-        r"delivery\s+timeline",
-        r"target\s+delivery",
-    )
-    prefix_pattern = "(?:" + "|".join(prefixes) + ")"
-
-    # The optional connector deliberately allows the natural forms:
-    # "timeline is 2 months", "timeline of 2 months",
-    # "deadline: 2 months", and "within 2 months".
-    connector = r"(?:\s+(?:is|of))?\s*[:\-]?\s*"
-
-    numeric_pattern = re.compile(
-        prefix_pattern
-        + connector
-        + r"(\d+(?:[.,]\d+)?)\s*months?\b"
-    )
-    word_pattern = re.compile(
-        prefix_pattern
-        + connector
-        + r"(" + "|".join(number_words) + r")\s*months?\b"
-    )
-
-    for item in constraints or []:
-        text = str(item).strip().lower()
-        if not text:
-            continue
-
-        match = numeric_pattern.search(text)
-        if match:
-            values.append(float(match.group(1).replace(",", ".")))
-            continue
-
-        word_match = word_pattern.search(text)
-        if word_match:
-            values.append(number_words[word_match.group(1)])
-
-    return min(values) if values else None
+    span = parse_requested_deadline(list(constraints or []))
+    if span is None:
+        return None
+    return span.weeks / WEEKS_PER_MONTH
 
 def _normalize_effort_range(value: object) -> str:
     """Reject duration-like effort values that cannot be interpreted as effort."""
@@ -2241,23 +2225,24 @@ def _deterministic_delivery_gate(
     checks: list[str] = []
 
     # 1. Deadline feasibility is an assessment, not an automatic customer blocker.
-    deadline_months = _parse_deadline_months(discovery.get("constraints", []))
+    requested = parse_requested_deadline(discovery.get("constraints", []))
+    deadline_weeks = requested.weeks if requested is not None else None
     estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
-    customer_baseline_months = _parse_customer_estimated_months(discovery.get("constraints", []))
+    customer_estimate = parse_customer_estimate(discovery.get("constraints", []))
 
-    if deadline_months is not None and estimate_max_weeks is not None:
-        deadline_weeks = deadline_months * 4.345
-        if customer_baseline_months is not None and customer_baseline_months > deadline_months:
-            if (estimate.get("deadline_constrained") and
-                    estimate.get("deadline_feasibility") == "FEASIBLE_WITH_CONDITIONS"):
-                checks.append(
-                    "Customer baseline exceeds the deadline; an explicit AI-optimized scenario "
-                    "has been evaluated separately."
+    if deadline_weeks is not None and estimate_max_weeks is not None:
+        if customer_estimate is not None and customer_estimate.weeks > deadline_weeks:
+            fit = str(estimate.get("standard_deadline_fit") or "").upper()
+            if fit == "FITS":
+                warnings.append(
+                    "The customer-provided baseline exceeds the deadline, but the independent "
+                    "estimate does not. Keep the customer baseline as reference only; do not "
+                    "treat the date as proven by the customer's own estimate."
                 )
             else:
                 warnings.append(
                     "Customer baseline exceeds the deadline. Deadline feasibility is not demonstrated "
-                    "by the current delivery scenario; an explicit AI-optimized scenario is required "
+                    "by the current independent estimate; an explicit AI-optimized scenario is required "
                     "before claiming the target is achievable."
                 )
         elif estimate_max_weeks > deadline_weeks:

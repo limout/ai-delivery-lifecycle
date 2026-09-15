@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.graph import build_graph, build_optimization_graph
+from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
+from app.evidence import is_numeric_duration
 from app.providers import (
     AIProvider,
     AIProviderQuotaError,
@@ -19,6 +21,8 @@ from app.providers import (
     OllamaProvider,
     MockProvider,
 )
+from app.resume import answers_require_upstream_regen
+from app.runs import artifacts_from_payload, get_run, new_run_id, save_run
 
 router = APIRouter()
 
@@ -122,9 +126,106 @@ STAGE_LABELS = {
     "sow": "SOW",
     "blocked": "Blocked",
     "complete": "Complete",
+    "apply_clarification": "Apply clarification",
     "ai_optimization": "AI Optimization",
     "optimization_complete": "Optimization Complete",
 }
+
+
+class _InstrumentedProvider:
+    """Count LLM calls without logging prompt content."""
+
+    def __init__(self, inner: AIProvider):
+        self.inner = inner
+        self.llm_calls = 0
+
+    def generate_json(self, prompt: str, schema: dict) -> dict:
+        self.llm_calls += 1
+        required = list((schema or {}).get("required") or [])
+        print(f"[WORKFLOW] llm_call count={self.llm_calls} schema={required[:6]}")
+        return self.inner.generate_json(prompt, schema)
+
+
+def _new_clarification_records(request: "ClarifyRequest") -> list[dict]:
+    records = [
+        {"question": item.question.strip(), "answer": item.answer.strip()}
+        for item in request.answers
+        if item.answer.strip()
+    ]
+    if not records:
+        records = [
+            {"question": "", "answer": item.strip()}
+            for item in request.clarification_answers
+            if item.strip()
+        ]
+    return records
+
+
+def _initial_workflow_state(
+    request: str,
+    clarification_answers: list[str] | None,
+    clarification_history: list[dict] | None,
+    iteration: int,
+    resume_after_clarification: bool = False,
+    prior_state: dict | None = None,
+    new_clarification_records: list[dict] | None = None,
+) -> dict:
+    state = {
+        "user_request": request,
+        "iteration": iteration,
+        "workflow_status": "RUNNING",
+        "awaiting_customer": False,
+        "resume_after_clarification": resume_after_clarification,
+        "regenerate_upstream": True,
+        "skipped_nodes": [],
+    }
+    if clarification_answers:
+        state["clarification_answers"] = clarification_answers
+    if clarification_history:
+        state["clarification_history"] = clarification_history
+    if new_clarification_records:
+        state["new_clarification_records"] = new_clarification_records
+
+    if resume_after_clarification and prior_state:
+        for key in ("discovery", "requirements"):
+            if prior_state.get(key):
+                state[key] = prior_state[key]
+        if prior_state.get("clarification_history") and not clarification_history:
+            state["clarification_history"] = prior_state["clarification_history"]
+
+        regen = answers_require_upstream_regen(state)
+        state["regenerate_upstream"] = regen
+        if not regen and state.get("discovery") and state.get("requirements"):
+            state["skipped_nodes"] = ["discovery", "requirements"]
+        else:
+            state["skipped_nodes"] = []
+
+    return state
+
+
+def _execution_payload(
+    state: dict,
+    nodes_executed: list[str],
+    llm_calls: int,
+    elapsed: float,
+    mode: str,
+) -> dict:
+    skipped = list(state.get("skipped_nodes") or [])
+    payload = {
+        "mode": mode,
+        "nodes_executed": nodes_executed,
+        "nodes_skipped": skipped,
+        "llm_calls": llm_calls,
+        "llm_calls_avoided": len(skipped),
+        "elapsed_seconds": round(elapsed, 2),
+        "regenerate_upstream": bool(state.get("regenerate_upstream", True)),
+    }
+    print(
+        f"[WORKFLOW] mode={mode} nodes={nodes_executed} "
+        f"skipped={skipped} llm_calls={llm_calls} "
+        f"avoided={payload['llm_calls_avoided']} elapsed={payload['elapsed_seconds']}s"
+    )
+    return payload
 
 
 def _sse_event(event: str, payload: dict) -> str:
@@ -140,13 +241,20 @@ def _stream_workflow(
     clarification_history: list[dict] | None,
     iteration: int,
     provider: AIProvider,
+    resume_after_clarification: bool = False,
+    prior_state: dict | None = None,
+    new_clarification_records: list[dict] | None = None,
+    run_id: str | None = None,
 ):
     """Stream graph node progress and the final workflow response as SSE."""
     events: queue.Queue = queue.Queue()
     started_at = time.monotonic()
+    nodes_executed: list[str] = []
 
     def progress_callback(stage: str, status: str) -> None:
         elapsed = round(time.monotonic() - started_at, 1)
+        if status == "running" and stage not in nodes_executed:
+            nodes_executed.append(stage)
         events.put({
             "type": "stage",
             "stage": stage,
@@ -156,23 +264,29 @@ def _stream_workflow(
         })
 
     def worker() -> None:
+        instrumented = _InstrumentedProvider(provider)
         try:
-            graph = build_graph(provider, progress_callback=progress_callback)
-            state = {
-                "user_request": request,
-                "iteration": iteration,
-                "workflow_status": "RUNNING",
-                "awaiting_customer": False,
-            }
-            if clarification_answers:
-                state["clarification_answers"] = clarification_answers
-            if clarification_history:
-                state["clarification_history"] = clarification_history
-
+            graph = build_graph(instrumented, progress_callback=progress_callback)
+            state = _initial_workflow_state(
+                request=request,
+                clarification_answers=clarification_answers,
+                clarification_history=clarification_history,
+                iteration=iteration,
+                resume_after_clarification=resume_after_clarification,
+                prior_state=prior_state,
+                new_clarification_records=new_clarification_records,
+            )
             result = graph.invoke(state)
+            result["execution"] = _execution_payload(
+                state,
+                nodes_executed,
+                instrumented.llm_calls,
+                time.monotonic() - started_at,
+                "clarify" if resume_after_clarification else "analyze",
+            )
             events.put({
                 "type": "result",
-                "data": workflow_response(result),
+                "data": workflow_response(result, run_id=run_id),
             })
         except AIProviderQuotaError as exc:
             events.put({
@@ -242,9 +356,10 @@ def _stream_optimization(
         })
 
     def worker() -> None:
+        instrumented = _InstrumentedProvider(provider)
         try:
             graph = build_optimization_graph(
-                provider,
+                instrumented,
                 progress_callback=progress_callback,
             )
             state = dict(analysis or {})
@@ -252,9 +367,17 @@ def _stream_optimization(
             state["workflow_status"] = "RUNNING"
             state["awaiting_customer"] = False
             result = graph.invoke(state)
+            result["execution"] = {
+                "mode": "optimize",
+                "nodes_executed": ["ai_optimization", "optimization_complete"],
+                "nodes_skipped": [],
+                "llm_calls": instrumented.llm_calls,
+                "llm_calls_avoided": 0,
+                "elapsed_seconds": round(time.monotonic() - started_at, 2),
+            }
             events.put({
                 "type": "result",
-                "data": workflow_response(result),
+                "data": workflow_response(result, run_id=analysis.get("run_id")),
             })
         except AIProviderQuotaError as exc:
             events.put({
@@ -323,6 +446,8 @@ class ClarifyRequest(BaseModel):
     # multi-iteration loop rather than a sequence of stateless re-runs.
     clarification_history: list[dict] = Field(default_factory=list)
     iteration: int = Field(default=1, ge=1)
+    run_id: str | None = None
+    prior_state: dict = Field(default_factory=dict)
 
 
 def get_provider() -> AIProvider:
@@ -388,32 +513,89 @@ def _merge_clarification_history(
     return merged
 
 
+def _resolve_prior_state(request: ClarifyRequest) -> dict:
+    stored = get_run(request.run_id)
+    if stored:
+        return stored
+    return artifacts_from_payload(request.prior_state)
+
+
 def run_workflow(
     request: str,
     clarification_answers: list[str] | None = None,
     clarification_history: list[dict] | None = None,
     iteration: int | None = None,
     provider: AIProvider | None = None,
+    resume_after_clarification: bool = False,
+    prior_state: dict | None = None,
+    new_clarification_records: list[dict] | None = None,
 ) -> dict:
-    graph = build_graph(provider)
+    started_at = time.monotonic()
+    nodes_executed: list[str] = []
+    inner = provider
+    instrumented = _InstrumentedProvider(inner) if inner is not None else None
 
-    state = {
-        "user_request": request,
-        "iteration": iteration or 1,
-        "workflow_status": "RUNNING",
-        "awaiting_customer": False,
-    }
+    def progress_callback(stage: str, status: str) -> None:
+        if status == "running" and stage not in nodes_executed:
+            nodes_executed.append(stage)
 
-    if clarification_answers:
-        state["clarification_answers"] = clarification_answers
-    if clarification_history:
-        state["clarification_history"] = clarification_history
+    graph = build_graph(
+        instrumented if instrumented is not None else inner,
+        progress_callback=progress_callback,
+    )
+    state = _initial_workflow_state(
+        request=request,
+        clarification_answers=clarification_answers,
+        clarification_history=clarification_history,
+        iteration=iteration or 1,
+        resume_after_clarification=resume_after_clarification,
+        prior_state=prior_state,
+        new_clarification_records=new_clarification_records,
+    )
+    result = graph.invoke(state)
+    llm_calls = instrumented.llm_calls if instrumented is not None else 0
+    result["execution"] = _execution_payload(
+        state,
+        nodes_executed,
+        llm_calls,
+        time.monotonic() - started_at,
+        "clarify" if resume_after_clarification else "analyze",
+    )
+    return result
 
-    return graph.invoke(state)
+
+def _normalize_questions(items, required: bool = False) -> list[dict]:
+    normalized = []
+    seen: set[str] = set()
+    for item in items or []:
+        if isinstance(item, dict):
+            question = str(item.get("question") or item.get("text") or "").strip()
+            if not question or question.lower() in seen:
+                continue
+            blocks = bool(item.get("blocks_workflow", required))
+            normalized.append({
+                "question": question,
+                "priority": str(item.get("priority") or ("REQUIRED" if blocks or required else "RECOMMENDED")).upper(),
+                "reason": str(item.get("reason") or ""),
+                "blocks_workflow": blocks or required,
+            })
+            seen.add(question.lower())
+        else:
+            question = str(item).strip()
+            if not question or question.lower() in seen:
+                continue
+            normalized.append({
+                "question": question,
+                "priority": "REQUIRED" if required else "RECOMMENDED",
+                "reason": "",
+                "blocks_workflow": required,
+            })
+            seen.add(question.lower())
+    return normalized
 
 
-def workflow_response(result: dict) -> dict:
-    validation = result.get("validation", {})
+def workflow_response(result: dict, run_id: str | None = None) -> dict:
+    validation = result.get("validation") or {}
     review = result.get("delivery_review") or {}
     status = result.get("workflow_status")
 
@@ -427,23 +609,45 @@ def workflow_response(result: dict) -> dict:
         else:
             status = validation.get("status", "UNKNOWN")
 
-    clarification_questions = result.get("clarification_questions", [])
+    clarification_questions = _normalize_questions(
+        result.get("clarification_questions"),
+        required=True,
+    )
+    blocking_questions = [item for item in clarification_questions if item["blocks_workflow"]]
+    if not blocking_questions:
+        blocking_questions = _normalize_questions(
+            result.get("blocking_questions") or validation.get("blocking_questions"),
+            required=True,
+        )
     if not clarification_questions:
-        clarification_questions = validation.get("questions", [])
-    if not clarification_questions:
-        clarification_questions = review.get("clarification_questions", [])
+        clarification_questions = list(blocking_questions)
 
-    return {
+    non_blocking_questions = _normalize_questions(
+        result.get("non_blocking_questions") or validation.get("non_blocking_questions"),
+        required=False,
+    )
+    blocking_text = {item["question"].lower() for item in blocking_questions}
+    non_blocking_questions = [
+        item for item in non_blocking_questions
+        if item["question"].lower() not in blocking_text
+    ]
+
+    resolved_run_id = run_id or result.get("run_id") or new_run_id()
+    save_run(resolved_run_id, result)
+
+    payload = {
+        "run_id": resolved_run_id,
         "status": status,
         "workflow_status": status,
         "current_stage": result.get("current_stage"),
         "awaiting_customer": result.get("awaiting_customer", False),
+        "user_request": result.get("user_request"),
         "discovery": result.get("discovery"),
         "requirements": result.get("requirements"),
         "validation": validation,
         "clarification_questions": clarification_questions,
-        "blocking_questions": result.get("blocking_questions", []),
-        "non_blocking_questions": result.get("non_blocking_questions", []),
+        "blocking_questions": blocking_questions,
+        "non_blocking_questions": non_blocking_questions,
         "clarification_history": result.get("clarification_history", []),
         "iteration": result.get("iteration", 1),
         "solution": result.get("solution"),
@@ -453,7 +657,19 @@ def workflow_response(result: dict) -> dict:
         "delivery_review": result.get("delivery_review"),
         "proposal": result.get("proposal"),
         "sow": result.get("sow"),
+        "execution": result.get("execution"),
+        "default_view": (
+            "delivery_review"
+            if status == "BLOCKED" or str(review.get("status") or "").upper() == "BLOCKED"
+            else "assessment"
+        ),
     }
+    payload["verdict"] = build_verdict(payload)
+    assessment = build_assessment(payload)
+    payload["assessment"] = assessment
+    payload["assessment_text"] = format_assessment_text(assessment)
+    payload["print_assessment_text"] = format_print_assessment(assessment)
+    return payload
 
 
 @router.get("/health")
@@ -475,6 +691,7 @@ def analyze_stream(
     if not _claim_daily_run("analyze", _client_ip(http_request)):
         return _rate_limit_response("analyze")
 
+    run_id = new_run_id()
     return StreamingResponse(
         _stream_workflow(
             request=request.user_request,
@@ -482,6 +699,7 @@ def analyze_stream(
             clarification_history=None,
             iteration=1,
             provider=provider,
+            run_id=run_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -498,12 +716,22 @@ def optimize_stream(
     http_request: Request,
     provider: AIProvider = Depends(get_provider),
 ):
-    if not request.analysis.get("estimate"):
+    estimate = request.analysis.get("estimate") or {}
+    duration = str(estimate.get("duration_range") or "")
+    if not estimate:
         return JSONResponse(
             status_code=422,
             content={
                 "error": "ESTIMATE_REQUIRED",
                 "message": "Run Analyze Request first so the standard estimate is available.",
+            },
+        )
+    if not is_numeric_duration(duration):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "ESTIMATE_NOT_READY",
+                "message": "A numeric independent estimate is required before running the optional AI scenario.",
             },
         )
 
@@ -570,6 +798,8 @@ def clarify_stream(
         request.clarification_history,
         request,
     )
+    prior = _resolve_prior_state(request)
+    run_id = request.run_id or new_run_id()
 
     return StreamingResponse(
         _stream_workflow(
@@ -578,6 +808,10 @@ def clarify_stream(
             clarification_history=history,
             iteration=request.iteration + 1,
             provider=provider,
+            resume_after_clarification=True,
+            prior_state=prior,
+            new_clarification_records=_new_clarification_records(request),
+            run_id=run_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -611,6 +845,7 @@ def clarify(
             request.clarification_history,
             request,
         )
+        prior = _resolve_prior_state(request)
 
         result = run_workflow(
             request=request.user_request,
@@ -618,10 +853,13 @@ def clarify(
             clarification_history=history,
             iteration=request.iteration + 1,
             provider=provider,
+            resume_after_clarification=True,
+            prior_state=prior,
+            new_clarification_records=_new_clarification_records(request),
         )
 
         result["clarification_history"] = history
-        response = workflow_response(result)
+        response = workflow_response(result, run_id=request.run_id)
         response["clarification_history"] = history
         return response
     except AIProviderQuotaError as exc:

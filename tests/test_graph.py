@@ -1,4 +1,8 @@
-from app.graph import route_after_delivery_review, route_after_validation
+from app.graph import (
+    route_after_delivery_review,
+    route_after_validation,
+)
+from app.resume import route_after_start
 
 
 def question(text, priority, blocks):
@@ -90,3 +94,27 @@ def test_review_ready_continues():
 
 def test_review_blocked_stops():
     assert route_after_delivery_review({"delivery_review": {"status": "BLOCKED"}}) == "review_blocked"
+
+
+def test_start_routes_to_discovery_on_fresh_run():
+    assert route_after_start({"resume_after_clarification": False}) == "discovery"
+
+
+def test_start_resumes_validation_when_upstream_can_be_reused():
+    state = {
+        "resume_after_clarification": True,
+        "regenerate_upstream": False,
+        "discovery": {"problem": "Portal"},
+        "requirements": {"functional_requirements": ["Submit requests"]},
+    }
+    assert route_after_start(state) == "apply_clarification"
+
+
+def test_start_regenerates_discovery_when_scope_changed():
+    state = {
+        "resume_after_clarification": True,
+        "regenerate_upstream": True,
+        "discovery": {"problem": "Portal"},
+        "requirements": {"functional_requirements": ["Submit requests"]},
+    }
+    assert route_after_start(state) == "discovery"

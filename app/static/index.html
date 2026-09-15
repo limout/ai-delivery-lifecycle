@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Delivery Lifecycle</title>
+    <title>AI Delivery Analyst</title>
 
     <style>
         * { box-sizing: border-box; }
@@ -232,9 +232,101 @@
             font-weight: 800;
         }
 
-        .ready { background: var(--green-soft); color: #166534; }
-        .needs-info { background: var(--amber-soft); color: #92400e; }
-        .error-status { background: var(--red-soft); color: #991b1b; }
+        .ready, .complete, .deadline-fit { background: var(--green-soft); color: #166534; }
+        .needs-info, .deadline-risk, .deadline-unclear { background: var(--amber-soft); color: #92400e; }
+        .error-status, .blocked-status { background: var(--red-soft); color: #991b1b; }
+
+        .verdict-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 20px;
+            margin-bottom: 18px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .verdict-card.deadline-fit, .verdict-card.complete, .verdict-card.ready {
+            border-color: #86efac;
+            background: #f8fff9;
+        }
+        .verdict-card.needs-info, .verdict-card.deadline-risk, .verdict-card.deadline-unclear {
+            border-color: #fcd34d;
+            background: #fffdf6;
+        }
+        .verdict-card.blocked-status {
+            border-color: #fecaca;
+            background: #fff7f7;
+        }
+        .verdict-kicker {
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+        .verdict-title { margin: 0 0 8px; font-size: 24px; }
+        .verdict-summary { margin: 0 0 16px; line-height: 1.5; color: #374151; }
+        .verdict-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .disclaimer {
+            margin-top: 12px;
+            font-size: 13px;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+        .assessment-toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
+        .secondary-button { background:#fff; color:var(--blue); border:1px solid #bfdbfe; }
+        .secondary-button:hover { background: var(--blue-soft); }
+        .assessment-pre {
+            white-space: pre-wrap;
+            background: #fff;
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 18px;
+            border-radius: 12px;
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            font-size: 14px;
+            line-height: 1.55;
+        }
+        .later-questions {
+            margin-top: 16px;
+            border-top: 1px solid var(--border);
+            padding-top: 12px;
+        }
+        .later-questions summary {
+            cursor: pointer;
+            color: var(--muted);
+            font-weight: 700;
+        }
+        @media print {
+            header, .no-print, #error, #questions, .lifecycle-card, .artifact-tabs,
+            .json-details, #verdict, .assessment-toolbar, #assessmentText {
+                display: none !important;
+            }
+            #result, #panel-assessment { display: block !important; }
+            .artifact-panel { display: none !important; }
+            #panel-assessment.artifact-panel { display: block !important; }
+            body { background: #fff; color: #111; }
+            .container { padding: 0.4in; max-width: none; }
+            #printAssessment {
+                display: block !important;
+                font-family: Georgia, "Times New Roman", serif;
+                font-size: 10.5pt;
+                line-height: 1.28;
+                white-space: pre-wrap;
+                margin: 0;
+            }
+            #printAssessment h2, #panel-assessment .card-title,
+            #panel-assessment .section-kicker { display: none !important; }
+        }
+        #printAssessment { display: none; }
+
+        @media (max-width: 900px) {
+            .verdict-metrics { grid-template-columns: 1fr 1fr; }
+        }
 
         .iteration {
             color: var(--muted);
@@ -631,25 +723,31 @@
 <div class="container">
 
     <header>
-        <div class="eyebrow">Delivery intelligence · Agentic workflow</div>
-        <h1>AI Delivery Lifecycle</h1>
+        <div class="eyebrow">AI Delivery Analyst · Intake &amp; feasibility</div>
+        <h1>AI Delivery Analyst</h1>
         <div class="subtitle">
-            Transform an ambiguous customer request into structured discovery,
-            requirements, delivery assessment, solution shaping and business-ready delivery artifacts.
+            Before you commit to the date, test the delivery reality.
+            Turn a messy delivery request into a structured feasibility assessment
+            and an honest view of the proposed deadline — what we know, what is missing,
+            and whether the date fits an independent estimate.
         </div>
     </header>
 
-    <div class="card">
-        <h2 class="card-title">Customer Request</h2>
+    <div class="card no-print">
+        <h2 class="card-title">Delivery request</h2>
+        <p class="section-kicker" style="margin-top:-8px">
+            Describe the work, who it is for, known systems, and the target date.
+            This is not a Jira dashboard or a delivery-health forecast.
+        </p>
 
         <textarea
             id="request"
-            placeholder="Example: We want to build a customer self-service portal for enterprise customers..."
+            placeholder="Example: We need a self-service portal for enterprise customers, integrated with Salesforce, target delivery in 2 months..."
         ></textarea>
 
         <div class="action-row">
-            <button id="analyzeButton" onclick="analyze()">Analyze Request</button>
-            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
+            <button id="analyzeButton" onclick="analyze()">Analyze delivery request</button>
+            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optional: Optimize with AI</button>
         </div>
 
         <div id="loading" class="loading hidden">
@@ -661,7 +759,32 @@
 
     <div id="result" class="hidden">
 
-        <div class="card lifecycle-card">
+        <div id="verdict" class="verdict-card hidden">
+            <div class="verdict-kicker">Executive verdict</div>
+            <h2 class="verdict-title" id="verdictTitle">—</h2>
+            <p class="verdict-summary" id="verdictSummary"></p>
+            <div class="verdict-metrics">
+                <div class="metric">
+                    <div class="metric-name">Deadline</div>
+                    <div class="metric-value" id="verdictDeadline">—</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-name">Independent estimate</div>
+                    <div class="metric-value" id="verdictEstimate">—</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-name">Deadline fit</div>
+                    <div class="metric-value" id="verdictFit">—</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-name">Next step</div>
+                    <div class="metric-value" id="verdictNext" style="font-size:14px;font-weight:700">—</div>
+                </div>
+            </div>
+            <div class="disclaimer" id="verdictDisclaimer"></div>
+        </div>
+
+        <div class="card lifecycle-card no-print">
             <div class="result-header">
                 <div>
                     <h2 class="result-title">Workflow Progress</h2>
@@ -735,7 +858,8 @@
 
         <div class="card">
             <div class="artifact-tabs" id="artifactTabs">
-                <button class="artifact-tab active" data-tab="discovery" onclick="selectTab('discovery')">Discovery</button>
+                <button class="artifact-tab active" data-tab="assessment" onclick="selectTab('assessment')">Assessment</button>
+                <button class="artifact-tab" data-tab="discovery" onclick="selectTab('discovery')">Discovery</button>
                 <button class="artifact-tab" data-tab="requirements" onclick="selectTab('requirements')">Requirements</button>
                 <button class="artifact-tab" data-tab="validation" onclick="selectTab('validation')">Validation</button>
                 <button class="artifact-tab" data-tab="solution" onclick="selectTab('solution')">Solution</button>
@@ -746,7 +870,18 @@
                 <button class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
             </div>
 
-            <section id="panel-discovery" class="artifact-panel active">
+            <section id="panel-assessment" class="artifact-panel active">
+                <h2 class="card-title">Delivery assessment</h2>
+                <div class="section-kicker">One-page view you can copy or print for a Delivery Lead.</div>
+                <div class="assessment-toolbar no-print">
+                    <button type="button" class="secondary-button" onclick="copyAssessment()">Copy assessment</button>
+                    <button type="button" class="secondary-button" onclick="window.print()">Print / save as PDF</button>
+                </div>
+                <pre id="assessmentText" class="assessment-pre"></pre>
+                <pre id="printAssessment" class="print-assessment"></pre>
+            </section>
+
+            <section id="panel-discovery" class="artifact-panel">
                 <h2 class="card-title">Discovery</h2>
                 <div class="section-kicker">Problem framing, goals, users, systems and delivery constraints.</div>
                 <div class="grid">
@@ -845,13 +980,14 @@
 
             <section id="panel-estimate" class="artifact-panel">
                 <h2 class="card-title">Estimate</h2>
-                <div class="section-kicker">Standard delivery estimate — independent human-only baseline.</div>
+                <div class="section-kicker">Independent human-only baseline. Not a delivery commitment or quote.</div>
+                <p class="disclaimer" id="estimateDisclaimer"></p>
                 <div id="estimateContent"></div>
                 <div class="ai-optimization-panel">
                     <div class="ai-optimization-header">
                         <div>
                             <h3>AI Delivery Optimization</h3>
-                            <div class="section-kicker">Optional AI-native delivery scenario. It never replaces the standard estimate.</div>
+                            <div class="section-kicker">Optional, separate scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
                         </div>
                         <button id="optimizeButtonPanel" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
                     </div>
@@ -884,10 +1020,10 @@
         </div>
 
         <div id="questions" class="card hidden">
-            <h2 class="card-title">Clarification Required</h2>
+            <h2 class="card-title">Clarification required</h2>
             <div class="clarification-note">
-                The workflow identified blocking uncertainty. Answer the questions below and the lifecycle will be
-                re-run with your answers as customer-provided facts.
+                Answer the required questions below so the assessment can continue.
+                Optional follow-ups are listed separately and do not block the workflow.
             </div>
             <div id="questionList"></div>
             <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
@@ -1143,19 +1279,21 @@
             }
         });
 
-        if (data.status === "READY" && !reviewBlocked) {
+        if ((data.status === "READY" || data.status === "COMPLETE") && !reviewBlocked) {
             document.querySelector('[data-stage="complete"]')?.classList.add("done");
         }
 
         const workflowState = document.getElementById("summaryState");
         if (workflowState) {
-            workflowState.textContent = reviewBlocked ? "REVIEW BLOCKED" : (data.status || "UNKNOWN");
+        workflowState.textContent = reviewBlocked
+            ? "REVIEW BLOCKED"
+            : (data.verdict && data.verdict.label) || (data.status || "UNKNOWN");
         }
 
         const status = document.getElementById("status");
         if (status && reviewBlocked) {
-            status.textContent = "REVIEW BLOCKED";
-            status.className = "status needs-info";
+            status.textContent = "BLOCKED";
+            status.className = "status blocked-status";
         }
     }
 
@@ -1250,10 +1388,19 @@
             document.getElementById("optimizeButton"),
             document.getElementById("optimizeButtonPanel")
         ].filter(Boolean);
-        const canOptimize = !!data && typeof data === "object" && !!data.duration_range;
+        const duration = (data && data.duration_range) || "";
+        const canOptimize = !!data && typeof data === "object" && /\d/.test(duration)
+            && !/not yet estimable/i.test(duration);
         optimizeButtons.forEach(button => {
             button.disabled = !canOptimize;
         });
+        const disclaimer = document.getElementById("estimateDisclaimer");
+        if (disclaimer) {
+            disclaimer.textContent = (
+                (currentData && currentData.assessment && currentData.assessment.estimate_disclaimer) ||
+                "Indicative estimate — based on the information provided, not a delivery commitment or quote."
+            );
+        }
     }
 
     function renderAIOptimization(data) {
@@ -1276,8 +1423,8 @@
         const gap = data.deadline_gap || "0";
         const cards = [
             ["Customer estimate", data.customer_baseline_duration || "Not provided"],
-            ["Standard estimate", data.standard_duration_range || "Not available"],
-            ["AI-optimized estimate", data.duration_range || "Not demonstrated"]
+            ["Independent estimate", data.standard_duration_range || "Not available"],
+            ["Optional AI-assisted scenario", data.duration_range || "Not demonstrated"]
         ];
 
         container.innerHTML = `
@@ -1313,13 +1460,7 @@
         const status = document.getElementById("status");
         status.textContent = data.status || "UNKNOWN";
 
-        const statusClass =
-            data.status === "READY"
-                ? "ready"
-                : data.status === "NEEDS_INFO"
-                    ? "needs-info"
-                    : "error-status";
-
+        const statusClass = statusClassFor(data);
         status.className = "status " + statusClass;
 
         currentIteration = data.iteration || 1;
@@ -1377,7 +1518,7 @@
 
         renderList(
             "blockingUncertainty",
-            validation.blocking_uncertainty || validation.blockers
+            validation.blocking_questions || data.blocking_questions || []
         );
 
         const reasonsElement = document.getElementById("validationReasons");
@@ -1402,6 +1543,8 @@
         renderDeliveryReview(data.delivery_review);
         renderProposal(data.proposal);
         renderSow(data.sow);
+        renderVerdict(data);
+        renderAssessment(data);
 
         document.getElementById("rawResponse").textContent =
             JSON.stringify(data, null, 2);
@@ -1424,143 +1567,138 @@
 
         questionList.innerHTML = "";
 
-        // Validation can expose structured questions in either
-        // blocking_questions or non_blocking_questions. Older responses
-        // may still expose clarification_questions as strings/objects.
-        const normalizeQuestion = (item, defaultPriority) => {
-            if (typeof item === "string") {
-                return {
-                    question: item,
-                    priority: defaultPriority,
-                    reason: "",
-                    blocks_workflow: defaultPriority === "REQUIRED"
-                };
-            }
+        const blockingQuestions = [];
+        const laterQuestions = [];
+        const seen = new Set();
 
-            if (!item || typeof item !== "object") return null;
-
-            return {
-                question: item.question || item.text || "",
-                priority: String(item.priority || defaultPriority).toUpperCase(),
-                reason: item.reason || "",
-                blocks_workflow:
-                    item.blocks_workflow !== undefined
-                        ? !!item.blocks_workflow
-                        : defaultPriority === "REQUIRED"
-            };
-        };
-
-        const questionMap = new Map();
-
-        const addQuestions = (items, defaultPriority) => {
+        const take = (items, required) => {
             if (!Array.isArray(items)) return;
-
             items.forEach(item => {
-                const normalized = normalizeQuestion(item, defaultPriority);
-                if (!normalized || !normalized.question) return;
-
-                const existing = questionMap.get(normalized.question);
-                if (!existing) {
-                    questionMap.set(normalized.question, normalized);
-                    return;
-                }
-
-                // Preserve the strongest blocking classification if the
-                // same question appears in multiple response fields.
-                if (normalized.blocks_workflow) {
-                    existing.blocks_workflow = true;
-                    existing.priority = "REQUIRED";
-                }
-                if (!existing.reason && normalized.reason) {
-                    existing.reason = normalized.reason;
-                }
+                const text = typeof item === "string"
+                    ? item
+                    : (item && (item.question || item.text)) || "";
+                if (!text || seen.has(text)) return;
+                seen.add(text);
+                const normalized = {
+                    question: text,
+                    reason: typeof item === "object" && item ? (item.reason || "") : "",
+                    blocks_workflow: required
+                };
+                if (required) blockingQuestions.push(normalized);
+                else laterQuestions.push(normalized);
             });
         };
 
-        addQuestions(data.blocking_questions, "REQUIRED");
-        addQuestions(data.non_blocking_questions, "RECOMMENDED");
-        addQuestions(data.clarification_questions, "REQUIRED");
+        take(data.blocking_questions, true);
+        if (data.validation) take(data.validation.blocking_questions, true);
+        take(
+            (data.clarification_questions || []).filter(item =>
+                typeof item === "string" ? false : item && item.blocks_workflow
+            ),
+            true
+        );
+        take(data.non_blocking_questions, false);
+        if (data.validation) take(data.validation.non_blocking_questions, false);
 
-        // Validation may also carry the structured questions directly.
-        if (data.validation) {
-            addQuestions(data.validation.blocking_questions, "REQUIRED");
-            addQuestions(data.validation.non_blocking_questions, "RECOMMENDED");
-            addQuestions(data.validation.questions, "RECOMMENDED");
-        }
-
-        const questions = Array.from(questionMap.values());
-
-        if (questions.length > 0) {
+        const needsInfo = data.status === "NEEDS_INFO" || data.awaiting_customer;
+        if (needsInfo && blockingQuestions.length > 0) {
             questionsContainer.classList.remove("hidden");
-
-            const requiredCount = questions.filter(q => q.blocks_workflow).length;
-            const recommendedCount = questions.filter(q => !q.blocks_workflow).length;
-
             const intro = document.createElement("div");
             intro.className = "clarification-summary";
-            intro.innerHTML =
-                (requiredCount
-                    ? `<span class="clarification-count required">🔴 ${requiredCount} Required</span>`
-                    : "") +
-                (recommendedCount
-                    ? `<span class="clarification-count recommended">🟡 ${recommendedCount} Recommended</span>`
-                    : "");
+            intro.innerHTML = `<span class="clarification-count required">${blockingQuestions.length} required to continue</span>
+            <p class="section-kicker">The assessment cannot responsibly continue yet. Independent estimate: not yet estimable. Answer the required questions, then resume.</p>`;
             questionList.appendChild(intro);
 
-            questions.forEach((item, index) => {
-                const wrapper = document.createElement("div");
-                wrapper.className = "question-card";
-
-                const priorityClass = item.blocks_workflow
-                    ? "priority-required"
-                    : "priority-recommended";
-
-                const priorityLabel = item.blocks_workflow
-                    ? "🔴 REQUIRED"
-                    : "🟡 RECOMMENDED";
-
-                wrapper.innerHTML = `
-                    <div class="question-priority ${priorityClass}">
-                        ${priorityLabel}
-                    </div>
-                    <div>
-                        <strong>${index + 1}. ${escapeHtml(item.question)}</strong>
-                    </div>
-                    ${item.reason
-                        ? `<div class="question-reason">${escapeHtml(item.reason)}</div>`
-                        : ""}
-                `;
-
-                const input = document.createElement("textarea");
-                input.id = `answer-${index}`;
-                input.className = "clarification-answer";
-                input.rows = 2;
-                input.dataset.question = item.question;
-                input.dataset.required = item.blocks_workflow ? "true" : "false";
-                input.placeholder = item.blocks_workflow
-                    ? "Required to continue…"
-                    : "Optional answer…";
-
-                wrapper.appendChild(input);
-                questionList.appendChild(wrapper);
+            blockingQuestions.forEach((item, index) => {
+                questionList.appendChild(buildQuestionCard(item, index, true));
             });
+
+            if (laterQuestions.length) {
+                const details = document.createElement("details");
+                details.className = "later-questions";
+                details.innerHTML = `<summary>Additional questions — useful later (${laterQuestions.length})</summary>`;
+                laterQuestions.forEach((item, index) => {
+                    details.appendChild(buildQuestionCard(item, blockingQuestions.length + index, false));
+                });
+                questionList.appendChild(details);
+            }
         } else {
             questionsContainer.classList.add("hidden");
         }
 
-        // Start on the most relevant artifact.
         if (reviewBlocked) {
             selectTab("delivery_review");
-        } else if (data.status === "READY" && data.sow) {
-            selectTab("sow");
-        } else if (data.delivery_review) {
-            selectTab("delivery_review");
-        } else if (data.solution) {
-            selectTab("solution");
-        } else if (data.validation) {
-            selectTab("validation");
         } else {
-            selectTab("discovery");
+            selectTab("assessment");
+        }
+    }
+
+    function statusClassFor(data) {
+        const verdict = (data.verdict && data.verdict.code) || "";
+        const status = String(data.status || data.workflow_status || "").toUpperCase();
+        if (verdict === "BLOCKED" || status === "BLOCKED") return "blocked-status";
+        if (verdict === "NEEDS_INFORMATION" || status === "NEEDS_INFO") return "needs-info";
+        if (verdict === "DEADLINE_AT_RISK") return "deadline-risk";
+        if (verdict === "DEADLINE_UNCLEAR") return "deadline-unclear";
+        if (verdict === "DEADLINE_FIT" || status === "COMPLETE" || status === "READY") return "complete";
+        return "needs-info";
+    }
+
+    function buildQuestionCard(item, index, required) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "question-card";
+        wrapper.innerHTML = `
+            <div class="question-priority ${required ? "priority-required" : "priority-recommended"}">
+                ${required ? "Required" : "Useful later"}
+            </div>
+            <div><strong>${index + 1}. ${escapeHtml(item.question)}</strong></div>
+            ${item.reason ? `<div class="question-reason">${escapeHtml(item.reason)}</div>` : ""}
+        `;
+        const input = document.createElement("textarea");
+        input.className = "clarification-answer";
+        input.rows = 2;
+        input.dataset.question = item.question;
+        input.dataset.required = required ? "true" : "false";
+        input.placeholder = required ? "Required to continue…" : "Optional — does not block the assessment";
+        wrapper.appendChild(input);
+        return wrapper;
+    }
+
+    function renderVerdict(data) {
+        const card = document.getElementById("verdict");
+        if (!card) return;
+        card.classList.remove("hidden", "complete", "ready", "needs-info", "deadline-risk", "deadline-unclear", "blocked-status", "deadline-fit");
+        const verdict = data.verdict || {};
+        const estimate = data.estimate || {};
+        const assessment = data.assessment || {};
+        const deadline = assessment.deadline || {};
+        card.classList.add(statusClassFor(data));
+        setText("verdictTitle", verdict.label || data.status || "Assessment");
+        setText("verdictSummary", verdict.summary || "", "");
+        setText("verdictDeadline", deadline.requested || estimate.customer_deadline || "Not provided");
+        setText("verdictEstimate", deadline.independent_estimate || estimate.duration_range || "Not yet produced");
+        setText("verdictFit", deadline.fit || estimate.standard_deadline_fit || "Not assessed");
+        const next = (assessment.recommended_next_step || [])[0] || "Review the artifacts below.";
+        setText("verdictNext", next);
+        setText("verdictDisclaimer", assessment.estimate_disclaimer || assessment.disclaimer || "", "");
+    }
+
+    function renderAssessment(data) {
+        const pre = document.getElementById("assessmentText");
+        if (!pre) return;
+        pre.textContent = data.assessment_text || "Assessment is not available yet.";
+        const printNode = document.getElementById("printAssessment");
+        if (printNode) {
+            printNode.textContent = data.print_assessment_text || data.assessment_text || "";
+        }
+    }
+
+    async function copyAssessment() {
+        const text = document.getElementById("assessmentText")?.textContent || "";
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch (_) {
+            showError("Copy failed. Select the assessment text manually.");
         }
     }
 
@@ -1795,8 +1933,9 @@ function updateRunningStatus(message) {
         } finally {
             buttons.forEach(button => {
                 button.disabled = false;
-                button.textContent = "Optimize with AI";
+                button.textContent = "Optional: Optimize with AI";
             });
+            document.getElementById("loading").classList.add("hidden");
         }
     }
 
@@ -1828,7 +1967,7 @@ function updateRunningStatus(message) {
             showError(error.message);
         } finally {
             button.disabled = false;
-            button.textContent = "Analyze Request";
+            button.textContent = "Analyze delivery request";
             document
                 .getElementById("loading")
                 .classList.add("hidden");
@@ -1843,6 +1982,13 @@ function updateRunningStatus(message) {
 
         const questions =
             document.querySelectorAll(".clarification-answer");
+
+        const requiredInputs = document.querySelectorAll('.clarification-answer[data-required="true"]');
+        const missingRequired = Array.from(requiredInputs).some(input => !input.value.trim());
+        if (missingRequired) {
+            showError("Please answer the required questions before continuing.");
+            return;
+        }
 
         const answers = [];
 
@@ -1884,6 +2030,8 @@ function updateRunningStatus(message) {
                     user_request: request,
                     clarification_answers: answers,
                     iteration: currentIteration,
+                    run_id: currentData && currentData.run_id ? currentData.run_id : null,
+                    prior_state: currentData || {},
                     clarification_history: currentData && Array.isArray(currentData.clarification_history)
                         ? currentData.clarification_history
                         : []
