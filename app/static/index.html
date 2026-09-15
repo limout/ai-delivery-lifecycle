@@ -1014,11 +1014,12 @@
                     <div class="ai-optimization-header">
                         <div>
                             <h3>AI Delivery Optimization</h3>
-                            <div class="section-kicker">Optional, separate scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
+                            <div class="section-kicker">Optional AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
                         </div>
                         <button id="optimizeButtonPanel" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
                     </div>
                     <p class="section-kicker" id="aiScenarioHint">Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.</p>
+                    <div id="estimateAiSummary"></div>
                 </div>
                 <pre class="artifact-print-sheet" data-print-sheet="estimate"></pre>
             </section>
@@ -1374,7 +1375,31 @@
         return "";
     }
 
+    function hasAiOptimizationResult(data) {
+        if (!data || typeof data !== "object") return false;
+        const opt = data.ai_optimization;
+        const duration = opt && typeof opt === "object"
+            ? String(opt.duration_range || "").trim()
+            : "";
+        const text = data.artifact_texts && data.artifact_texts.ai_optimization;
+        return !!(duration || (typeof text === "string" && text.trim()));
+    }
+
+    function preferredTabAfterResult(data, source) {
+        if (source === "optimize" && hasAiOptimizationResult(data)) {
+            return "ai_optimization";
+        }
+        const review = data && data.delivery_review;
+        if (review && String(review.status || "").toUpperCase() === "BLOCKED") {
+            return "delivery_review";
+        }
+        return "assessment";
+    }
+
     function artifactIsAvailable(name, data) {
+        if (name === "ai_optimization") {
+            return hasAiOptimizationResult(data);
+        }
         const texts = (data && data.artifact_texts) || {};
         if (texts[name]) return true;
         if (name === "assessment") {
@@ -1400,7 +1425,8 @@
         }
         const hint = document.getElementById("aiScenarioHint");
         if (hint) {
-            hint.textContent = artifactIsAvailable("ai_optimization", data)
+            hint.hidden = hasAiOptimizationResult(data);
+            hint.textContent = hasAiOptimizationResult(data)
                 ? "The AI-assisted scenario is on its own tab. Copying this estimate does not include that scenario."
                 : "Run the optional scenario to open the AI-assisted scenario tab. Copying this estimate does not include that scenario.";
         }
@@ -1528,6 +1554,33 @@
                 "Indicative estimate — based on the information provided, not a delivery commitment or quote."
             );
         }
+        renderEstimateAiSummary(currentData && currentData.ai_optimization);
+    }
+
+    function renderEstimateAiSummary(data) {
+        const container = document.getElementById("estimateAiSummary");
+        if (!container) return;
+        if (!hasAiOptimizationResult(currentData)) {
+            container.innerHTML = "";
+            return;
+        }
+        const opt = (data && typeof data === "object") ? data : {};
+        const status = String(opt.deadline_feasibility || "NOT_DEMONSTRATED").toUpperCase();
+        container.innerHTML = `
+            <p class="section-kicker">Optional AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</p>
+            <div class="document-grid" style="margin-top:12px">
+                ${renderDocumentSection("Duration", opt.duration_range || "Not demonstrated")}
+                ${renderDocumentSection("Deadline", opt.customer_deadline || "Not provided")}
+                ${renderDocumentSection("Deadline feasibility", status.replaceAll("_", " "))}
+                ${renderDocumentSection("Confidence", opt.confidence || "LOW")}
+                ${renderDocumentSection("Optimization summary", opt.optimization_summary || "Not provided", true)}
+            </div>
+            <button type="button" class="secondary-button" id="viewAiScenarioButton" style="margin-top:14px">View full AI-assisted scenario</button>
+        `;
+        const viewButton = document.getElementById("viewAiScenarioButton");
+        if (viewButton) {
+            viewButton.onclick = () => selectTab("ai_optimization");
+        }
     }
 
     function renderAIOptimization(data) {
@@ -1579,7 +1632,7 @@
         `;
     }
 
-    function renderResult(data) {
+    function renderResult(data, source) {
         currentData = data;
 
         document.getElementById("result").classList.remove("hidden");
@@ -1753,11 +1806,7 @@
             questionsContainer.classList.add("hidden");
         }
 
-        if (reviewBlocked) {
-            selectTab("delivery_review");
-        } else {
-            selectTab("assessment");
-        }
+        selectTab(preferredTabAfterResult(data, source || "analyze"));
     }
 
     function statusClassFor(data) {
@@ -2049,7 +2098,7 @@ function updateRunningStatus(message) {
             await consumeWorkflowStream(
                 "/optimize/stream",
                 { user_request: request, analysis: currentData },
-                renderResult
+                payload => renderResult(payload, "optimize")
             );
         } catch (error) {
             showError(error.message);
