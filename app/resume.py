@@ -16,6 +16,7 @@ from app.agents import (
     _filter_answered_discovery,
     _filter_answered_requirement_questions,
 )
+from app.evidence import customer_authored_text
 from app.state import DeliveryState
 
 
@@ -123,6 +124,18 @@ def apply_clarification_facts(state: DeliveryState) -> dict:
     constraints = list(discovery.get("constraints") or [])
     constraint_text = " ".join(str(item).lower() for item in constraints)
 
+    def _add_constraint(fact: str) -> None:
+        nonlocal constraint_text
+        if fact and fact.lower() not in constraint_text:
+            constraints.append(fact)
+            constraint_text += " " + fact.lower()
+
+    # Re-assert deadlines/estimates from the full accumulated customer text so
+    # a resume cannot drop the original date when Discovery is regenerated or
+    # the latest answer is not about timeline.
+    for fact in _extract_explicit_timeline_facts(customer_authored_text(state)):
+        _add_constraint(fact)
+
     for record in _clarification_records(state):
         question = str(record.get("question") or "").strip()
         answer = str(record.get("answer") or "").strip()
@@ -138,15 +151,12 @@ def apply_clarification_facts(state: DeliveryState) -> dict:
                 else f"Target delivery timeline: {answer}"
             )
             if fact.lower() not in constraint_text:
-                constraints.append(fact)
-                constraint_text += " " + fact.lower()
+                _add_constraint(fact)
             continue
 
         if _is_metadata_text(combined.lower()):
             fact = f"Customer clarification — {question}: {answer}".strip(" —:")
-            if fact.lower() not in constraint_text:
-                constraints.append(fact)
-                constraint_text += " " + fact.lower()
+            _add_constraint(fact)
 
     discovery["constraints"] = constraints
     discovery = _filter_answered_discovery(discovery, state)

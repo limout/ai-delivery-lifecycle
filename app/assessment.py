@@ -215,18 +215,49 @@ def _explicit_known_facts(result: dict) -> tuple[list[str], list[str]]:
     return _unique_texts(known, limit=6), _unique_texts(inferred, limit=5)
 
 
+def _asks_to_provide_deadline(text: str) -> bool:
+    lower = str(text or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "provide an explicit deadline",
+            "supply a clearer deadline",
+            "provide a deadline",
+            "what is the target delivery timeline",
+            "target delivery timeline",
+        )
+    )
+
+
+def _requested_deadline_from_result(result: dict, current: str = "") -> str:
+    if current.strip():
+        return current.strip()
+    from app.timeline import deadline_source_texts, parse_requested_deadline
+
+    hit = parse_requested_deadline(
+        deadline_source_texts(
+            user_request=str(result.get("user_request") or ""),
+            discovery=result.get("discovery") or {},
+            clarification_history=result.get("clarification_history"),
+            clarification_answers=result.get("clarification_answers"),
+        )
+    )
+    return hit.display if hit is not None else ""
+
+
 def _recommended_next_steps(result: dict, verdict: dict, blocking, deadline: dict) -> list[str]:
     blocking_text = [_question_text(item) for item in _as_list(blocking)]
-    requested = str(deadline.get("requested") or "").strip()
+    requested = _requested_deadline_from_result(result, str(deadline.get("requested") or ""))
     independent = str(deadline.get("independent_estimate") or "").strip()
     gaps = material_evidence_gaps(result)
+    scope_gap = next((gap for gap in gaps if gap.code == "first_release_scope"), None)
     steps: list[str] = []
 
     if verdict["code"] == "NEEDS_INFORMATION":
         primary = blocking_text[0] if blocking_text else (gaps[0].question if gaps else "")
-        if requested and gaps and gaps[0].code == "first_release_scope":
+        if requested and scope_gap:
             steps.append(
-                f"Define the first-release scope and acceptance criteria before committing to the {requested} date."
+                f"Define the first-release scope and main capabilities before committing to the {requested} date."
             )
         elif requested and "migra" in (primary or "").lower():
             steps.append(
@@ -237,9 +268,17 @@ def _recommended_next_steps(result: dict, verdict: dict, blocking, deadline: dic
         else:
             steps.append("Answer the required clarification questions before producing a numeric estimate.")
         if requested:
-            steps.append(f"Keep the {requested} date visible, but do not treat it as demonstrated until the estimate is responsible.")
+            steps.append(
+                f"Keep the {requested} date visible, but do not treat it as demonstrated until the estimate is responsible."
+            )
         if len(blocking_text) > 1:
-            steps.append(blocking_text[1].rstrip("?") + ".")
+            extra = blocking_text[1].rstrip("?") + "."
+            if extra not in steps:
+                steps.append(extra)
+        steps = [
+            item for item in steps
+            if requested == "" or not _asks_to_provide_deadline(item)
+        ]
         return steps[:3]
 
     if verdict["code"] == "BLOCKED":
@@ -260,7 +299,10 @@ def _recommended_next_steps(result: dict, verdict: dict, blocking, deadline: dic
             steps.append(
                 f"The {requested} date cannot be demonstrated from the current independent estimate. Close the largest evidence gap before committing."
             )
-        return steps[:3]
+        return [
+            item for item in steps
+            if requested == "" or not _asks_to_provide_deadline(item)
+        ][:3]
 
     steps.append("Review the independent estimate, risks, and proposal draft with the delivery owner.")
     if not (result.get("ai_optimization") or {}):

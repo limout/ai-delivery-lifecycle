@@ -28,12 +28,21 @@ _GENERIC_PRODUCT = re.compile(
 
 _CAPABILITY_CLAUSE = re.compile(
     r"\b(?:can|must|should|needs?\s+to|able\s+to|allow(?:s|ing)?|"
-    r"enable(?:s|ing)?|provide(?:s|ing)?|support(?:s|ing)?|include(?:s|ing)?)\s+"
+    r"enable(?:s|ing)?|provide(?:s|ing)?|include(?:s|ing)?)\s+"
     r"(?:the\s+|a\s+|an\s+|to\s+)?(?!portal\b|website\b|app\b|system\b|platform\b)"
     r"[\w][\w\s-]{2,80}",
     re.I,
 )
 
+_CAPABILITY_NOT_SCOPE = re.compile(
+    r"\b(?:integrat\w*|existing\s+systems?|source\s+of\s+truth|third[- ]party|"
+    r"proposal|delivery estimate)\b",
+    re.I,
+)
+_VAGUE_AUTOMATION = re.compile(
+    r"\bautomate\b.{0,60}\b(process(?:es)?|manual|workflows?)\b",
+    re.I,
+)
 _ACTION_OBJECT = re.compile(
     r"\b(?:view|submit|track|manage|create|search|export|import|display|"
     r"approve|onboard|authenticate|log\s*in|update|edit)\s+"
@@ -136,8 +145,16 @@ def is_numeric_duration(text: str) -> bool:
 
 
 def has_first_release_scope(text: str) -> bool:
+    """True only for named first-release capabilities, not integration or vague automation."""
     source = str(text or "")
-    if _CAPABILITY_CLAUSE.search(source) or _ACTION_OBJECT.search(source):
+    if _ACTION_OBJECT.search(source):
+        return True
+    for match in _CAPABILITY_CLAUSE.finditer(source):
+        snippet = match.group(0)
+        if _CAPABILITY_NOT_SCOPE.search(snippet):
+            continue
+        if _VAGUE_AUTOMATION.search(snippet):
+            continue
         return True
     return False
 

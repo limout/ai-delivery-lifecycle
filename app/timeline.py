@@ -28,13 +28,15 @@ _SINGLE = re.compile(rf"({_NUMBER})\s*{_UNIT}", re.I)
 
 _DEADLINE_PREFIX = re.compile(
     r"(?:within|in|by|before|deadline|due|target|timeline|release|launch|"
-    r"go[\s-]?live|complete(?:d)?|production|from now)\s*$",
+    r"go[\s-]?live|complete(?:d)?|production|ready)(?:\s+(?:about|approximately|around))?\s*$",
     re.I,
 )
+_SOFT_DEADLINE_PREFIX = re.compile(r"(?:about|approximately|around)\s*$", re.I)
 _DEADLINE_MARKERS = (
     "deadline", "within", "target", "timeline", "release", "go live",
     "go-live", "launch", "due", "complete", "production", "from now",
-    "first production", "required by", "wants the",
+    "first production", "required by", "wants the", "ready for",
+    "customer event", "in about", "in approximately",
 )
 _ESTIMATE_MARKERS = (
     "estimate", "estimated", "estimation", "of work",
@@ -94,12 +96,15 @@ def _classify(text: str, start: int, end: int) -> str | None:
     estimate_hit = any(marker in window for marker in _ESTIMATE_MARKERS)
     deadline_hit = any(marker in window for marker in _DEADLINE_MARKERS)
     prefix_hit = bool(_DEADLINE_PREFIX.search(immediate))
+    soft_prefix = bool(_SOFT_DEADLINE_PREFIX.search(immediate))
     from_now = bool(re.search(r"^\s*from now\b", after, re.I))
 
-    if prefix_hit or from_now:
+    if from_now or prefix_hit:
         return "deadline"
     if estimate_hit and not deadline_hit:
         return "estimate"
+    if soft_prefix and not estimate_hit:
+        return "deadline"
     if deadline_hit and not estimate_hit:
         return "deadline"
     if estimate_hit:

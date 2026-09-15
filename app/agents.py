@@ -2,6 +2,7 @@ import re
 from app.providers import AIProvider
 from app.state import DeliveryState
 from app.evidence import (
+    customer_authored_text,
     is_estimable,
     material_evidence_gaps,
 )
@@ -636,7 +637,9 @@ Original customer request:
     # Preserve explicit customer timeline facts even if the discovery model omits
     # them from structured constraints. These facts are authoritative provenance
     # for the estimation stage.
-    explicit_timeline_facts = _extract_explicit_timeline_facts(request)
+    explicit_timeline_facts = _extract_explicit_timeline_facts(
+        customer_authored_text(state) or request
+    )
     if explicit_timeline_facts:
         constraints = list(discovery.get("constraints", []) or [])
         existing_constraint_text = " ".join(str(item).lower() for item in constraints)
