@@ -24,6 +24,7 @@ ARTIFACT_KEYS = (
     "delivery_plan",
     "estimate",
     "ai_optimization",
+    "deadline_gap_plan",
     "delivery_review",
     "proposal",
     "sow",

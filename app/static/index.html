@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Delivery Analyst</title>
+    <title>AI Delivery Copilot</title>
 
     <style>
         * { box-sizing: border-box; }
@@ -702,6 +702,8 @@
     .ai-optimization-header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
     .ai-optimization-header h3{margin:0 0 4px;font-size:17px}
     .ai-optimization-panel button{margin-top:0}
+    .gap-close-panel{margin-top:18px;padding-top:16px;border-top:1px solid #ddd6fe}
+    .gap-close-panel h4{margin:0 0 8px;font-size:15px}
     .optimization-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}
     .optimization-card{border:1px solid var(--border);border-radius:12px;padding:14px;background:#fff}
     .optimization-card.highlight{border-color:#c4b5fd;background:#fff}
@@ -733,8 +735,8 @@
 <div class="container">
 
     <header>
-        <div class="eyebrow">AI Delivery Analyst · Intake &amp; feasibility</div>
-        <h1>AI Delivery Analyst</h1>
+        <div class="eyebrow">AI Delivery Copilot · Intake &amp; feasibility</div>
+        <h1>AI Delivery Copilot</h1>
         <div class="subtitle">
             Before you commit to the date, test the delivery reality.
             Turn a messy delivery request into a structured feasibility assessment
@@ -1019,6 +1021,16 @@
                     </div>
                     <p class="section-kicker" id="aiScenarioHint">Run Optimize with AI to compare an AI-assisted scenario. Copying this estimate does not include that scenario.</p>
                     <div id="aiOptimizationContent"></div>
+                    <div class="gap-close-panel" id="gapCloseSection" hidden>
+                        <div class="ai-optimization-header">
+                            <div>
+                                <h3>How to achieve customer deadline</h3>
+                                <div class="section-kicker">AI proposal for closing a remaining gap to a hard deadline. It does not change the baseline estimate and is not a commitment.</div>
+                            </div>
+                            <button id="gapCloseButton" class="optimize-button no-print" type="button" onclick="closeDeadlineGap()" hidden>How to achieve customer deadline</button>
+                        </div>
+                        <div id="gapCloseContent"></div>
+                    </div>
                 </div>
                 <pre class="artifact-print-sheet" data-print-sheet="estimate"></pre>
             </section>
@@ -1403,17 +1415,57 @@
         return clone.innerText.replace(/\n{3,}/g, "\n\n").trim();
     }
 
+    function formatDeadlineGapPlanText(plan) {
+        if (!plan || typeof plan !== "object") return "";
+        const ways = Array.isArray(plan.ways_to_close_gap) ? plan.ways_to_close_gap : [];
+        const scenarios = Array.isArray(plan.recommended_scenarios) ? plan.recommended_scenarios : [];
+        if (!ways.length && !scenarios.length) return "";
+        const parts = [
+            "HOW TO ACHIEVE CUSTOMER DEADLINE",
+            plan.human_decision_note || "",
+            formatExportSection("Customer deadline", plan.customer_deadline),
+            formatExportSection("AI-assisted scenario", plan.ai_assisted_duration),
+            formatExportSection("Remaining gap", plan.remaining_gap),
+            formatExportSection("Summary", plan.summary),
+            formatExportSection("Deadline-implied capacity", plan.deadline_implied_capacity || plan.capacity_note)
+        ];
+        if (ways.length) {
+            parts.push("WAYS TO CLOSE THE GAP");
+            ways.forEach((item, index) => {
+                if (!item || typeof item !== "object") return;
+                parts.push(`${index + 1}. ${item.title || "Change"}`);
+                parts.push(item.description || "");
+                if (item.estimated_impact) parts.push(`Estimated impact: ${item.estimated_impact}`);
+            });
+        }
+        if (scenarios.length) {
+            parts.push("RECOMMENDED SCENARIO(S)");
+            scenarios.forEach(item => {
+                if (!item || typeof item !== "object") return;
+                parts.push(item.name || "Scenario");
+                parts.push(formatExportSection("Target", item.target_duration));
+                parts.push(formatExportSection("Team", item.team));
+                parts.push(formatExportSection("Main changes", item.main_changes));
+                parts.push(formatExportSection("Confidence", item.confidence));
+                parts.push(formatExportSection("Notes", item.notes));
+            });
+        }
+        parts.push(formatExportSection("Conditions", plan.conditions || []));
+        parts.push(formatExportSection("Trade-offs", plan.tradeoffs || []));
+        parts.push(formatExportSection("Risks", plan.risks || []));
+        return parts.filter(Boolean).join("\n\n") + "\n";
+    }
+
     function estimateExportText(data) {
         const source = data || currentData || {};
         const texts = source.artifact_texts || {};
         const baseline = texts.estimate || "";
         if (!hasAiOptimizationResult(source)) return baseline;
-        const fromDom = visibleEstimateAiText();
         const fromState = formatAiScenarioExportText(source.ai_optimization);
-        const ai = fromState || fromDom;
-        if (!ai) return baseline;
-        if (!baseline) return ai;
-        return `${baseline.trim()}\n\n${ai.trim()}\n`;
+        const ai = fromState || visibleEstimateAiText();
+        const gap = formatDeadlineGapPlanText(source.deadline_gap_plan);
+        const chunks = [baseline.trim(), (ai || "").trim(), (gap || "").trim()].filter(Boolean);
+        return chunks.join("\n\n") + "\n";
     }
 
     function artifactText(name) {
@@ -1438,6 +1490,9 @@
 
     function preferredTabAfterResult(data, source) {
         if (source === "optimize" && hasAiOptimizationResult(data)) {
+            return "estimate";
+        }
+        if (source === "gap_close" && data && data.deadline_gap_plan) {
             return "estimate";
         }
         const review = data && data.delivery_review;
@@ -1596,6 +1651,7 @@
             );
         }
         renderAIOptimization(currentData && currentData.ai_optimization);
+        renderGapClose(currentData);
     }
 
     function renderAIOptimization(data) {
@@ -1643,6 +1699,64 @@
                 ${renderDocumentSection("Feasibility conditions", data.feasibility_conditions || [])}
                 ${renderDocumentSection("Scope trade-offs", data.scope_tradeoffs || [])}
                 ${renderDocumentSection("Recommendations", data.recommendations || [], true)}
+            </div>
+        `;
+    }
+
+    function renderGapClose(data) {
+        const section = document.getElementById("gapCloseSection");
+        const content = document.getElementById("gapCloseContent");
+        const button = document.getElementById("gapCloseButton");
+        if (!section || !content || !button) return;
+        const available = !!(data && data.gap_closing_available);
+        const plan = data && data.deadline_gap_plan;
+        const hasPlan = !!(plan && typeof plan === "object" && (
+            (Array.isArray(plan.ways_to_close_gap) && plan.ways_to_close_gap.length) ||
+            (Array.isArray(plan.recommended_scenarios) && plan.recommended_scenarios.length)
+        ));
+        section.hidden = !available && !hasPlan;
+        button.hidden = !available || hasPlan;
+        if (!hasPlan) {
+            content.innerHTML = available
+                ? '<p class="section-kicker">The AI-assisted scenario still exceeds a hard customer deadline. Ask how to close the remaining gap. This is an AI proposal, not a commitment.</p>'
+                : "";
+            return;
+        }
+        const ways = Array.isArray(plan.ways_to_close_gap) ? plan.ways_to_close_gap : [];
+        const scenarios = Array.isArray(plan.recommended_scenarios) ? plan.recommended_scenarios : [];
+        content.innerHTML = `
+            <p class="disclaimer">${escapeHtml(plan.human_decision_note || "AI proposal / scenario — not a commitment.")}</p>
+            ${plan.double_count_note ? `<p class="section-kicker">${escapeHtml(plan.double_count_note)}</p>` : ""}
+            <div class="document-grid" style="margin-top:12px">
+                ${renderDocumentSection("Customer deadline", plan.customer_deadline)}
+                ${renderDocumentSection("AI-assisted scenario", plan.ai_assisted_duration)}
+                ${renderDocumentSection("Remaining gap", plan.remaining_gap)}
+                ${plan.combined_impact_note ? renderDocumentSection("Combined lever impact", plan.combined_impact_note) : ""}
+                ${(plan.deadline_implied_capacity || plan.capacity_note) ? renderDocumentSection("Deadline-implied capacity", plan.deadline_implied_capacity || plan.capacity_note) : ""}
+            </div>
+            <h4 style="margin-top:16px">Ways to close the gap</h4>
+            ${ways.map(item => `
+                <section class="document-section full">
+                    <h4>${escapeHtml(item.title || "Change")}</h4>
+                    <p>${escapeHtml(item.description || "")}</p>
+                    ${item.estimated_impact ? `<p>Estimated impact: ${escapeHtml(item.estimated_impact)}</p>` : ""}
+                </section>
+            `).join("")}
+            <h4 style="margin-top:16px">Recommended scenario(s)</h4>
+            ${scenarios.map(item => `
+                <section class="document-section full">
+                    <h4>${escapeHtml(item.name || "Scenario")}</h4>
+                    <p>Target: ${escapeHtml(item.target_duration || "Not specified")}</p>
+                    <p>Team: ${escapeHtml(item.team || "Not specified")}</p>
+                    <p>Main changes: ${escapeHtml(item.main_changes || "")}</p>
+                    <p>Confidence: ${escapeHtml(item.confidence || "LOW")}</p>
+                    ${item.notes ? `<p>${escapeHtml(item.notes)}</p>` : ""}
+                </section>
+            `).join("")}
+            <div class="document-grid">
+                ${renderDocumentSection("Conditions", plan.conditions || [])}
+                ${renderDocumentSection("Trade-offs", plan.tradeoffs || [])}
+                ${renderDocumentSection("Risks", plan.risks || [], true)}
             </div>
         `;
     }
@@ -1735,6 +1849,7 @@
         renderObject("deliveryPlanContent", data.delivery_plan);
         renderEstimate(data.estimate);
         renderAIOptimization(data.ai_optimization);
+        renderGapClose(data);
         renderDeliveryReview(data.delivery_review);
         renderProposal(data.proposal);
         renderSow(data.sow);
@@ -2122,6 +2237,40 @@ function updateRunningStatus(message) {
                 button.disabled = false;
                 button.textContent = "Optimize with AI";
             });
+            document.getElementById("loading").classList.add("hidden");
+        }
+    }
+
+    async function closeDeadlineGap() {
+        clearError();
+        const request = document.getElementById("request").value.trim();
+        if (!request) {
+            showError("Please enter a customer request first.");
+            return;
+        }
+        if (!currentData || !currentData.gap_closing_available) {
+            showError("How to achieve customer deadline is only available when a hard deadline still exceeds the AI-assisted scenario.");
+            return;
+        }
+        const button = document.getElementById("gapCloseButton");
+        if (button) {
+            button.disabled = true;
+            button.textContent = "Analyzing gap…";
+        }
+        updateRunningStatus("Analyzing how to achieve the customer deadline…");
+        try {
+            await consumeWorkflowStream(
+                "/close-deadline-gap/stream",
+                { user_request: request, analysis: currentData },
+                payload => renderResult(payload, "gap_close")
+            );
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = "How to achieve customer deadline";
+            }
             document.getElementById("loading").classList.add("hidden");
         }
     }

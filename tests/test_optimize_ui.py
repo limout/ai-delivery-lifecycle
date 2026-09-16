@@ -8,6 +8,7 @@ from app.providers import MockProvider
 from fastapi.testclient import TestClient
 from tests.test_phase0 import COMPLETE_REQUEST
 from tests.test_phase01 import _sse_result
+from app.artifact_export import format_deadline_gap_plan_text
 
 app.dependency_overrides[get_provider] = MockProvider
 client = TestClient(app)
@@ -78,11 +79,12 @@ def estimate_export_text(data):
     if not has_ai_optimization_result(data):
         return baseline
     ai = format_ai_scenario_export_text(data.get("ai_optimization") or {})
-    if not ai:
+    gap = format_deadline_gap_plan_text(data.get("deadline_gap_plan"))
+    chunks = [baseline.strip(), (ai or "").strip(), (gap or "").strip()]
+    chunks = [item for item in chunks if item]
+    if not chunks:
         return baseline
-    if not baseline:
-        return ai
-    return baseline.strip() + "\n\n" + ai.strip() + "\n"
+    return "\n\n".join(chunks) + "\n"
 
 
 def preferred_tab_after_result(data, source="analyze"):

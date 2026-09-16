@@ -2,8 +2,10 @@ from app.api import get_provider
 from app.evidence import (
     customer_authored_text,
     has_first_release_scope,
+    has_named_integration,
     is_estimable,
     material_evidence_gaps,
+    needs_integration_clarity,
 )
 from app.main import app
 from app.providers import MockProvider
@@ -157,3 +159,91 @@ def test_scenario_1_and_3_still_complete():
     assert three["status"] == "COMPLETE"
     assert three["estimate"]["standard_deadline_fit"] == "EXCEEDS"
     assert three["verdict"]["code"] == "DEADLINE_AT_RISK"
+
+
+IDENTITY_SYSTEMS_ANSWER = (
+    "The only external system required for the first release is the customer's existing identity provider.\n\n"
+    "The identity provider is the source of truth for:\n"
+    "- user identity\n"
+    "- authentication\n"
+    "- user status\n\n"
+    "The portal is the source of truth for:\n"
+    "- documents\n"
+    "- search index\n"
+    "- application roles and permissions\n"
+    "- analytics\n"
+    "- administration settings\n\n"
+    "No other external system integrations are required for the first release."
+)
+
+IDENTITY_PORTAL_REQUEST = (
+    "We need to build a new customer support knowledge portal in 8 weeks. "
+    "Users: support agents and customers. "
+    "It will include document ingestion, search, role-based access, analytics "
+    "and an admin interface. "
+    "The team estimates 12-16 weeks using the standard delivery approach. "
+    "It must integrate with our existing systems."
+)
+
+
+def test_unnamed_existing_systems_still_need_integration_clarity():
+    assert needs_integration_clarity(IDENTITY_PORTAL_REQUEST) is True
+    assert has_named_integration(IDENTITY_PORTAL_REQUEST) is False
+    assert has_named_integration(IDENTITY_SYSTEMS_ANSWER) is True
+    accumulated = {
+        "user_request": IDENTITY_PORTAL_REQUEST,
+        "clarification_history": [
+            {"question": SYSTEMS_QUESTION, "answer": IDENTITY_SYSTEMS_ANSWER}
+        ],
+    }
+    source = customer_authored_text(accumulated)
+    assert "identity provider" in source.lower()
+    assert needs_integration_clarity(source) is False
+    assert "integrations" not in {gap.code for gap in material_evidence_gaps(accumulated)}
+
+
+def test_other_evidence_gaps_still_block_when_systems_are_unnamed():
+    vague = "We want a portal that must integrate with our existing systems."
+    codes = {gap.code for gap in material_evidence_gaps({"user_request": vague})}
+    assert "integrations" in codes
+    assert "first_release_scope" in codes
+    assert is_estimable({"user_request": vague}) is False
+
+
+def test_identity_provider_answer_clears_integration_blocker_on_resume():
+    first = client.post("/analyze", json={"user_request": IDENTITY_PORTAL_REQUEST}).json()
+    assert first["status"] == "NEEDS_INFO"
+    assert SYSTEMS_QUESTION.lower() in _blocking_text(first)
+    gaps_before = material_evidence_gaps(first)
+    assert any(gap.code == "integrations" for gap in gaps_before)
+    assert any("systems are not named" in gap.reason for gap in gaps_before)
+
+    history = list(first.get("clarification_history") or [])
+    payload = {
+        "user_request": IDENTITY_PORTAL_REQUEST,
+        "answers": [{"question": SYSTEMS_QUESTION, "answer": IDENTITY_SYSTEMS_ANSWER}],
+        "iteration": first["iteration"],
+        "run_id": first["run_id"],
+        "prior_state": first,
+        "clarification_history": history,
+    }
+    second = client.post("/clarify", json=payload).json()
+    answers = " ".join(
+        str(item.get("answer") or "")
+        for item in (second.get("clarification_history") or [])
+        if isinstance(item, dict)
+    )
+    assert "identity provider" in answers.lower()
+    accumulated = customer_authored_text(second)
+    assert "identity provider" in accumulated.lower()
+    assert IDENTITY_SYSTEMS_ANSWER.split("\n")[0] in accumulated or "identity provider" in accumulated.lower()
+    assert needs_integration_clarity(accumulated) is False
+    assert "integrations" not in {gap.code for gap in material_evidence_gaps(second)}
+    assert SYSTEMS_QUESTION.lower() not in _blocking_text(second)
+    blob = str(second).lower()
+    assert "major integration work is implied but the systems are not named" not in blob
+    assert "integrat" not in _blocking_text(second)
+    if second["status"] == "COMPLETE":
+        assert any(ch.isdigit() for ch in str((second.get("estimate") or {}).get("duration_range") or ""))
+    else:
+        assert second["status"] == "NEEDS_INFO"

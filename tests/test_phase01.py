@@ -43,7 +43,7 @@ def _sse_result(response) -> dict:
             chunk = line[5:].strip()
             if chunk.startswith("{"):
                 data = json.loads(chunk)
-                if data.get("status") or data.get("estimate") or data.get("ai_optimization"):
+                if data.get("status") or data.get("estimate") or data.get("ai_optimization") or data.get("deadline_gap_plan"):
                     payload = data
     assert payload, response.text[:500]
     return payload

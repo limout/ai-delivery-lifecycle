@@ -53,7 +53,14 @@ _ACTION_OBJECT = re.compile(
 _NAMED_SYSTEM = re.compile(
     r"\b(salesforce|sap|jira|servicenow|workday|dynamics|sharepoint|"
     r"entra|okta|auth0|aws|azure|gcp|snowflake|postgres|mysql|"
+    r"identity\s+provider|idp\b|active\s+directory|ldap\b|"
     r"[\w-]+\s+api|api\s+called|existing\s+[\w-]+\s+api)\b",
+    re.I,
+)
+
+_NAMED_EXISTING_SYSTEM = re.compile(
+    r"\bexisting\s+(?!systems?\b)(?:[\w'-]+\s+){0,5}"
+    r"(?:provider|platform|service|directory|idp)\b",
     re.I,
 )
 
@@ -164,7 +171,8 @@ def has_named_users(text: str) -> bool:
 
 
 def has_named_integration(text: str) -> bool:
-    return bool(_NAMED_SYSTEM.search(text or ""))
+    source = text or ""
+    return bool(_NAMED_SYSTEM.search(source) or _NAMED_EXISTING_SYSTEM.search(source))
 
 
 def needs_integration_clarity(text: str) -> bool:

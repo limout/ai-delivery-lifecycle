@@ -123,6 +123,54 @@ def format_ai_scenario_text(optimization: dict | None) -> str:
     )
 
 
+def format_deadline_gap_plan_text(plan: dict | None) -> str:
+    if not isinstance(plan, dict) or not plan:
+        return ""
+    if not plan.get("ways_to_close_gap") and not plan.get("recommended_scenarios"):
+        return ""
+    ways = []
+    for index, item in enumerate(plan.get("ways_to_close_gap") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        block = [
+            f"{index}. {item.get('title') or 'Change'}",
+            str(item.get("description") or "").strip(),
+            f"Estimated impact: {item.get('estimated_impact')}" if item.get("estimated_impact") else "",
+        ]
+        ways.append("\n".join(part for part in block if part))
+    scenarios = []
+    for item in plan.get("recommended_scenarios") or []:
+        if not isinstance(item, dict):
+            continue
+        block = [
+            str(item.get("name") or "Scenario").strip(),
+            _section("Target", item.get("target_duration")),
+            _section("Team", item.get("team")),
+            _section("Main changes", item.get("main_changes")),
+            _section("Confidence", item.get("confidence")),
+            _section("Notes", item.get("notes")),
+        ]
+        scenarios.append(_join(block))
+    return _join(
+        [
+            "HOW TO ACHIEVE CUSTOMER DEADLINE",
+            str(plan.get("human_decision_note") or "").strip(),
+            _section("Customer deadline", plan.get("customer_deadline")),
+            _section("AI-assisted scenario", plan.get("ai_assisted_duration")),
+            _section("Remaining gap", plan.get("remaining_gap")),
+            _section("Summary", plan.get("summary")),
+            _section("Already in AI-assisted scenario", plan.get("double_count_note")),
+            _section("Combined lever impact", plan.get("combined_impact_note")),
+            _section("Deadline-implied capacity", plan.get("deadline_implied_capacity") or plan.get("capacity_note")),
+            "WAYS TO CLOSE THE GAP\n" + "\n\n".join(ways) if ways else "",
+            "RECOMMENDED SCENARIO(S)\n" + "\n\n".join(scenarios) if scenarios else "",
+            _section("Conditions", plan.get("conditions") or []),
+            _section("Trade-offs", plan.get("tradeoffs") or []),
+            _section("Risks", plan.get("risks") or []),
+        ]
+    )
+
+
 def format_proposal_text(proposal: dict | None) -> str:
     if not _has_artifact(proposal):
         return ""

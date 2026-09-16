@@ -1,0 +1,199 @@
+We are changing the product direction and I want you to treat the following architecture as the long-term product vision.
+
+IMPORTANT: Do not implement the future phases yet. This is context for how you should understand the product and make future changes.
+
+PRODUCT NAME:
+AI Delivery Copilot
+
+POSITIONING:
+From project request to delivery outcome.
+
+The current product is the FIRST MODULE of this larger product.
+It is currently focused on Delivery Readiness / Estimate validation.
+
+The current product should no longer be called:
+"AI Delivery Analyst"
+
+Rename the current product/UI positioning to:
+"AI Delivery Copilot"
+
+Do NOT change the core functionality just because of the rename.
+
+LONG-TERM PRODUCT ARCHITECTURE:
+
+1. DISCOVER
+Understand the project request.
+- Capture project request
+- Ask the right questions
+- Analyze scope and context
+- Identify missing information
+- Highlight risks and assumptions
+
+Outcome:
+Clear and complete understanding of the need.
+
+2. ESTIMATE
+Test delivery reality.
+This is the CURRENT MVP / current phase.
+- Independent human-led estimate
+- Compare with customer estimate
+- Check deadline feasibility
+- Identify risks and gaps
+- AI-assisted optimization scenario
+
+Outcome:
+Realistic estimate and delivery decision support.
+
+3. PLAN
+Create delivery structure.
+Future phase.
+- Convert validated scope to features
+- Generate user stories
+- Create tasks
+- Define dependencies
+- Plan releases and timeline
+- Prepare team and resources
+- Potentially create the structure directly in Jira / Azure DevOps
+
+Important future principle:
+AI proposes the delivery structure → Delivery Lead reviews/edits → human approves → system creates it.
+
+4. EXECUTE
+AI-assisted delivery.
+Future phase.
+- Break down tasks
+- AI proposes implementation
+- Human approval
+- Create repository / branches
+- Implement code
+- Run tests
+- Create pull requests
+- Review (human or AI)
+- Merge and track progress
+
+Important future principle:
+AI should NOT autonomously make uncontrolled production changes.
+
+The intended flow is:
+AI proposes → explains how it wants to do the work → human reviews/approves → AI executes → tests → PR → review → merge.
+
+5. MONITOR
+Keep delivery on track.
+Future evolution of our existing Jira / Azure DevOps delivery monitoring capability.
+- Track progress
+- Monitor team health
+- Collect team mood / confidence / blockers
+- Collect client feedback
+- NPS / satisfaction
+- Monitor risks and blockers
+- Analyze scope changes
+- Detect delivery issues
+- Provide proactive recommendations
+
+The goal is to combine:
+delivery data + team signals + client signals + quality signals.
+
+6. FINANCE
+Deliver business value.
+Future phase.
+- Estimate and track delivery cost
+- Calculate project price
+- Revenue
+- Margin
+- Utilization
+- Forecast financial outcomes
+- ROI / profitability scenarios
+- Support business decisions
+
+UNDERLYING INTELLIGENCE LAYER:
+
+AI & Delivery Intelligence
+
+This should eventually:
+- analyze historical projects
+- calibrate estimates against actual delivery
+- identify recurring delivery patterns
+- improve risk prediction
+- provide personalized recommendations
+- continuously learn from delivery outcomes
+
+DATA / KNOWLEDGE BASE:
+
+PostgreSQL / Neon
+
+This will eventually become the Delivery Knowledge Base.
+
+Potential entities:
+- Requests
+- Projects
+- Requirements
+- Estimates
+- Commitments
+- Features
+- Stories
+- Tasks
+- Teams
+- Actuals
+- Risks
+- Changes
+- Feedback
+- Quality
+- Financials
+- Outcomes
+
+IMPORTANT:
+We are NOT implementing this database/history architecture now.
+It is the future direction.
+
+The important idea is:
+Request → Estimate → Commitment → Actual → Outcome
+
+Over time we should be able to compare estimates with what actually happened and use that delivery history to improve estimation and decision support.
+
+STRATEGIC PRINCIPLE:
+
+This is NOT intended to become:
+- another Jira clone
+- another project dashboard
+- another generic AI chatbot
+- only an estimation tool
+
+The long-term goal is an end-to-end AI Delivery tool / AI Delivery Copilot that supports the Delivery Lead across the whole lifecycle.
+
+HUMAN-IN-THE-LOOP IS FUNDAMENTAL.
+
+The product should augment Delivery Leads, not remove them.
+
+For future functionality involving project creation, code execution, changes, deployments, etc.:
+
+AI proposes → Human reviews → Human approves → AI executes → Human/AI reviews result.
+
+CURRENT TASK:
+
+For the CURRENT application only:
+
+1. Rename the product from "AI Delivery Analyst" to "AI Delivery Copilot" everywhere in the user-facing UI where appropriate.
+2. Review visible headings, page title, browser title, introductory copy, empty states, etc.
+3. Preserve the current positioning around delivery readiness / deadline reality.
+4. Do not turn the current product into a generic copilot yet.
+5. Do not implement Plans, Jira/ADO project creation, code execution, monitoring integrations, finance, or database history yet.
+6. Do not change the existing Analyze / Estimate / Optimize with AI workflow.
+7. Do not change backend logic unless required purely for the naming change.
+8. Do not rename internal Python variables, database fields, API fields, or test identifiers unless necessary. User-facing naming is the priority.
+
+Before changing anything, search the project for all user-facing occurrences of:
+- AI Delivery Analyst
+- Delivery Analyst
+- any related product title/subtitle
+
+Make the smallest clean change.
+
+Run the full test suite after the rename.
+
+Do NOT commit yet.
+At the end show:
+- files changed
+- occurrences renamed
+- test result
+- git diff --stat
+- git status

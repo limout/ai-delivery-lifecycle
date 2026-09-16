@@ -11,10 +11,11 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.graph import build_graph, build_optimization_graph
+from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
 from app.evidence import is_numeric_duration
+from app.gap_close import gap_closing_eligible
 from app.providers import (
     AIProvider,
     AIProviderQuotaError,
@@ -130,6 +131,8 @@ STAGE_LABELS = {
     "apply_clarification": "Apply clarification",
     "ai_optimization": "AI Optimization",
     "optimization_complete": "Optimization Complete",
+    "deadline_gap_plan": "Deadline gap plan",
+    "gap_close_complete": "Gap-close complete",
 }
 
 
@@ -424,6 +427,93 @@ def _stream_optimization(
             break
 
 
+def _stream_gap_close(
+    request: str,
+    analysis: dict,
+    provider: AIProvider,
+):
+    """Stream the explicit, user-triggered hard-deadline gap-closing graph."""
+    events: queue.Queue = queue.Queue()
+    started_at = time.monotonic()
+
+    def progress_callback(stage: str, status: str) -> None:
+        elapsed = round(time.monotonic() - started_at, 1)
+        events.put({
+            "type": "stage",
+            "stage": stage,
+            "label": STAGE_LABELS.get(stage, stage.replace("_", " ").title()),
+            "status": status,
+            "elapsed": elapsed,
+        })
+
+    def worker() -> None:
+        instrumented = _InstrumentedProvider(provider)
+        try:
+            graph = build_gap_close_graph(
+                instrumented,
+                progress_callback=progress_callback,
+            )
+            state = dict(analysis or {})
+            state["user_request"] = request
+            state["workflow_status"] = "RUNNING"
+            state["awaiting_customer"] = False
+            result = graph.invoke(state)
+            result["execution"] = {
+                "mode": "gap_close",
+                "nodes_executed": ["deadline_gap_plan", "gap_close_complete"],
+                "nodes_skipped": [],
+                "llm_calls": instrumented.llm_calls,
+                "llm_calls_avoided": 0,
+                "elapsed_seconds": round(time.monotonic() - started_at, 2),
+            }
+            events.put({
+                "type": "result",
+                "data": workflow_response(result, run_id=analysis.get("run_id")),
+            })
+        except AIProviderQuotaError as exc:
+            events.put({
+                "type": "error",
+                "status_code": 503,
+                "error": "AI_PROVIDER_QUOTA_EXCEEDED",
+                "message": str(exc),
+            })
+        except Exception as exc:
+            events.put({
+                "type": "error",
+                "status_code": 500,
+                "error": "GAP_CLOSE_FAILED",
+                "message": str(exc),
+            })
+        finally:
+            events.put({"type": "done"})
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    yield _sse_event(
+        "started",
+        {"type": "started", "message": "Analyzing how to achieve the customer deadline"},
+    )
+
+    while True:
+        try:
+            item = events.get(timeout=10)
+        except queue.Empty:
+            yield _sse_event("ping", {"type": "ping"})
+            continue
+
+        item_type = item.get("type")
+        if item_type == "stage":
+            yield _sse_event("stage", item)
+        elif item_type == "result":
+            yield _sse_event("result", item["data"])
+        elif item_type == "error":
+            yield _sse_event("error", item)
+        elif item_type == "done":
+            yield _sse_event("done", {"type": "done"})
+            break
+
+
 class AnalyzeRequest(BaseModel):
     user_request: str = Field(min_length=1)
 
@@ -655,6 +745,7 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         "delivery_plan": result.get("delivery_plan"),
         "estimate": result.get("estimate"),
         "ai_optimization": result.get("ai_optimization"),
+        "deadline_gap_plan": result.get("deadline_gap_plan"),
         "delivery_review": result.get("delivery_review"),
         "proposal": result.get("proposal"),
         "sow": result.get("sow"),
@@ -670,6 +761,9 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
     payload["assessment"] = assessment
     payload["assessment_text"] = format_assessment_text(assessment)
     payload["print_assessment_text"] = format_print_assessment(assessment)
+    if payload.get("deadline_gap_plan") and not gap_closing_eligible(payload):
+        payload["deadline_gap_plan"] = None
+    payload["gap_closing_available"] = gap_closing_eligible(payload)
     payload["artifact_texts"] = build_artifact_texts(payload)
     return payload
 
@@ -744,6 +838,43 @@ def optimize_stream(
         _stream_optimization(
             request=request.user_request,
             analysis=request.analysis,
+            provider=provider,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/close-deadline-gap/stream")
+def close_deadline_gap_stream(
+    request: OptimizeRequest,
+    http_request: Request,
+    provider: AIProvider = Depends(get_provider),
+):
+    analysis = request.analysis or {}
+    if not gap_closing_eligible({**analysis, "user_request": request.user_request}):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "GAP_CLOSING_NOT_APPLICABLE",
+                "message": (
+                    "How to achieve customer deadline is only available when a hard "
+                    "customer deadline is still exceeded after the AI-assisted scenario."
+                ),
+            },
+        )
+
+    if not _claim_daily_run("gap_close", _client_ip(http_request)):
+        return _rate_limit_response("gap_close")
+
+    return StreamingResponse(
+        _stream_gap_close(
+            request=request.user_request,
+            analysis=analysis,
             provider=provider,
         ),
         media_type="text/event-stream",

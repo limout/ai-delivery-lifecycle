@@ -101,7 +101,7 @@ def test_analyze_returns_503_when_ai_quota_is_exceeded():
 def test_home_page():
     response = client.get("/")
     assert response.status_code == 200
-    assert "AI Delivery Analyst" in response.text
+    assert "AI Delivery Copilot" in response.text
     assert "Before you commit to the date" in response.text
     assert "Delivery request" in response.text
     assert "validation.blocking_questions" in response.text

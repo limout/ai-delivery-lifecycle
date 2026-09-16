@@ -13,6 +13,7 @@ class DeliveryState(TypedDict, total=False):
     delivery_plan: dict
     estimate: dict
     ai_optimization: dict
+    deadline_gap_plan: dict
     delivery_review: dict
     proposal: dict
     sow: dict

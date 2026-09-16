@@ -107,6 +107,43 @@ def build_optimization_graph(
     graph.add_edge("optimization_complete", END)
     return graph.compile()
 
+
+def build_gap_close_graph(
+    provider: AIProvider | None = None,
+    progress_callback: ProgressCallback | None = None,
+):
+    """Build the explicit user-triggered hard-deadline gap-closing graph."""
+    from app.gap_close import deadline_gap_plan_agent
+
+    if provider is None:
+        provider = GeminiProvider()
+
+    graph = StateGraph(DeliveryState)
+    graph.add_node(
+        "deadline_gap_plan",
+        _wrap_node(
+            "deadline_gap_plan",
+            partial(deadline_gap_plan_agent, provider=provider),
+            progress_callback,
+        ),
+    )
+    graph.add_node(
+        "gap_close_complete",
+        _wrap_node(
+            "gap_close_complete",
+            lambda state: {
+                "workflow_status": "COMPLETE",
+                "current_stage": "deadline_gap_plan",
+                "awaiting_customer": False,
+            },
+            progress_callback,
+        ),
+    )
+    graph.add_edge(START, "deadline_gap_plan")
+    graph.add_edge("deadline_gap_plan", "gap_close_complete")
+    graph.add_edge("gap_close_complete", END)
+    return graph.compile()
+
 def build_graph(
     provider: AIProvider | None = None,
     progress_callback: ProgressCallback | None = None,

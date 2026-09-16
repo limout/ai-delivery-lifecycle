@@ -542,6 +542,97 @@ class MockProvider(AIProvider):
             }
 
         if required == (
+            "summary",
+            "ways_to_close_gap",
+            "recommended_scenarios",
+            "conditions",
+            "tradeoffs",
+            "risks",
+        ) or "how to achieve a hard customer deadline" in prompt_lower:
+            return {
+                "summary": (
+                    "Starting from the AI-assisted scenario, remaining gap may close through "
+                    "scope reduction and parallelization while keeping the current team. "
+                    "A large staffing increase is only a limited extra lever; adding people "
+                    "does not reduce duration linearly."
+                ),
+                "ways_to_close_gap": [
+                    {
+                        "title": "Scope reduction",
+                        "category": "scope",
+                        "description": "Move advanced analytics to Phase 2 and ship an MVP first.",
+                        "estimated_impact": "1-1.5 weeks",
+                    },
+                    {
+                        "title": "Managed search evaluation",
+                        "category": "technical",
+                        "description": (
+                            "Evaluate a managed search/ingestion service compatible with the "
+                            "customer's cloud and security constraints. This is an option to "
+                            "validate, not an assumed architecture."
+                        ),
+                        "estimated_impact": "1 week",
+                    },
+                    {
+                        "title": "Parallelization",
+                        "category": "parallelization",
+                        "description": "Run ingestion and UI workstreams in parallel where they do not share a bottleneck.",
+                        "estimated_impact": "0.5-1 week",
+                    },
+                    {
+                        "title": "Reuse existing access control",
+                        "category": "technical",
+                        "description": "Reuse an already-built RBAC pattern rather than designing a new one.",
+                        "estimated_impact": "0.5 week",
+                    },
+                    {
+                        "title": "Team adjustment",
+                        "category": "team",
+                        "description": "Add 8 additional engineers to mathematically divide the remaining work.",
+                        "estimated_impact": "limited",
+                    },
+                ],
+                "recommended_scenarios": [
+                    {
+                        "name": "Scenario A — Scope-first",
+                        "target_duration": "8-9 weeks",
+                        "team": "existing team",
+                        "main_changes": "Reduced scope from the AI-assisted scenario; do not re-apply AI acceleration.",
+                        "confidence": "MEDIUM",
+                        "notes": "Starts from the AI-assisted duration, not the baseline.",
+                    },
+                    {
+                        "name": "Scenario B — Scope + parallelization",
+                        "target_duration": "8 weeks",
+                        "team": "existing team + limited additional capacity",
+                        "main_changes": "Combine scope cut and parallel workstreams from the AI-assisted scenario.",
+                        "confidence": "MEDIUM",
+                        "notes": "Does not stack a second AI-development speedup on the baseline.",
+                    },
+                    {
+                        "name": "Scenario C — Scope + parallelization + team adjustment",
+                        "target_duration": "8 weeks",
+                        "team": "add 8 additional engineers",
+                        "main_changes": "Same scope and parallelization changes plus a large staffing increase.",
+                        "confidence": "LOW",
+                        "notes": "Adding people does not reduce duration linearly; do not double-count AI acceleration.",
+                    },
+                ],
+                "conditions": [
+                    "Customer accepts a reduced first-release scope.",
+                    "Workstreams can actually overlap without shared-resource bottlenecks.",
+                ],
+                "tradeoffs": [
+                    "Later phases still need analytics and remaining features.",
+                    "Parallelization increases integration coordination.",
+                ],
+                "risks": [
+                    "Overstaffing may add communication overhead instead of shortening duration.",
+                    "A scenario existing does not mean the hard deadline is achievable.",
+                ],
+            }
+
+        if required == (
             "effort_range",
             "duration_range",
             "confidence",
