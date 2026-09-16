@@ -287,6 +287,39 @@ def _current_team_blob(state: dict) -> str:
     return " ".join(chunks)
 
 
+_LEVER_CONCEPTS = (
+    ("ai_coding", re.compile(r"\b(?:ai coding|boilerplate|code gen(?:eration)?|coding assistance|copilot)\b", re.I)),
+    ("test_generation", re.compile(r"\b(?:test generation|generate tests|ai tests?)\b", re.I)),
+    ("parallelization", re.compile(r"\bparallel", re.I)),
+    ("scope_reduction", re.compile(
+        r"\b(?:scope reduction|reduced scope|mvp|phase 2|defer(?:ral)?|analytics to phase)\b",
+        re.I,
+    )),
+    ("platform_reuse", re.compile(
+        r"\b(?:rbac|reuse of existing|internal platform reuse|already-built)\b",
+        re.I,
+    )),
+    ("managed_search", re.compile(
+        r"\b(?:managed search|ingestion service|opensearch|cognitive search|vertex ai search)\b",
+        re.I,
+    )),
+)
+_GENERIC_MATCH_TOKENS = {
+    "the", "and", "with", "from", "that", "this", "for", "into", "using",
+    "a", "an", "of", "to", "in", "on", "or", "by", "as", "service", "services",
+    "evaluate", "evaluation", "option", "compatible", "customer", "cloud",
+    "existing", "additional", "delivery", "scenario", "week", "weeks", "impact",
+    "development", "platform", "internal", "assistance", "optional", "reduce",
+    "elapsed", "time", "independent", "estimate", "approach", "constraints",
+    "security", "validate", "assumed", "architecture", "work", "first",
+}
+_ACHIEVEMENT_SENTENCE = re.compile(
+    r"[^.]*\b(?:meets?|achieves?|will meet|successfully (?:meet|deliver|achieve)|"
+    r"closes the (?:remaining )?gap and meets)\b[^.]*\bdeadline[^.]*\.?",
+    re.I,
+)
+
+
 def _applied_ai_levers(state: dict) -> list[str]:
     opt = state.get("ai_optimization") or {}
     levers = []
@@ -302,47 +335,79 @@ def _applied_ai_levers(state: dict) -> list[str]:
     return levers
 
 
+def _matching_ai_levers(state: dict) -> list[str]:
+    """Levers that can prove a gap-close item was already in the AI scenario."""
+    opt = state.get("ai_optimization") or {}
+    levers = []
+    for key in ("optimization_levers", "scope_tradeoffs"):
+        value = opt.get(key)
+        if isinstance(value, list):
+            levers.extend(str(item).strip() for item in value if str(item).strip())
+        elif value:
+            levers.append(str(value).strip())
+    return levers
+
+
 def _normalize_tokens(text: str) -> set[str]:
-    stop = {
-        "the", "and", "with", "from", "that", "this", "for", "into", "using",
-        "a", "an", "of", "to", "in", "on", "or", "by", "as",
-    }
     tokens = re.findall(r"[a-z0-9]+", str(text or "").lower())
-    return {token for token in tokens if token not in stop and len(token) > 2}
+    return {token for token in tokens if token not in _GENERIC_MATCH_TOKENS and len(token) > 2}
 
 
-def _is_ai_double_count(item: dict, applied_levers: list[str] | None = None) -> bool:
-    blob = " ".join([
+def _lever_concepts(text: str) -> set[str]:
+    blob = str(text or "")
+    return {name for name, pattern in _LEVER_CONCEPTS if pattern.search(blob)}
+
+
+def _item_blob(item: dict) -> str:
+    return " ".join([
         str(item.get("title") or ""),
         str(item.get("category") or ""),
         str(item.get("description") or ""),
         str(item.get("main_changes") or ""),
-    ]).lower()
+    ])
+
+
+def _is_ai_double_count(item: dict, applied_levers: list[str] | None = None) -> bool:
+    blob = _item_blob(item).lower()
     if "already applied" in blob or "already included" in blob or "no additional" in blob:
+        return False
+    if "additional intervention" in blob and "not listed in the ai-assisted" in blob:
         return False
     markers = (
         "optimize with ai",
         "ai-assisted development to reduce",
         "apply ai acceleration",
         "rerun ai optimization",
-        "ai coding",
-        "generate boilerplate",
-        "test generation",
-        "generate tests with ai",
     )
     if any(marker in blob for marker in markers):
         return True
-    if not applied_levers:
+    applied = list(applied_levers or [])
+    item_concepts = _lever_concepts(blob)
+    applied_concepts = set()
+    for lever in applied:
+        applied_concepts |= _lever_concepts(lever)
+    shared = item_concepts & applied_concepts
+    if shared:
+        return True
+    if "managed_search" in item_concepts and "managed_search" not in applied_concepts:
+        return False
+    coding_markers = ("ai coding", "generate boilerplate", "test generation", "generate tests with ai")
+    if any(marker in blob for marker in coding_markers) and (
+        "ai_coding" in applied_concepts or "test_generation" in applied_concepts
+        or any(marker in " ".join(applied).lower() for marker in coding_markers)
+    ):
+        return True
+    if not applied:
         return False
     way_tokens = _normalize_tokens(blob)
     if not way_tokens:
         return False
-    for lever in applied_levers:
+    for lever in applied:
         lever_tokens = _normalize_tokens(lever)
-        if len(lever_tokens) < 3:
+        if len(lever_tokens) < 4:
             continue
         overlap = way_tokens & lever_tokens
-        if len(overlap) >= max(3, int(0.6 * len(lever_tokens))):
+        if len(overlap) >= max(4, int(0.7 * len(lever_tokens))):
             return True
     return False
 
@@ -352,11 +417,78 @@ def _relabel_duplicate_ai_lever(item: dict) -> dict:
         "Already incorporated in the AI-assisted scenario — no additional time "
         "savings from repeating this lever."
     )
+    item["already_incorporated"] = True
     item["estimated_impact"] = "no additional savings (already in AI-assisted scenario)"
     description = str(item.get("description") or "").strip()
     if note.lower() not in description.lower():
         item["description"] = f"{description} {note}".strip()
     return item
+
+
+def _label_additional_intervention(item: dict) -> dict:
+    item["already_incorporated"] = False
+    flag = (
+        "Additional intervention — not listed in the AI-assisted scenario. "
+        "Impact is uncertain and not guaranteed."
+    )
+    description = str(item.get("description") or "").strip()
+    if "additional intervention" not in description.lower():
+        item["description"] = f"{description} {flag}".strip()
+    impact = str(item.get("estimated_impact") or "").strip()
+    if (
+        impact
+        and "no additional" not in impact.lower()
+        and "uncertain" not in impact.lower()
+        and re.search(r"\d", impact)
+    ):
+        item["estimated_impact"] = f"{impact} possible additional (uncertain, not guaranteed)"
+    return item
+
+
+def not_demonstrated_target_note(customer_deadline: str) -> str:
+    raw = str(customer_deadline or "").strip()
+    match = re.search(r"(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*weeks?", raw, flags=re.I)
+    if match:
+        span = match.group(1) if not match.group(2) else f"{match.group(1)}–{match.group(2)}"
+        labeled = f"{span}-week hard deadline"
+        achievable = f"{span} weeks"
+    elif raw:
+        labeled = raw if "deadline" in raw.lower() else f"{raw} hard deadline"
+        achievable = raw
+    else:
+        labeled = "hard customer deadline"
+        achievable = "the hard deadline"
+    return (
+        f"Targets the {labeled} conditionally, but the available evidence does not yet "
+        f"demonstrate that {achievable} is achievable."
+    )
+
+
+def _rewrite_deadline_achievement_claims(text: str, note: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    rewritten = _ACHIEVEMENT_SENTENCE.sub(note, raw)
+    return re.sub(r"\s{2,}", " ", rewritten).strip()
+
+
+def _apply_deadline_honesty(scenarios: list[dict], summary: str, customer_deadline: str) -> str:
+    note = not_demonstrated_target_note(customer_deadline)
+    summary = _rewrite_deadline_achievement_claims(summary, note)
+    if re.search(r"\bmeets?\b.+\bdeadline", summary, flags=re.I):
+        summary = _rewrite_deadline_achievement_claims(summary, note)
+    for scenario in scenarios:
+        for key in ("name", "main_changes", "notes"):
+            scenario[key] = _rewrite_deadline_achievement_claims(scenario.get(key) or "", note)
+        name = scenario.get("name") or ""
+        if re.search(r"\bmeets?\b", name, flags=re.I):
+            scenario["name"] = re.sub(r"\b[Mm]eets?\b", "Targets", name, count=1)
+        notes = scenario.get("notes") or ""
+        if "does not yet demonstrate" not in notes.lower():
+            scenario["notes"] = (notes + " " + note).strip()
+    if "does not yet demonstrate" not in summary.lower():
+        summary = (summary + " " + note).strip()
+    return summary
 
 
 def _parse_impact_weeks(text: str) -> tuple[float, float] | None:
@@ -546,18 +678,19 @@ def build_deadline_gap_plan(raw: dict, state: dict) -> dict:
     ai_effort = str(opt.get("effort_range") or "").strip()
     baseline = str(estimate.get("duration_range") or "").strip()
     applied = _applied_ai_levers(state)
+    matching = _matching_ai_levers(state)
     current_profile = parse_team_profile(_current_team_blob(state))
     current_eng = current_profile.get("engineering_fte")
 
     ways = []
     for item in _clean_ways((raw or {}).get("ways_to_close_gap")):
-        if _is_ai_double_count(item, applied):
+        if _is_ai_double_count(item, matching):
             ways.append(_relabel_duplicate_ai_lever(item))
         else:
-            ways.append(item)
+            ways.append(_label_additional_intervention(item))
     scenarios = []
     for item in _clean_scenarios((raw or {}).get("recommended_scenarios")):
-        if _is_ai_double_count(item, applied):
+        if _is_ai_double_count(item, matching):
             item["main_changes"] = (
                 str(item.get("main_changes") or "").strip()
                 + " Already-applied AI-assisted levers are not counted again."
@@ -615,6 +748,11 @@ def build_deadline_gap_plan(raw: dict, state: dict) -> dict:
         "tradeoffs": clean_strings((raw or {}).get("tradeoffs") or (raw or {}).get("trade_offs")),
         "risks": clean_strings((raw or {}).get("risks")),
     }
+    result["summary"] = _apply_deadline_honesty(
+        result["recommended_scenarios"],
+        result["summary"],
+        customer_deadline,
+    )
     for item in result["ways_to_close_gap"]:
         item["title"] = _strip_pnr_terminology(item.get("title") or "")
         item["description"] = _strip_pnr_terminology(item.get("description") or "")
@@ -697,6 +835,12 @@ Team changes are only one optional lever, not the default. Consider:
 
 Rules:
 - Distinguish current team, deadline-implied capacity (effort / target duration), and any proposed team.
+- Distinguish levers already incorporated in the AI-assisted scenario from genuinely additional interventions.
+- Do not claim extra weeks for AI coding, test generation, parallelization, scope reduction, or internal platform reuse if those already appear in the AI-assisted scenario.
+- A managed search/ingestion service is additional only if it was not listed in the AI-assisted levers. Label it additional, keep conditions explicit, and do not invent a guaranteed impact.
+- A target of the customer deadline is a proposed/conditional target, not demonstrated feasibility.
+- Never say the hard deadline is met, achieved, or demonstrated when the AI-assisted scenario still exceeds it.
+- Use wording equivalent to: targets the deadline conditionally, but the available evidence does not yet demonstrate that it is achievable.
 - Do NOT recommend reducing the current team merely because a theoretical reference team is smaller.
 - If you recommend reducing or adding engineers, give a quantitative delivery reason.
 - Do not assume adding people is the answer. Adding people does not reduce duration linearly.

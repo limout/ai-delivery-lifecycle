@@ -529,3 +529,192 @@ def test_gap_close_does_not_invent_an_ai_productivity_c():
     assert "ai-specific c" not in blob
     assert "ai productivity factor" not in blob
     assert "c=2.5" not in blob
+
+
+def test_ai_assisted_scenario_still_exceeds_hard_deadline():
+    state = _state(ai_duration="8-10 weeks", deadline="8 weeks", deadline_weeks=8.0, ai_gap="approximately 2.0 weeks")
+    assert gap_closing_eligible(state)
+    data = _sse_result(_close(state))
+    plan = data["deadline_gap_plan"]
+    assert plan["ai_assisted_duration"] == "8-10 weeks"
+    assert "approximately 2.0 weeks" in plan["remaining_gap"]
+    assert data["ai_optimization"]["deadline_feasibility"] == "NOT_DEMONSTRATED"
+
+
+def test_already_incorporated_levers_do_not_add_savings():
+    from app.gap_close import build_deadline_gap_plan
+
+    state = _state()
+    state["ai_optimization"]["optimization_levers"] = [
+        "AI coding assistance for boilerplate",
+        "AI test generation",
+        "Parallelize independent workstreams",
+        "Scope reduction / MVP",
+        "Reuse of existing RBAC / internal platform",
+    ]
+    plan = build_deadline_gap_plan(
+        {
+            "summary": "Repeat prior AI levers",
+            "ways_to_close_gap": [
+                {
+                    "title": "AI coding",
+                    "category": "technical",
+                    "description": "Apply AI coding assistance for boilerplate again.",
+                    "estimated_impact": "0.5 week",
+                },
+                {
+                    "title": "Test generation",
+                    "category": "technical",
+                    "description": "AI test generation for remaining coverage.",
+                    "estimated_impact": "0.5 week",
+                },
+                {
+                    "title": "Parallelization",
+                    "category": "parallelization",
+                    "description": "Parallelize independent workstreams.",
+                    "estimated_impact": "0.5-1 week",
+                },
+                {
+                    "title": "Scope reduction",
+                    "category": "scope",
+                    "description": "Scope reduction / MVP and deferral to phase 2.",
+                    "estimated_impact": "1 week",
+                },
+                {
+                    "title": "Internal platform reuse",
+                    "category": "technical",
+                    "description": "Reuse of existing RBAC / internal platform.",
+                    "estimated_impact": "0.5 week",
+                },
+            ],
+            "recommended_scenarios": [
+                {
+                    "name": "Meets the 8-week hard deadline conditionally",
+                    "target_duration": "8 weeks",
+                    "team": "existing team",
+                    "main_changes": "Reuse already incorporated AI coding, tests, parallelization, scope reduction and RBAC.",
+                    "confidence": "MEDIUM",
+                    "notes": "Meets the 8-week hard deadline conditionally.",
+                }
+            ],
+            "conditions": [],
+            "tradeoffs": [],
+            "risks": [],
+        },
+        state,
+    )
+    for way in plan["ways_to_close_gap"]:
+        assert way.get("already_incorporated") is True
+        assert "no additional savings" in (way.get("estimated_impact") or "").lower()
+
+
+def test_managed_search_is_additional_when_not_in_ai_levers():
+    from app.gap_close import build_deadline_gap_plan
+
+    state = _state()
+    state["ai_optimization"]["optimization_levers"] = [
+        "AI coding assistance for boilerplate",
+        "AI test generation",
+        "Parallelize independent workstreams",
+        "Scope reduction / MVP",
+        "Reuse of existing RBAC / internal platform",
+    ]
+    plan = build_deadline_gap_plan(
+        {
+            "summary": "Add managed search",
+            "ways_to_close_gap": [
+                {
+                    "title": "Managed search and ingestion service",
+                    "category": "technical",
+                    "description": "Evaluate a managed search/ingestion service compatible with the customer's cloud.",
+                    "estimated_impact": "1 week",
+                }
+            ],
+            "recommended_scenarios": [
+                {
+                    "name": "Additional managed search",
+                    "target_duration": "8 weeks",
+                    "team": "existing team",
+                    "main_changes": "Evaluate a managed search/ingestion service.",
+                    "confidence": "LOW",
+                    "notes": "",
+                }
+            ],
+            "conditions": ["Customer cloud and security constraints must be validated."],
+            "tradeoffs": [],
+            "risks": [],
+        },
+        state,
+    )
+    way = plan["ways_to_close_gap"][0]
+    assert way.get("already_incorporated") is False
+    assert "already incorporated" not in (way.get("description") or "").lower()
+    assert "additional intervention" in (way.get("description") or "").lower()
+    assert "uncertain" in (way.get("estimated_impact") or "").lower()
+    assert "not guaranteed" in (way.get("description") or "").lower()
+
+
+def test_recommended_scenario_cannot_claim_demonstrated_deadline():
+    from app.gap_close import build_deadline_gap_plan
+
+    state = _state(ai_duration="8-10 weeks")
+    plan = build_deadline_gap_plan(
+        {
+            "summary": "Meets the 8-week hard deadline conditionally using existing AI levers.",
+            "ways_to_close_gap": [
+                {
+                    "title": "AI coding",
+                    "category": "technical",
+                    "description": "AI coding already used.",
+                    "estimated_impact": "0.5 week",
+                }
+            ],
+            "recommended_scenarios": [
+                {
+                    "name": "Meets the 8-week hard deadline conditionally",
+                    "target_duration": "8 weeks",
+                    "team": "existing team",
+                    "main_changes": "Keep the AI-assisted levers.",
+                    "confidence": "MEDIUM",
+                    "notes": "Meets the 8-week hard deadline conditionally.",
+                }
+            ],
+            "conditions": [],
+            "tradeoffs": [],
+            "risks": [],
+        },
+        state,
+    )
+    blob = str(plan).lower()
+    printed = format_deadline_gap_plan_text(plan).lower()
+    copied = estimate_export_text({
+        "estimate": state["estimate"],
+        "ai_optimization": state["ai_optimization"],
+        "deadline_gap_plan": plan,
+        "artifact_texts": {"estimate": "INDEPENDENT ESTIMATE"},
+    }).lower()
+    assert plan["recommended_scenarios"][0]["target_duration"] == "8 weeks"
+    assert "meets the 8-week hard deadline" not in blob
+    assert "does not yet demonstrate" in blob
+    assert "targets the 8-week hard deadline conditionally" in blob
+    assert "meets the 8-week hard deadline" not in printed
+    assert "does not yet demonstrate" in printed
+    assert "does not yet demonstrate" in copied
+    assert "pnr" not in printed
+
+
+def test_baseline_does_not_assume_scope_reduction_to_meet_deadline():
+    from app.agents import STANDARD_SCOPE_ASSUMPTION, sanitize_standard_estimate_assumptions
+
+    rewritten = sanitize_standard_estimate_assumptions([
+        "Scope can be successfully managed or deferred to meet the production release objectives.",
+        "Scope remains as described in the current discovery.",
+    ])
+    assert STANDARD_SCOPE_ASSUMPTION in rewritten
+    assert all("successfully managed" not in item.lower() for item in rewritten)
+    assert any("scope remains as described" in item.lower() for item in rewritten)
+    first = client.post("/analyze", json={"user_request": COMPLETE_REQUEST}).json()
+    assumptions = " ".join(str(item) for item in (first.get("estimate") or {}).get("assumptions") or []).lower()
+    assert "successfully managed or deferred" not in assumptions
+    assert first["estimate"]["duration_range"]
+

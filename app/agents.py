@@ -1453,6 +1453,46 @@ Rules:
     }
 
 
+STANDARD_SCOPE_ASSUMPTION = (
+    "The estimate assumes the requested functionality remains within the assessed scope; "
+    "any scope reduction or deferral is treated as a separate delivery decision."
+)
+
+
+def sanitize_standard_estimate_assumptions(assumptions: list) -> list:
+    """Keep the independent baseline from assuming deadline-driven scope cuts."""
+    normalized = []
+    for item in assumptions or []:
+        text = str(item).strip()
+        lower = text.lower()
+        if "security and compliance requirements are well understood" in lower or "security and compliance requirements are fully understood" in lower:
+            text = (
+                "The security and compliance baseline is based on current customer input; "
+                "detailed technical controls may require refinement during solution design."
+            )
+        elif "black friday is a specific date" in lower:
+            continue
+        if "3-month estimate is accurate" in lower or "3 months estimate is accurate" in lower:
+            continue
+        if (
+            ("additional resources" in lower or "increase resources" in lower or "more resources" in lower)
+            and ("within one month" in lower or "within 1 month" in lower or "deadline" in lower)
+        ):
+            continue
+        if "phased approach" in lower and ("deadline" in lower or "within one month" in lower or "within 1 month" in lower):
+            continue
+        if (
+            "scope can be successfully managed" in lower
+            or ("deferred" in lower and "meet" in lower and "scope" in lower)
+            or ("deferral" in lower and ("deadline" in lower or "release" in lower) and "scope" in lower)
+            or ("scope reduction" in lower and ("meet" in lower or "deadline" in lower))
+        ):
+            text = STANDARD_SCOPE_ASSUMPTION
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def estimation_agent(
     state: DeliveryState,
     provider: AIProvider,
@@ -1544,6 +1584,9 @@ IMPORTANT:
 9. Effort must be expressed as person-days/person-hours (or another explicit effort unit),
    never as months or weeks. Duration is expressed separately.
 10. Do not produce an AI-optimized scenario in this response.
+11. Do not assume scope can be reduced, managed, or deferred to meet the deadline.
+    The estimate assumes the requested functionality remains within the assessed
+    scope; any scope reduction or deferral is a separate delivery decision.
 """
 
     estimate = provider.generate_json(prompt=prompt, schema=ESTIMATE_SCHEMA)
@@ -1636,33 +1679,7 @@ IMPORTANT:
         estimate["confidence"] = "LOW"
 
     if isinstance(estimate.get("assumptions"), list):
-        normalized_assumptions = []
-        for item in estimate["assumptions"]:
-            text = str(item).strip()
-            lower = text.lower()
-            if "security and compliance requirements are well understood" in lower or "security and compliance requirements are fully understood" in lower:
-                text = (
-                    "The security and compliance baseline is based on current customer input; "
-                    "detailed technical controls may require refinement during solution design."
-                )
-            elif "black friday is a specific date" in lower:
-                continue
-            # Customer estimates are facts, not assumptions in our model.
-            if "3-month estimate is accurate" in lower or "3 months estimate is accurate" in lower:
-                continue
-            # Do not let deadline-fitting tactics leak into the standard estimate.
-            # Capacity increases, phased delivery, and similar acceleration tactics
-            # belong to the explicit AI optimization scenario or later trade-off analysis.
-            if (
-                ("additional resources" in lower or "increase resources" in lower or "more resources" in lower)
-                and ("within one month" in lower or "within 1 month" in lower or "deadline" in lower)
-            ):
-                continue
-            if "phased approach" in lower and ("deadline" in lower or "within one month" in lower or "within 1 month" in lower):
-                continue
-            if text and text not in normalized_assumptions:
-                normalized_assumptions.append(text)
-        estimate["assumptions"] = normalized_assumptions
+        estimate["assumptions"] = sanitize_standard_estimate_assumptions(estimate["assumptions"])
 
     # Effort must remain an effort unit; duration must not leak into effort.
     estimate["effort_range"] = _normalize_effort_range(estimate.get("effort_range"))
