@@ -123,8 +123,23 @@ def _customer_authored_blob(state: dict) -> str:
 
 
 def is_hard_deadline(state: dict) -> bool:
+    """True when the customer stated an explicit delivery date or timeline.
+
+    Lexical "fixed/hard" markers remain sufficient. An explicit requested
+    deadline already extracted by timeline.py (for example
+    "Target delivery timeline: 2 months") is also sufficient. A bare wish
+    with no parseable requested date is not.
+    """
     blob = _customer_authored_blob(state)
-    return any(marker in blob for marker in HARD_DEADLINE_MARKERS)
+    if any(marker in blob for marker in HARD_DEADLINE_MARKERS):
+        return True
+    sources = deadline_source_texts(
+        user_request=str(state.get("user_request") or ""),
+        discovery=state.get("discovery") or {},
+        clarification_history=state.get("clarification_history"),
+        clarification_answers=state.get("clarification_answers"),
+    )
+    return parse_requested_deadline(sources) is not None
 
 
 def _deadline_weeks(state: dict) -> float | None:

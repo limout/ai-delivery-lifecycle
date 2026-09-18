@@ -117,9 +117,15 @@ def _estimate_panel():
 
 def test_optimize_with_ai_button_is_present():
     assert ">Optimize with AI<" in INDEX
-    assert 'id="optimizeButton"' in INDEX
+    assert 'id="optimizeButton"' not in INDEX
     assert 'id="optimizeButtonPanel"' in INDEX
     assert "Optional: Optimize with AI" not in INDEX
+    intake = INDEX.split('id="analyzeButton"', 1)[0]
+    assert "Optimize with AI" not in intake
+    estimate_panel = _estimate_panel()
+    assert estimate_panel.find('id="optimizeButtonPanel"') < estimate_panel.find('id="estimateContent"')
+    assert estimate_panel.find('id="gapCloseSection"') < estimate_panel.find('id="estimateContent"')
+    assert estimate_panel.find('id="gapCloseButton"') < estimate_panel.find('id="estimateContent"')
 
 
 def test_optimization_ui_does_not_use_optional_wording():
@@ -140,6 +146,41 @@ def test_no_ai_assisted_scenario_tab():
     tabs = INDEX.split('id="artifactTabs"', 1)[1].split("</div>", 1)[0]
     assert "AI-assisted" not in tabs
     assert 'data-tab="estimate"' in INDEX
+    sidebar = INDEX.split('class="app-sidebar', 1)[1].split('class="app-main"', 1)[0]
+    assert 'id="artifactTabs"' in sidebar
+    result_html = INDEX.split('id="result"', 1)[1].split("<script>", 1)[0]
+    assert 'id="artifactTabs"' not in result_html
+    assert ">Workspaces<" not in INDEX
+
+
+def test_sidebar_artifact_buttons_call_select_tab():
+    tabs = INDEX.split('id="artifactTabs"', 1)[1].split("</div>", 1)[0]
+    names = (
+        "assessment",
+        "discovery",
+        "estimate",
+        "requirements",
+        "validation",
+        "solution",
+        "delivery_plan",
+        "delivery_review",
+        "proposal",
+        "sow",
+    )
+    for name in names:
+        assert f'data-tab="{name}"' in tabs
+        assert f"selectTab('{name}')" in tabs
+        assert f'id="panel-{name}"' in INDEX
+    assert tabs.count("class=\"artifact-tab") == 10
+    assert INDEX.count('id="artifactTabs"') == 1
+    assert "function selectTab" in INDEX
+    assert 'closest(".artifact-tab")' in INDEX
+    assert 'addEventListener("click"' in INDEX
+    assert ", true)" in INDEX.split('closest(".artifact-tab")', 1)[1][:400]
+    assert "position: sticky;" not in INDEX.split(".app-sidebar", 1)[1].split(".app-brand", 1)[0]
+    assert "pointer-events: auto;" in INDEX.split(".app-sidebar", 1)[1].split(".app-brand", 1)[0]
+    assert "html, body" in INDEX
+    assert "overflow: hidden;" in INDEX.split("html, body", 1)[1].split("body {", 1)[0]
 
 
 def test_ai_optimization_results_render_inside_estimate_tab():

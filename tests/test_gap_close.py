@@ -22,6 +22,14 @@ The customer deadline is fixed at 8 weeks.
 It includes document ingestion, search, role-based access, analytics and an admin interface.
 """.strip()
 
+PORTAL_REQUEST = """
+We need a self-service portal for enterprise customers.
+Users: Enterprise customers.
+Existing systems: Salesforce.
+Target delivery timeline: 2 months.
+Customers can view account information, submit service requests, and track status.
+""".strip()
+
 
 def _state(
     *,
@@ -539,6 +547,36 @@ def test_ai_assisted_scenario_still_exceeds_hard_deadline():
     assert plan["ai_assisted_duration"] == "8-10 weeks"
     assert "approximately 2.0 weeks" in plan["remaining_gap"]
     assert data["ai_optimization"]["deadline_feasibility"] == "NOT_DEMONSTRATED"
+
+
+def test_month_based_target_timeline_still_exceeded_after_ai_shows_gap_closing():
+    """Same shape as the Sept 16 8-week / 8-10-week case, expressed in months."""
+    from app.agents import _parse_max_weeks
+    from app.gap_close import ai_scenario_exceeds_deadline, is_hard_deadline
+
+    deadline_weeks = _parse_max_weeks("2 months")
+    state = _state(
+        request=PORTAL_REQUEST,
+        duration="3-4 months",
+        fit="EXCEEDS",
+        deadline="2 months",
+        deadline_weeks=deadline_weeks,
+        ai_duration="2-2.5 months",
+        ai_feasibility="NOT_DEMONSTRATED",
+        ai_gap="approximately 2.2 weeks",
+        constraints=["Target delivery timeline: 2 months."],
+    )
+    assert is_hard_deadline(state)
+    assert ai_scenario_exceeds_deadline(state)
+    assert gap_closing_eligible(state)
+    payload = workflow_response(state)
+    assert payload["gap_closing_available"] is True
+    data = _sse_result(_close(state, user_request=PORTAL_REQUEST))
+    plan = data["deadline_gap_plan"]
+    assert plan["ai_assisted_duration"] == "2-2.5 months"
+    assert "approximately 2.2 weeks" in plan["remaining_gap"]
+    assert data["ai_optimization"]["deadline_feasibility"] == "NOT_DEMONSTRATED"
+    assert plan["starts_from"] == "ai_assisted_scenario"
 
 
 def test_already_incorporated_levers_do_not_add_savings():

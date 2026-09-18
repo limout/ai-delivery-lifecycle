@@ -3,17 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Delivery Copilot</title>
+    <title>LIMOUT — AI Delivery Copilot</title>
 
     <style>
         * { box-sizing: border-box; }
 
         :root {
-            --bg: #f5f7fa;
+            --bg: #f7f8fa;
+            --sidebar: #f3f4f6;
             --surface: #ffffff;
             --surface-soft: #f8fafc;
-            --border: #e5e7eb;
-            --text: #111827;
+            --border: #e6e8eb;
+            --text: #1c1f24;
             --muted: #6b7280;
             --blue: #2563eb;
             --blue-soft: #eff6ff;
@@ -25,40 +26,138 @@
             --red-soft: #fef2f2;
             --purple: #7c3aed;
             --purple-soft: #f5f3ff;
-            --shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+            --shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            --radius: 10px;
+            --control-radius: 6px;
+            --sidebar-width: 224px;
+        }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
         }
 
         body {
-            margin: 0;
-            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-                "Segoe UI", sans-serif;
+            font-family: ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
             background: var(--bg);
             color: var(--text);
         }
 
-        .container {
-            max-width: 1280px;
-            margin: 0 auto;
-            padding: 28px 20px 64px;
+        .app-shell {
+            display: flex;
+            height: 100%;
+            min-height: 0;
+            align-items: stretch;
+            overflow: hidden;
         }
 
-        header {
-            margin-bottom: 22px;
+        .app-sidebar {
+            width: var(--sidebar-width);
+            flex-shrink: 0;
+            background: var(--sidebar);
+            border-right: 1px solid var(--border);
+            padding: 16px 16px 20px;
+            position: relative;
+            z-index: 3;
+            height: 100%;
+            overflow-x: hidden;
+            overflow-y: auto;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .app-brand {
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin: 0;
+        }
+
+        .app-product {
+            margin: 4px 0 0;
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            line-height: 1.3;
+        }
+
+        .app-product-note {
+            margin: 10px 0 0;
+            font-size: 12px;
+            line-height: 1.45;
+            color: var(--muted);
+        }
+
+        .sidebar-request {
+            display: inline-block;
+            margin-top: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--blue);
+            text-decoration: none;
+        }
+
+        .sidebar-request:hover { text-decoration: underline; }
+
+        .sidebar-nav {
+            display: none;
+            margin-top: 16px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+        }
+
+        .app-shell:has(#result:not(.hidden)) .sidebar-nav {
+            display: block;
+        }
+
+        .app-main {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            height: 100%;
+            overflow-x: hidden;
+            overflow-y: auto;
+            position: relative;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1080px;
+            margin: 0 auto;
+            padding: 20px 24px 56px;
+        }
+
+        .page-header {
+            margin-bottom: 18px;
+        }
+
+        .page-kicker {
+            margin: 0 0 4px;
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--muted);
         }
 
         .eyebrow {
-            font-size: 12px;
-            font-weight: 800;
+            font-size: 11px;
+            font-weight: 600;
             text-transform: uppercase;
             letter-spacing: .08em;
-            color: var(--blue);
+            color: var(--muted);
             margin-bottom: 7px;
         }
 
         h1 {
             margin: 0;
-            font-size: 32px;
-            letter-spacing: -0.025em;
+            font-size: 20px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
         }
 
         .subtitle {
@@ -71,24 +170,25 @@
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
-            border-radius: 14px;
+            border-radius: var(--radius);
             box-shadow: var(--shadow);
-            padding: 22px;
-            margin-bottom: 18px;
+            padding: 18px;
+            margin-bottom: 16px;
         }
 
         .card-title {
-            margin: 0 0 17px;
-            font-size: 18px;
+            margin: 0 0 12px;
+            font-size: 16px;
+            font-weight: 600;
             letter-spacing: -0.01em;
         }
 
         textarea {
             width: 100%;
             min-height: 145px;
-            padding: 14px;
+            padding: 12px;
             border: 1px solid #d1d5db;
-            border-radius: 9px;
+            border-radius: var(--control-radius);
             font: inherit;
             line-height: 1.5;
             resize: vertical;
@@ -103,13 +203,13 @@
 
         button {
             margin-top: 12px;
-            padding: 11px 20px;
+            padding: 9px 14px;
             border: 0;
-            border-radius: 8px;
+            border-radius: var(--control-radius);
             background: var(--blue);
             color: white;
-            font-size: 14px;
-            font-weight: 700;
+            font-size: 13px;
+            font-weight: 600;
             cursor: pointer;
         }
 
@@ -123,8 +223,24 @@
 
         /* Lifecycle */
         .lifecycle-card {
-            padding: 20px 18px 16px;
+            padding: 10px 14px 12px;
             overflow-x: auto;
+            max-width: 100%;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .lifecycle-card .result-header {
+            margin-bottom: 8px;
+            gap: 8px;
+        }
+
+        .lifecycle-card .result-title {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
         }
 
         .lifecycle {
@@ -133,16 +249,16 @@
             grid-template-columns: repeat(10, minmax(80px, 1fr));
             gap: 0;
             position: relative;
-            padding-top: 4px;
+            padding-top: 2px;
         }
 
         .lifecycle::before {
             content: "";
             position: absolute;
-            top: 18px;
+            top: 12px;
             left: 4.8%;
             right: 4.8%;
-            height: 2px;
+            height: 1px;
             background: var(--border);
             z-index: 0;
         }
@@ -155,26 +271,26 @@
         }
 
         .stage-dot {
-            width: 30px;
-            height: 30px;
-            margin: 3px auto 8px;
+            width: 20px;
+            height: 20px;
+            margin: 2px auto 6px;
             border-radius: 50%;
-            border: 2px solid #d1d5db;
+            border: 1px solid #d1d5db;
             background: white;
             color: #9ca3af;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 11px;
-            font-weight: 800;
+            font-size: 9px;
+            font-weight: 700;
         }
 
         .stage-label {
-            font-size: 11px;
-            font-weight: 800;
+            font-size: 9px;
+            font-weight: 600;
             color: #9ca3af;
             text-transform: uppercase;
-            letter-spacing: .035em;
+            letter-spacing: .03em;
         }
 
         .stage.done .stage-dot {
@@ -189,7 +305,7 @@
             background: var(--blue);
             border-color: var(--blue);
             color: white;
-            box-shadow: 0 0 0 5px var(--blue-soft);
+            box-shadow: 0 0 0 3px var(--blue-soft);
         }
 
         .stage.current .stage-label { color: var(--blue); }
@@ -214,7 +330,8 @@
 
         .result-title {
             margin: 0;
-            font-size: 21px;
+            font-size: 13px;
+            font-weight: 600;
         }
 
         .status-row {
@@ -226,10 +343,10 @@
 
         .status {
             display: inline-block;
-            padding: 6px 11px;
+            padding: 4px 9px;
             border-radius: 999px;
-            font-size: 12px;
-            font-weight: 800;
+            font-size: 11px;
+            font-weight: 600;
         }
 
         .ready, .complete, .deadline-fit { background: var(--green-soft); color: #166534; }
@@ -238,9 +355,9 @@
 
         .verdict-card {
             border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 20px;
-            margin-bottom: 18px;
+            border-radius: 12px;
+            padding: 22px 22px 18px;
+            margin-bottom: 14px;
             background: var(--surface);
             box-shadow: var(--shadow);
         }
@@ -264,11 +381,33 @@
             color: var(--muted);
             margin-bottom: 6px;
         }
-        .verdict-title { margin: 0 0 8px; font-size: 24px; }
-        .verdict-summary { margin: 0 0 16px; line-height: 1.5; color: #374151; }
+        .verdict-title { margin: 0 0 8px; font-size: 26px; font-weight: 600; letter-spacing: -0.03em; }
+        .verdict-summary { margin: 0 0 16px; line-height: 1.5; color: #374151; font-size: 15px; }
+        .verdict-next {
+            display: block;
+            margin: 0 0 16px;
+            padding: 12px 14px;
+            border: 1px solid #bfdbfe;
+            border-radius: var(--control-radius);
+            background: var(--blue-soft);
+        }
+        .verdict-next-label {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--blue);
+            margin-bottom: 4px;
+        }
+        #verdictNext {
+            font-size: 16px;
+            font-weight: 600;
+            line-height: 1.4;
+            color: var(--text);
+        }
         .verdict-metrics {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 10px;
         }
         .disclaimer {
@@ -309,7 +448,8 @@
         }
         @media print {
             header, .no-print, #error, #questions, .lifecycle-card, .artifact-tabs,
-            .json-details, #verdict, .assessment-toolbar, .artifact-toolbar {
+            .json-details, #verdict, .assessment-toolbar, .artifact-toolbar,
+            .app-sidebar {
                 display: none !important;
             }
             #result { display: block !important; }
@@ -320,6 +460,8 @@
             .artifact-panel.printing .section-kicker,
             .artifact-panel.printing .disclaimer { display: none !important; }
             body { background: #fff; color: #111; }
+            .app-shell { display: block; }
+            .app-main { overflow: visible; }
             .container { padding: 0.5in; max-width: none; }
             .artifact-print-sheet {
                 display: none;
@@ -343,59 +485,96 @@
             font-size: 12px;
         }
 
+        .summary-card {
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            background: transparent;
+            box-shadow: none;
+        }
+
         .summary-grid {
             display: grid;
-            grid-template-columns: 1.2fr 1fr 1fr;
-            gap: 12px;
+            grid-template-columns: 1.2fr 1fr auto;
+            gap: 8px 16px;
+            align-items: start;
         }
 
         .summary-tile {
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 13px;
-            background: var(--surface-soft);
+            border: 0;
+            border-radius: 0;
+            padding: 0;
+            background: transparent;
         }
 
         .summary-label {
             color: var(--muted);
-            font-size: 11px;
-            font-weight: 800;
+            font-size: 10px;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: .05em;
-            margin-bottom: 5px;
+            letter-spacing: .06em;
+            margin-bottom: 2px;
         }
 
         .summary-value {
-            font-size: 14px;
-            line-height: 1.45;
+            font-size: 12px;
+            line-height: 1.4;
+            color: #4b5563;
         }
 
-        /* Artifact navigation */
+        /* Artifact navigation — lives in the sidebar */
         .artifact-tabs {
             display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            margin-bottom: 16px;
-        }
-
-        .artifact-tab {
-            border: 1px solid var(--border);
-            background: white;
-            color: #4b5563;
-            padding: 8px 11px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 750;
-            cursor: pointer;
+            flex-direction: column;
+            gap: 14px;
             margin: 0;
         }
 
-        .artifact-tab:hover { background: var(--surface-soft); }
+        .tab-group {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 2px;
+        }
+
+        .tab-group-label {
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin: 0 0 4px 8px;
+        }
+
+        .json-details {
+            margin-top: 20px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .artifact-tab {
+            border: 0;
+            background: transparent;
+            color: #4b5563;
+            padding: 6px 8px;
+            border-radius: var(--control-radius);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            margin: 0;
+            width: 100%;
+            text-align: left;
+            pointer-events: auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .artifact-tab:hover { background: rgba(255, 255, 255, 0.7); color: var(--text); }
 
         .artifact-tab.active {
-            color: var(--blue);
-            border-color: #bfdbfe;
-            background: var(--blue-soft);
+            color: var(--text);
+            background: #fff;
+            font-weight: 600;
+            box-shadow: inset 2px 0 0 var(--blue);
         }
 
         .artifact-panel { display: none; }
@@ -694,14 +873,64 @@
 
             .full-width { grid-column: auto; }
 
-            .container { padding: 20px 14px 45px; }
-            h1 { font-size: 27px; }
+            .container { padding: 16px 14px 40px; }
+            h1 { font-size: 18px; }
+
+            html, body {
+                height: auto;
+                overflow-x: hidden;
+                overflow-y: auto;
+            }
+            .app-shell {
+                flex-direction: column;
+                height: auto;
+                overflow: visible;
+            }
+            .app-main {
+                height: auto;
+                overflow: visible;
+            }
+            .app-sidebar {
+                position: relative;
+                z-index: 20;
+                width: 100%;
+                height: auto;
+                max-height: none;
+                border-right: 0;
+                border-bottom: 1px solid var(--border);
+                padding: 10px 14px 12px;
+                overflow: visible;
+            }
+            .app-product-note { display: none; }
+            .app-product { font-size: 14px; }
+            .sidebar-nav { margin-top: 10px; padding-top: 10px; }
+            .artifact-tabs { gap: 8px; }
+            .tab-group {
+                flex-direction: row;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 4px;
+            }
+            .tab-group-label { min-width: 100%; margin: 0 0 2px; }
+            .artifact-tab {
+                width: auto;
+                padding: 5px 8px;
+                font-size: 12px;
+                background: #fff;
+                border: 1px solid var(--border);
+            }
+            .artifact-tab.active {
+                box-shadow: none;
+                border-color: #bfdbfe;
+                background: var(--blue-soft);
+                color: var(--blue);
+            }
         }
     
-    .ai-optimization-panel{margin-top:22px;border:1px solid #ddd6fe;border-radius:14px;padding:18px;background:#faf9ff}
+    .ai-optimization-panel{margin:0 0 22px;border:1px solid #ddd6fe;border-radius:14px;padding:18px;background:#faf9ff}
     .ai-optimization-header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
     .ai-optimization-header h3{margin:0 0 4px;font-size:17px}
-    .ai-optimization-panel button{margin-top:0}
+    .ai-optimization-panel .optimize-button{margin-top:0;flex:0 0 auto;max-width:100%}
     .gap-close-panel{margin-top:18px;padding-top:16px;border-top:1px solid #ddd6fe}
     .gap-close-panel h4{margin:0 0 8px;font-size:15px}
     .optimization-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}
@@ -732,24 +961,49 @@
 </head>
 
 <body>
+<div class="app-shell">
+    <aside class="app-sidebar no-print">
+        <p class="app-brand" data-client-name>LIMOUT</p>
+        <p class="app-product">AI Delivery Copilot</p>
+        <p class="app-product-note">Intake and feasibility before you commit to a date.</p>
+        <a class="sidebar-request" href="#request">Delivery request</a>
+        <nav class="sidebar-nav" aria-label="Delivery artifacts">
+            <div class="artifact-tabs" id="artifactTabs">
+                <span class="tab-group tab-group-workspaces">
+                    <span class="tab-group-label">Analysis</span>
+                    <button type="button" class="artifact-tab active" data-tab="assessment" onclick="selectTab('assessment')">Assessment</button>
+                    <button type="button" class="artifact-tab" data-tab="discovery" onclick="selectTab('discovery')">Discovery</button>
+                    <button type="button" class="artifact-tab" data-tab="estimate" onclick="selectTab('estimate')">Estimate</button>
+                </span>
+                <span class="tab-group tab-group-supporting">
+                    <span class="tab-group-label">Evidence</span>
+                    <button type="button" class="artifact-tab" data-tab="requirements" onclick="selectTab('requirements')">Requirements</button>
+                    <button type="button" class="artifact-tab" data-tab="validation" onclick="selectTab('validation')">Validation</button>
+                    <button type="button" class="artifact-tab" data-tab="solution" onclick="selectTab('solution')">Solution</button>
+                    <button type="button" class="artifact-tab" data-tab="delivery_plan" onclick="selectTab('delivery_plan')">Delivery Plan</button>
+                    <button type="button" class="artifact-tab" data-tab="delivery_review" onclick="selectTab('delivery_review')">Review</button>
+                </span>
+                <span class="tab-group tab-group-outputs">
+                    <span class="tab-group-label">Outputs</span>
+                    <button type="button" class="artifact-tab" data-tab="proposal" onclick="selectTab('proposal')">Proposal</button>
+                    <button type="button" class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
+                </span>
+            </div>
+        </nav>
+    </aside>
+    <div class="app-main">
 <div class="container">
 
-    <header>
-        <div class="eyebrow">AI Delivery Copilot · Intake &amp; feasibility</div>
+    <header class="page-header">
+        <p class="page-kicker"><span data-client-name>LIMOUT</span></p>
         <h1>AI Delivery Copilot</h1>
-        <div class="subtitle">
-            Before you commit to the date, test the delivery reality.
-            Turn a messy delivery request into a structured feasibility assessment
-            and an honest view of the proposed deadline — what we know, what is missing,
-            and whether the date fits an independent estimate.
-        </div>
     </header>
 
     <div class="card no-print">
         <h2 class="card-title">Delivery request</h2>
         <p class="section-kicker" style="margin-top:-8px">
-            Describe the work, who it is for, known systems, and the target date.
-            This is not a Jira dashboard or a delivery-health forecast.
+            Tell the Copilot what needs to be delivered: the work, who it is for,
+            known systems, and the target date.
         </p>
 
         <textarea
@@ -759,7 +1013,6 @@
 
         <div class="action-row">
             <button id="analyzeButton" onclick="analyze()">Analyze delivery request</button>
-            <button id="optimizeButton" class="optimize-button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
         </div>
 
         <div id="loading" class="loading hidden">
@@ -775,6 +1028,10 @@
             <div class="verdict-kicker">Executive verdict</div>
             <h2 class="verdict-title" id="verdictTitle">—</h2>
             <p class="verdict-summary" id="verdictSummary"></p>
+            <div class="verdict-next">
+                <div class="verdict-next-label">Next step</div>
+                <div id="verdictNext">—</div>
+            </div>
             <div class="verdict-metrics">
                 <div class="metric">
                     <div class="metric-name">Deadline</div>
@@ -788,12 +1045,35 @@
                     <div class="metric-name">Deadline fit</div>
                     <div class="metric-value" id="verdictFit">—</div>
                 </div>
-                <div class="metric">
-                    <div class="metric-name">Next step</div>
-                    <div class="metric-value" id="verdictNext" style="font-size:14px;font-weight:700">—</div>
-                </div>
             </div>
             <div class="disclaimer" id="verdictDisclaimer"></div>
+        </div>
+
+        <div id="questions" class="card hidden">
+            <h2 class="card-title">Clarification required</h2>
+            <div class="clarification-note">
+                Answer the required questions below so the assessment can continue.
+                Optional follow-ups are listed separately and do not block the workflow.
+            </div>
+            <div id="questionList"></div>
+            <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
+        </div>
+
+        <div class="card summary-card">
+            <div class="summary-grid">
+                <div class="summary-tile">
+                    <div class="summary-label">Problem</div>
+                    <div id="summaryProblem" class="summary-value">—</div>
+                </div>
+                <div class="summary-tile">
+                    <div class="summary-label">Business Goal</div>
+                    <div id="summaryGoal" class="summary-value">—</div>
+                </div>
+                <div class="summary-tile">
+                    <div class="summary-label">Workflow State</div>
+                    <div id="summaryState" class="summary-value">—</div>
+                </div>
+            </div>
         </div>
 
         <div class="card lifecycle-card no-print">
@@ -852,36 +1132,6 @@
         </div>
 
         <div class="card">
-            <div class="summary-grid">
-                <div class="summary-tile">
-                    <div class="summary-label">Problem</div>
-                    <div id="summaryProblem" class="summary-value">—</div>
-                </div>
-                <div class="summary-tile">
-                    <div class="summary-label">Business Goal</div>
-                    <div id="summaryGoal" class="summary-value">—</div>
-                </div>
-                <div class="summary-tile">
-                    <div class="summary-label">Workflow State</div>
-                    <div id="summaryState" class="summary-value">—</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="artifact-tabs" id="artifactTabs">
-                <button class="artifact-tab active" data-tab="assessment" onclick="selectTab('assessment')">Assessment</button>
-                <button class="artifact-tab" data-tab="discovery" onclick="selectTab('discovery')">Discovery</button>
-                <button class="artifact-tab" data-tab="requirements" onclick="selectTab('requirements')">Requirements</button>
-                <button class="artifact-tab" data-tab="validation" onclick="selectTab('validation')">Validation</button>
-                <button class="artifact-tab" data-tab="solution" onclick="selectTab('solution')">Solution</button>
-                <button class="artifact-tab" data-tab="delivery_plan" onclick="selectTab('delivery_plan')">Delivery Plan</button>
-                <button class="artifact-tab" data-tab="estimate" onclick="selectTab('estimate')">Estimate</button>
-                <button class="artifact-tab" data-tab="delivery_review" onclick="selectTab('delivery_review')">Review</button>
-                <button class="artifact-tab" data-tab="proposal" onclick="selectTab('proposal')">Proposal</button>
-                <button class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
-            </div>
-
             <section id="panel-assessment" class="artifact-panel active">
                 <h2 class="card-title">Delivery assessment</h2>
                 <div class="section-kicker">Readable view you can copy or print for a Delivery Lead.</div>
@@ -1010,14 +1260,13 @@
                     <button type="button" class="secondary-button" data-print-artifact="estimate">Print / save as PDF</button>
                 </div>
                 <p class="disclaimer artifact-screen" id="estimateDisclaimer"></p>
-                <div class="artifact-screen" id="estimateContent"></div>
                 <div class="ai-optimization-panel artifact-screen">
                     <div class="ai-optimization-header">
                         <div>
                             <h3>AI Delivery Optimization</h3>
                             <div class="section-kicker">AI-assisted scenario. It never replaces the independent estimate and is not a guaranteed acceleration.</div>
                         </div>
-                        <button id="optimizeButtonPanel" class="optimize-button no-print" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
+                        <button id="optimizeButtonPanel" class="optimize-button no-print" type="button" onclick="optimizeWithAI()" disabled>Optimize with AI</button>
                     </div>
                     <p class="section-kicker" id="aiScenarioHint">Run Optimize with AI to compare an AI-assisted scenario. Copying this estimate does not include that scenario.</p>
                     <div id="aiOptimizationContent"></div>
@@ -1032,6 +1281,7 @@
                         <div id="gapCloseContent"></div>
                     </div>
                 </div>
+                <div class="artifact-screen" id="estimateContent"></div>
                 <pre class="artifact-print-sheet" data-print-sheet="estimate"></pre>
             </section>
 
@@ -1068,20 +1318,36 @@
                 <pre id="rawResponse"></pre>
             </details>
         </div>
-
-        <div id="questions" class="card hidden">
-            <h2 class="card-title">Clarification required</h2>
-            <div class="clarification-note">
-                Answer the required questions below so the assessment can continue.
-                Optional follow-ups are listed separately and do not block the workflow.
-            </div>
-            <div id="questionList"></div>
-            <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
-        </div>
+</div>
     </div>
+</div>
 </div>
 
 <script>
+    function resolveClientName(search) {
+        const params = new URLSearchParams(search == null ? window.location.search : search);
+        const raw = params.get("client");
+        if (raw == null) return "LIMOUT";
+        const name = String(raw).trim();
+        if (!name) return "LIMOUT";
+        if (name.includes("<") || name.includes(">")) return "LIMOUT";
+        for (let i = 0; i < name.length; i += 1) {
+            const code = name.charCodeAt(i);
+            if (code < 32 || code === 127) return "LIMOUT";
+        }
+        return name;
+    }
+
+    function applyClientBranding() {
+        const name = resolveClientName();
+        document.querySelectorAll("[data-client-name]").forEach(el => {
+            el.textContent = name;
+        });
+        document.title = name + " — AI Delivery Copilot";
+    }
+
+    applyClientBranding();
+
     let currentIteration = 1;
     let currentData = null;
     let currentArtifactTab = "assessment";
@@ -1634,7 +1900,6 @@
         renderObject("estimateContent", data);
 
         const optimizeButtons = [
-            document.getElementById("optimizeButton"),
             document.getElementById("optimizeButtonPanel")
         ].filter(Boolean);
         const duration = (data && data.duration_range) || "";
@@ -2215,7 +2480,6 @@ function updateRunningStatus(message) {
         }
 
         const buttons = [
-            document.getElementById("optimizeButton"),
             document.getElementById("optimizeButtonPanel")
         ].filter(Boolean);
         buttons.forEach(button => {
@@ -2384,6 +2648,16 @@ function updateRunningStatus(message) {
                 .classList.add("hidden");
         }
     }
+
+    document.addEventListener("click", event => {
+        const tabs = document.getElementById("artifactTabs");
+        const button = event.target.closest(".artifact-tab");
+        if (!button || !tabs || !tabs.contains(button)) return;
+        const name = button.getAttribute("data-tab");
+        if (!name) return;
+        event.preventDefault();
+        selectTab(name);
+    }, true);
 
     // Use an explicit event listener rather than an inline onclick handler.
     // This makes clarification submission reliable even when the page is
