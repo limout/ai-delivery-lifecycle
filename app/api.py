@@ -541,6 +541,18 @@ class ClarifyRequest(BaseModel):
     prior_state: dict = Field(default_factory=dict)
 
 
+class RagIngestRequest(BaseModel):
+    """Admin/demo ingest body. Auth for this endpoint is a Phase 2 requirement.
+
+    Optional protection: set RAG_INGEST_TOKEN and send header X-RAG-Ingest-Token.
+    """
+
+    document_id: str = Field(min_length=1)
+    title: str = ""
+    source: str = "internal"
+    content: str = Field(min_length=1)
+
+
 def get_provider() -> AIProvider:
     provider_name = os.getenv("AI_PROVIDER", "gemini").lower()
 
@@ -776,6 +788,52 @@ def health() -> dict:
 @router.get("/config")
 def config() -> dict:
     return {"ai_provider": os.getenv("AI_PROVIDER", "gemini").lower()}
+
+
+@router.post("/rag/ingest")
+def rag_ingest(request: RagIngestRequest, http_request: Request):
+    """Load a document into the knowledge base. Admin/demo only (Phase 1).
+
+    Authentication/authorization is a Phase 2 requirement. If RAG_INGEST_TOKEN
+    is set, the request must include a matching X-RAG-Ingest-Token header.
+    """
+    from app.rag.config import ingest_token, rag_enabled
+    from app.rag.ingest import RAGIngestError, ingest_document
+
+    expected = ingest_token()
+    if expected:
+        provided = http_request.headers.get("x-rag-ingest-token", "")
+        if provided != expected:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "RAG_INGEST_UNAUTHORIZED",
+                    "message": "Invalid or missing X-RAG-Ingest-Token.",
+                },
+            )
+
+    if not rag_enabled():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "RAG_DISABLED",
+                "message": "Set RAG_ENABLED=true to ingest documents.",
+            },
+        )
+
+    try:
+        result = ingest_document(
+            document_id=request.document_id,
+            title=request.title or request.document_id,
+            source=request.source or "internal",
+            content=request.content,
+        )
+    except RAGIngestError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "RAG_INGEST_FAILED", "message": str(exc)},
+        )
+    return result
 
 
 @router.post("/analyze/stream")

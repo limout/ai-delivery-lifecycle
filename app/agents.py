@@ -1,3 +1,4 @@
+import logging
 import re
 from app.providers import AIProvider
 from app.state import DeliveryState
@@ -12,6 +13,8 @@ from app.timeline import (
     parse_customer_estimate,
     parse_requested_deadline,
 )
+
+_log = logging.getLogger("app.agents")
 
 
 DISCOVERY_SCHEMA = {
@@ -591,6 +594,39 @@ def _ground_downstream_artifact(artifact: dict, state: DeliveryState) -> dict:
         ]
     return cleaned
 
+
+def _discovery_reference_section(query: str) -> str:
+    """Append knowledge-base excerpts only when RAG is enabled and results exist.
+
+    Retrieval failures are logged and ignored so /analyze still returns JSON.
+    Retrieved text is never written into discovery structured fields here.
+    """
+    try:
+        from app.rag.config import rag_enabled
+
+        enabled = rag_enabled()
+        print(f"[RAG] discovery enabled={enabled}")
+        if not enabled:
+            return ""
+        from app.rag.retrieve import format_reference_section, retrieve_relevant_context
+
+        chunks = retrieve_relevant_context(query)
+        refs = [
+            f"{item.title or item.document_id}:{item.chunk_index}"
+            for item in chunks
+        ]
+        print(f"[RAG] discovery chunks={len(chunks)} refs={refs}")
+        section = format_reference_section(chunks)
+        print(
+            f"[RAG] discovery excerpts_appended={bool(section)} "
+            f"prompt_extra_chars={len(section)}"
+        )
+        return section
+    except Exception:
+        _log.exception("RAG retrieval failed; discovery continues without reference excerpts")
+        return ""
+
+
 def discovery_agent(
     state: DeliveryState,
     provider: AIProvider,
@@ -629,6 +665,10 @@ Original customer request:
 
 {clarification_context}
 """
+
+    rag_section = _discovery_reference_section(request)
+    if rag_section:
+        prompt = f"{prompt.rstrip()}\n\n{rag_section}\n"
 
     discovery = provider.generate_json(
         prompt=prompt,
