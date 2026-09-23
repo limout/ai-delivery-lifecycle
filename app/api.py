@@ -16,12 +16,14 @@ from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
 from app.evidence import is_numeric_duration
 from app.gap_close import gap_closing_eligible
+from app.llm_cost import calculate_llm_cost, log_llm_cost
 from app.providers import (
     AIProvider,
     AIProviderQuotaError,
     GeminiProvider,
     OllamaProvider,
     MockProvider,
+    llm_usage_record,
 )
 from app.resume import answers_require_upstream_regen
 from app.runs import artifacts_from_payload, get_run, new_run_id, save_run
@@ -137,17 +139,49 @@ STAGE_LABELS = {
 
 
 class _InstrumentedProvider:
-    """Count LLM calls without logging prompt content."""
+    """Count LLM calls and collect provider-agnostic usage records."""
 
     def __init__(self, inner: AIProvider):
         self.inner = inner
         self.llm_calls = 0
+        self.current_node: str | None = None
+        self.llm_usage: list[dict] = []
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
         self.llm_calls += 1
         required = list((schema or {}).get("required") or [])
         print(f"[WORKFLOW] llm_call count={self.llm_calls} schema={required[:6]}")
-        return self.inner.generate_json(prompt, schema)
+        started_at = time.perf_counter()
+        result = self.inner.generate_json(prompt, schema)
+        duration_ms = max(0, int(round((time.perf_counter() - started_at) * 1000)))
+        self.llm_usage.append(self._usage_record(duration_ms))
+        usage = self.llm_usage[-1]
+        print(
+            f"[USAGE] provider={usage.get('provider')} model={usage.get('model')} "
+            f"node={usage.get('node')} input_tokens={usage.get('input_tokens')} "
+            f"output_tokens={usage.get('output_tokens')} "
+            f"total_tokens={usage.get('total_tokens')} "
+            f"duration_ms={usage.get('duration_ms')}"
+        )
+        return result
+
+    def _usage_record(self, duration_ms: int) -> dict:
+        raw = getattr(self.inner, "last_usage", None)
+        if isinstance(raw, dict):
+            record = dict(raw)
+            record["node"] = self.current_node
+            if record.get("duration_ms") is None:
+                record["duration_ms"] = duration_ms
+            return record
+        return llm_usage_record(
+            provider=type(self.inner).__name__,
+            model=getattr(self.inner, "model", None),
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            duration_ms=duration_ms,
+            node=self.current_node,
+        )
 
 
 def _new_clarification_records(request: "ClarifyRequest") -> list[dict]:
@@ -207,14 +241,22 @@ def _initial_workflow_state(
     return state
 
 
+def _llm_cost_for_usage(usage: list[dict]) -> dict:
+    cost = calculate_llm_cost(usage)
+    log_llm_cost(cost)
+    return cost
+
+
 def _execution_payload(
     state: dict,
     nodes_executed: list[str],
     llm_calls: int,
     elapsed: float,
     mode: str,
+    llm_usage: list[dict] | None = None,
 ) -> dict:
     skipped = list(state.get("skipped_nodes") or [])
+    usage = list(llm_usage or [])
     payload = {
         "mode": mode,
         "nodes_executed": nodes_executed,
@@ -223,6 +265,8 @@ def _execution_payload(
         "llm_calls_avoided": len(skipped),
         "elapsed_seconds": round(elapsed, 2),
         "regenerate_upstream": bool(state.get("regenerate_upstream", True)),
+        "llm_usage": usage,
+        "llm_cost": _llm_cost_for_usage(usage),
     }
     print(
         f"[WORKFLOW] mode={mode} nodes={nodes_executed} "
@@ -254,11 +298,14 @@ def _stream_workflow(
     events: queue.Queue = queue.Queue()
     started_at = time.monotonic()
     nodes_executed: list[str] = []
+    instrumented = _InstrumentedProvider(provider)
 
     def progress_callback(stage: str, status: str) -> None:
         elapsed = round(time.monotonic() - started_at, 1)
-        if status == "running" and stage not in nodes_executed:
-            nodes_executed.append(stage)
+        if status == "running":
+            instrumented.current_node = stage
+            if stage not in nodes_executed:
+                nodes_executed.append(stage)
         events.put({
             "type": "stage",
             "stage": stage,
@@ -268,7 +315,6 @@ def _stream_workflow(
         })
 
     def worker() -> None:
-        instrumented = _InstrumentedProvider(provider)
         try:
             graph = build_graph(instrumented, progress_callback=progress_callback)
             state = _initial_workflow_state(
@@ -287,6 +333,7 @@ def _stream_workflow(
                 instrumented.llm_calls,
                 time.monotonic() - started_at,
                 "clarify" if resume_after_clarification else "analyze",
+                instrumented.llm_usage,
             )
             events.put({
                 "type": "result",
@@ -348,9 +395,12 @@ def _stream_optimization(
     """Stream the explicit, user-triggered AI optimization graph."""
     events: queue.Queue = queue.Queue()
     started_at = time.monotonic()
+    instrumented = _InstrumentedProvider(provider)
 
     def progress_callback(stage: str, status: str) -> None:
         elapsed = round(time.monotonic() - started_at, 1)
+        if status == "running":
+            instrumented.current_node = stage
         events.put({
             "type": "stage",
             "stage": stage,
@@ -360,7 +410,6 @@ def _stream_optimization(
         })
 
     def worker() -> None:
-        instrumented = _InstrumentedProvider(provider)
         try:
             graph = build_optimization_graph(
                 instrumented,
@@ -371,6 +420,7 @@ def _stream_optimization(
             state["workflow_status"] = "RUNNING"
             state["awaiting_customer"] = False
             result = graph.invoke(state)
+            usage = list(instrumented.llm_usage)
             result["execution"] = {
                 "mode": "optimize",
                 "nodes_executed": ["ai_optimization", "optimization_complete"],
@@ -378,6 +428,8 @@ def _stream_optimization(
                 "llm_calls": instrumented.llm_calls,
                 "llm_calls_avoided": 0,
                 "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                "llm_usage": usage,
+                "llm_cost": _llm_cost_for_usage(usage),
             }
             events.put({
                 "type": "result",
@@ -435,9 +487,12 @@ def _stream_gap_close(
     """Stream the explicit, user-triggered hard-deadline gap-closing graph."""
     events: queue.Queue = queue.Queue()
     started_at = time.monotonic()
+    instrumented = _InstrumentedProvider(provider)
 
     def progress_callback(stage: str, status: str) -> None:
         elapsed = round(time.monotonic() - started_at, 1)
+        if status == "running":
+            instrumented.current_node = stage
         events.put({
             "type": "stage",
             "stage": stage,
@@ -447,7 +502,6 @@ def _stream_gap_close(
         })
 
     def worker() -> None:
-        instrumented = _InstrumentedProvider(provider)
         try:
             graph = build_gap_close_graph(
                 instrumented,
@@ -458,6 +512,7 @@ def _stream_gap_close(
             state["workflow_status"] = "RUNNING"
             state["awaiting_customer"] = False
             result = graph.invoke(state)
+            usage = list(instrumented.llm_usage)
             result["execution"] = {
                 "mode": "gap_close",
                 "nodes_executed": ["deadline_gap_plan", "gap_close_complete"],
@@ -465,6 +520,8 @@ def _stream_gap_close(
                 "llm_calls": instrumented.llm_calls,
                 "llm_calls_avoided": 0,
                 "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                "llm_usage": usage,
+                "llm_cost": _llm_cost_for_usage(usage),
             }
             events.put({
                 "type": "result",
@@ -639,8 +696,11 @@ def run_workflow(
     instrumented = _InstrumentedProvider(inner) if inner is not None else None
 
     def progress_callback(stage: str, status: str) -> None:
-        if status == "running" and stage not in nodes_executed:
-            nodes_executed.append(stage)
+        if status == "running":
+            if instrumented is not None:
+                instrumented.current_node = stage
+            if stage not in nodes_executed:
+                nodes_executed.append(stage)
 
     graph = build_graph(
         instrumented if instrumented is not None else inner,
@@ -663,6 +723,7 @@ def run_workflow(
         llm_calls,
         time.monotonic() - started_at,
         "clarify" if resume_after_clarification else "analyze",
+        instrumented.llm_usage if instrumented is not None else [],
     )
     return result
 

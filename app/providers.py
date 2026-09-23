@@ -79,7 +79,113 @@ def _parse_json_text(raw_text: str, provider_name: str) -> dict:
     )
 
 
+def _as_optional_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, int(round((time.perf_counter() - started_at) * 1000)))
+
+
+def llm_usage_record(
+    *,
+    provider: str,
+    model: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    duration_ms: int | None,
+    node: str | None = None,
+) -> dict:
+    """Normalized per-call usage. Cost is a later layer; do not add money here."""
+    if (
+        total_tokens is None
+        and input_tokens is not None
+        and output_tokens is not None
+    ):
+        total_tokens = input_tokens + output_tokens
+    return {
+        "provider": provider,
+        "model": model,
+        "node": node,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "duration_ms": duration_ms,
+    }
+
+
+def map_gemini_usage(usage_metadata, model: str | None, duration_ms: int) -> dict:
+    meta = usage_metadata
+    if meta is None:
+        values = {}
+    elif isinstance(meta, dict):
+        values = meta
+    else:
+        values = {
+            "prompt_token_count": getattr(meta, "prompt_token_count", None),
+            "candidates_token_count": getattr(meta, "candidates_token_count", None),
+            "total_token_count": getattr(meta, "total_token_count", None),
+        }
+    return llm_usage_record(
+        provider="gemini",
+        model=model,
+        input_tokens=_as_optional_int(values.get("prompt_token_count")),
+        output_tokens=_as_optional_int(values.get("candidates_token_count")),
+        total_tokens=_as_optional_int(values.get("total_token_count")),
+        duration_ms=duration_ms,
+    )
+
+
+def map_openrouter_usage(usage, model: str | None, duration_ms: int) -> dict:
+    values = usage if isinstance(usage, dict) else {}
+    return llm_usage_record(
+        provider="openrouter",
+        model=model,
+        input_tokens=_as_optional_int(values.get("prompt_tokens")),
+        output_tokens=_as_optional_int(values.get("completion_tokens")),
+        total_tokens=_as_optional_int(values.get("total_tokens")),
+        duration_ms=duration_ms,
+    )
+
+
+def map_ollama_usage(payload, model: str | None, duration_ms: int) -> dict:
+    values = payload if isinstance(payload, dict) else {}
+    return llm_usage_record(
+        provider="ollama",
+        model=model,
+        input_tokens=_as_optional_int(values.get("prompt_eval_count")),
+        output_tokens=_as_optional_int(values.get("eval_count")),
+        total_tokens=_as_optional_int(values.get("total_tokens")),
+        duration_ms=duration_ms,
+    )
+
+
+def map_mock_usage(model: str | None, duration_ms: int) -> dict:
+    return llm_usage_record(
+        provider="mock",
+        model=model or "mock",
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        duration_ms=duration_ms,
+    )
+
+
 class AIProvider(ABC):
+    """JSON LLM backend. Implementations set ``last_usage`` after a successful call.
+
+    ``last_usage`` is the normalized record from ``llm_usage_record``.
+    ``node`` is filled by the API instrumentation wrapper, not by providers.
+    """
+
+    last_usage: dict | None = None
+
     @abstractmethod
     def generate_json(self, prompt: str, schema: dict) -> dict:
         raise NotImplementedError
@@ -133,7 +239,13 @@ class GeminiProvider(AIProvider):
                     f"elapsed={elapsed:.2f}s response_chars={len(raw_text or '')}"
                 )
 
-                return _parse_json_text(raw_text, "Gemini")
+                parsed = _parse_json_text(raw_text, "Gemini")
+                self.last_usage = map_gemini_usage(
+                    getattr(response, "usage_metadata", None),
+                    self.model,
+                    _duration_ms(started_at),
+                )
+                return parsed
 
             except errors.ServerError as exc:
                 status_code = getattr(exc, "status_code", None)
@@ -312,12 +424,17 @@ class OpenRouterProvider(AIProvider):
 
         total_elapsed = time.perf_counter() - started_at
         usage = data.get("usage") or {}
+        self.last_usage = map_openrouter_usage(
+            usage,
+            self.model,
+            _duration_ms(started_at),
+        )
         print(
             f"[OPENROUTER] COMPLETE model={self.model} "
             f"elapsed={total_elapsed:.2f}s "
             f"response_chars={len(raw_text)} "
-            f"input_tokens={usage.get('prompt_tokens', '?')} "
-            f"output_tokens={usage.get('completion_tokens', '?')}"
+            f"input_tokens={self.last_usage.get('input_tokens', '?')} "
+            f"output_tokens={self.last_usage.get('output_tokens', '?')}"
         )
         return result
 
@@ -483,6 +600,11 @@ class OllamaProvider(AIProvider):
 
         result = _parse_json_text(raw_text, "Ollama")
         total_elapsed = time.perf_counter() - started_at
+        self.last_usage = map_ollama_usage(
+            data,
+            self.model,
+            _duration_ms(started_at),
+        )
         print(
             f"[OLLAMA] COMPLETE mode={mode} model={self.model} "
             f"elapsed={total_elapsed:.2f}s response_chars={len(raw_text)}"
@@ -499,6 +621,12 @@ class MockProvider(AIProvider):
     """Deterministic provider used by automated tests."""
 
     def generate_json(self, prompt: str, schema: dict) -> dict:
+        started_at = time.perf_counter()
+        result = self._mock_json(prompt, schema)
+        self.last_usage = map_mock_usage("mock", _duration_ms(started_at))
+        return result
+
+    def _mock_json(self, prompt: str, schema: dict) -> dict:
         prompt_lower = prompt.lower()
         required = tuple((schema or {}).get("required") or [])
 
