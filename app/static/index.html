@@ -236,11 +236,10 @@
         }
 
         .lifecycle-card .result-title {
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 600;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: var(--muted);
+            letter-spacing: 0.02em;
+            color: var(--text);
         }
 
         .lifecycle {
@@ -255,7 +254,7 @@
         .lifecycle::before {
             content: "";
             position: absolute;
-            top: 12px;
+            top: 16px;
             left: 4.8%;
             right: 4.8%;
             height: 1px;
@@ -271,8 +270,8 @@
         }
 
         .stage-dot {
-            width: 20px;
-            height: 20px;
+            width: 24px;
+            height: 24px;
             margin: 2px auto 6px;
             border-radius: 50%;
             border: 1px solid #d1d5db;
@@ -281,12 +280,12 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 9px;
+            font-size: 10px;
             font-weight: 700;
         }
 
         .stage-label {
-            font-size: 9px;
+            font-size: 11px;
             font-weight: 600;
             color: #9ca3af;
             text-transform: uppercase;
@@ -305,10 +304,14 @@
             background: var(--blue);
             border-color: var(--blue);
             color: white;
-            box-shadow: 0 0 0 3px var(--blue-soft);
+            box-shadow: 0 0 0 4px var(--blue-soft);
+            font-weight: 800;
         }
 
-        .stage.current .stage-label { color: var(--blue); }
+        .stage.current .stage-label {
+            color: var(--blue);
+            font-weight: 800;
+        }
 
         .stage.blocked .stage-dot {
             background: var(--amber-soft);
@@ -494,9 +497,23 @@
 
         .summary-grid {
             display: grid;
-            grid-template-columns: 1.2fr 1fr auto;
+            grid-template-columns: 1fr 1fr;
             gap: 8px 16px;
             align-items: start;
+        }
+
+        .lifecycle-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 8px 12px;
+            margin-top: 2px;
+        }
+
+        .current-stage-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--blue);
         }
 
         .summary-tile {
@@ -1027,6 +1044,19 @@
 
     <div id="result" class="hidden">
 
+        <div class="card summary-card">
+            <div class="summary-grid">
+                <div class="summary-tile">
+                    <div class="summary-label">Problem</div>
+                    <div id="summaryProblem" class="summary-value">—</div>
+                </div>
+                <div class="summary-tile">
+                    <div class="summary-label">Business Goal</div>
+                    <div id="summaryGoal" class="summary-value">—</div>
+                </div>
+            </div>
+        </div>
+
         <div id="verdict" class="verdict-card hidden">
             <div class="verdict-kicker">Executive verdict</div>
             <h2 class="verdict-title" id="verdictTitle">—</h2>
@@ -1052,42 +1082,14 @@
             <div class="disclaimer" id="verdictDisclaimer"></div>
         </div>
 
-        <div id="questions" class="card hidden">
-            <h2 class="card-title">Clarification required</h2>
-            <div class="clarification-note">
-                Answer the required questions below so the assessment can continue.
-                Optional follow-ups are listed separately and do not block the workflow.
-            </div>
-            <div id="optionalQuestionsIntro" class="hidden"></div>
-            <button type="button" id="optionalQuestionsToggle" class="secondary-button hidden">Answer questions</button>
-            <div id="optionalQuestionsForm">
-                <div id="questionList"></div>
-                <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
-            </div>
-        </div>
-
-        <div class="card summary-card">
-            <div class="summary-grid">
-                <div class="summary-tile">
-                    <div class="summary-label">Problem</div>
-                    <div id="summaryProblem" class="summary-value">—</div>
-                </div>
-                <div class="summary-tile">
-                    <div class="summary-label">Business Goal</div>
-                    <div id="summaryGoal" class="summary-value">—</div>
-                </div>
-                <div class="summary-tile">
-                    <div class="summary-label">Workflow State</div>
-                    <div id="summaryState" class="summary-value">—</div>
-                </div>
-            </div>
-        </div>
-
         <div class="card lifecycle-card no-print">
             <div class="result-header">
                 <div>
-                    <h2 class="result-title">Workflow Progress</h2>
-                    <div class="iteration" id="iteration"></div>
+                    <h2 class="result-title">Workflow progress</h2>
+                    <div class="lifecycle-meta">
+                        <div class="iteration" id="iteration"></div>
+                        <span class="current-stage-name hidden" id="currentStage"></span>
+                    </div>
                 </div>
                 <div class="status-row">
                     <span id="status" class="status"></span>
@@ -1135,6 +1137,20 @@
                     <div class="stage-dot">10</div>
                     <div class="stage-label">Complete</div>
                 </div>
+            </div>
+        </div>
+
+        <div id="questions" class="card hidden">
+            <h2 class="card-title">Clarification required</h2>
+            <div class="clarification-note">
+                Answer the required questions below so the assessment can continue.
+                Optional follow-ups are listed separately and do not block the workflow.
+            </div>
+            <div id="optionalQuestionsIntro" class="hidden"></div>
+            <button type="button" id="optionalQuestionsToggle" class="secondary-button hidden">Answer questions</button>
+            <div id="optionalQuestionsForm">
+                <div id="questionList"></div>
+                <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
             </div>
         </div>
 
@@ -1607,11 +1623,13 @@
             document.querySelector('[data-stage="complete"]')?.classList.add("done");
         }
 
-        const workflowState = document.getElementById("summaryState");
-        if (workflowState) {
-        workflowState.textContent = reviewBlocked
-            ? "REVIEW BLOCKED"
-            : (data.verdict && data.verdict.label) || (data.status || "UNKNOWN");
+        const currentStage = document.getElementById("currentStage");
+        if (currentStage) {
+            const activeStage = document.querySelector(".stage.current, .stage.blocked");
+            const label = activeStage && activeStage.querySelector(".stage-label");
+            const name = label ? label.textContent.trim() : "";
+            currentStage.textContent = name;
+            currentStage.classList.toggle("hidden", !name);
         }
 
         const status = document.getElementById("status");
@@ -2058,7 +2076,6 @@
         setText("businessGoal", discovery.business_goal);
         setText("summaryProblem", discovery.problem);
         setText("summaryGoal", discovery.business_goal);
-        setText("summaryState", data.status);
 
         renderList("users", discovery.users);
         renderList("stakeholders", discovery.stakeholders);
@@ -2699,6 +2716,11 @@ function updateRunningStatus(message) {
         button.disabled = true;
         button.textContent = "Re-running workflow…";
         updateRunningStatus("Running workflow…");
+        requestAnimationFrame(() => {
+            const main = document.querySelector(".app-main");
+            if (main) main.scrollTo({ top: 0, behavior: "smooth" });
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        });
 
         try {
             await consumeWorkflowStream(

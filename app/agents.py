@@ -3,9 +3,11 @@ import re
 from app.providers import AIProvider
 from app.state import DeliveryState
 from app.evidence import (
+    clarification_answer_body,
     customer_authored_text,
     has_substantive_first_release_scope_answer,
     is_estimable,
+    is_non_substantive_clarification_answer,
     material_evidence_gaps,
 )
 from app.timeline import (
@@ -476,7 +478,52 @@ def _answered_clarification_topics(state: DeliveryState) -> set[str]:
     if has_substantive_first_release_scope_answer(state):
         topics.add("first_release_scope")
 
+    for record in _clarification_records(state):
+        question, body = _record_question_and_answer(record)
+        if is_non_substantive_clarification_answer(body):
+            continue
+        if _question_topic(question) == "deadline_type":
+            topics.add("deadline_type")
+            break
+
     return topics
+
+
+def _is_penalty_only_question(text: str) -> bool:
+    """True for penalty/LD follow-ups, not target-vs-contractual combo questions."""
+    t = str(text or "").lower()
+    if "penalt" not in t and "liquidated" not in t:
+        return False
+    if any(marker in t for marker in (
+        "flexible",
+        "internal target",
+        "planning date",
+        "planning target",
+    )):
+        return False
+    if "target" in t and "contractual" in t:
+        return False
+    return True
+
+
+def _is_deadline_type_question(text: str) -> bool:
+    """True when the question asks whether a known date is binding vs a target."""
+    t = str(text or "").lower()
+    if _is_penalty_only_question(t):
+        return False
+    has_date = bool(re.search(
+        r"\b(deadline|date|2-month|two-month|2 month|two month)\b",
+        t,
+    ))
+    has_nature = any(marker in t for marker in (
+        "contractual",
+        "binding",
+        "flexible",
+        "internal target",
+        "planning date",
+        "planning target",
+    ))
+    return has_date and has_nature
 
 
 def _question_topic(question: str) -> str | None:
@@ -488,12 +535,15 @@ def _question_topic(question: str) -> str | None:
         "main capabilities", "core function",
     )):
         return "first_release_scope"
+    if _is_deadline_type_question(text):
+        return "deadline_type"
     if any(marker in text for marker in (
         "security", "compliance", "data privacy", "privacy requirements", "regulatory"
     )):
         return "security_compliance"
     if any(marker in text for marker in (
-        "user volume", "expected user volume", "traffic", "concurrent users"
+        "user volume", "expected user volume", "traffic", "concurrent users",
+        "concurrent load",
     )):
         return "user_volume"
     if any(marker in text for marker in (
@@ -507,17 +557,128 @@ def _question_topic(question: str) -> str | None:
     return None
 
 
+def _normalize_question_text(text: str) -> str:
+    """Normalize question text for exact answered-question matching."""
+    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+
+
+_INTERROGATIVE_PREFIXES = (
+    "what is the ",
+    "what are the ",
+    "whether ",
+    "is the ",
+)
+_SINGLETON_OPTIONAL_TOPICS = frozenset({"deadline_type"})
+VOLUME_FOLLOW_UP_QUESTION = (
+    "What is the expected user volume and concurrent load for the web application?"
+)
+ROLES_FOLLOW_UP_QUESTION = "What are the expected user roles and permissions?"
+
+
+def _question_dedup_key(text: str) -> str:
+    """Deterministic stem key: normalized text without a safe interrogative wrapper."""
+    key = _normalize_question_text(text)
+    if key.endswith("?"):
+        key = key[:-1].rstrip()
+    for prefix in _INTERROGATIVE_PREFIXES:
+        if key.startswith(prefix):
+            key = key[len(prefix):].rstrip()
+            break
+    return key
+
+
+def _coalesce_optional_questions(questions: list, state: DeliveryState) -> list:
+    """Exact, stem, and singleton-topic dedup for optional questions. Keep first."""
+    answered_topics = _answered_clarification_topics(state)
+    result = []
+    seen_lower = set()
+    seen_stems = set()
+    seen_singleton = set()
+    for item in questions or []:
+        question = str(item or "").strip()
+        if not question:
+            continue
+        lower = question.lower()
+        if lower in seen_lower:
+            continue
+        stem = _question_dedup_key(question)
+        if stem and stem in seen_stems:
+            continue
+        topic = _question_topic(question)
+        if topic in _SINGLETON_OPTIONAL_TOPICS:
+            if topic in answered_topics or topic in seen_singleton:
+                continue
+        result.append(question)
+        seen_lower.add(lower)
+        if stem:
+            seen_stems.add(stem)
+        if topic in _SINGLETON_OPTIONAL_TOPICS:
+            seen_singleton.add(topic)
+    return result
+
+
+def _split_legacy_clarification_blob(blob: str) -> tuple[str, str]:
+    """Recover question/answer from the UI string `${questionText}: ${answer}`."""
+    text = str(blob or "").strip()
+    if not text:
+        return "", ""
+    # Prefer "?: " so colons inside the question (for example S/4HANA notes)
+    # are not treated as the answer separator. Questions from the UI end with ?.
+    marker = "?: "
+    index = text.rfind(marker)
+    if index != -1:
+        return text[: index + 1].strip(), text[index + len(marker) :].strip()
+    marker = ": "
+    index = text.rfind(marker)
+    if index != -1:
+        question = text[:index].strip()
+        answer = text[index + len(marker) :].strip()
+        if question and answer:
+            return question, answer
+    return "", text
+
+
+def _record_question_and_answer(record: dict) -> tuple[str, str]:
+    """Return the real question/answer, unpacking legacy UI history rows."""
+    question = str(record.get("question") or "").strip()
+    answer = str(record.get("answer") or "").strip()
+    placeholder = _normalize_question_text(question) in {"", "customer clarification"}
+    if placeholder:
+        inner_question, inner_answer = _split_legacy_clarification_blob(answer)
+        if inner_question:
+            return inner_question, inner_answer
+        return question, answer
+    return question, clarification_answer_body(question, answer)
+
+
+def _answered_question_texts(state: DeliveryState) -> set[str]:
+    """Questions that already have a substantive customer answer."""
+    answered: set[str] = set()
+    for record in _clarification_records(state):
+        question, body = _record_question_and_answer(record)
+        normalized = _normalize_question_text(question)
+        if not normalized:
+            continue
+        if is_non_substantive_clarification_answer(body):
+            continue
+        answered.add(normalized)
+    return answered
+
+
 def _filter_answered_questions(questions: list, state: DeliveryState) -> list:
-    """Remove questions whose canonical topic was already answered."""
-    answered = _answered_clarification_topics(state)
-    if not answered:
-        return questions
+    """Remove questions already answered by topic or exact question text."""
+    answered_topics = _answered_clarification_topics(state)
+    answered_texts = _answered_question_texts(state)
+    if not answered_topics and not answered_texts:
+        return list(questions or [])
 
     filtered = []
     for item in questions or []:
         text = item.get("question") if isinstance(item, dict) else str(item)
+        if _normalize_question_text(text) in answered_texts:
+            continue
         topic = _question_topic(text)
-        if topic and topic in answered:
+        if topic and topic in answered_topics:
             continue
         filtered.append(item)
     return filtered
@@ -1256,10 +1417,21 @@ REQUIREMENTS:
             non_blocking_questions.append(question)
             existing_questions.add(lower)
 
-    # Preserve the roles/volume follow-up even if the model omitted it.
-    roles_volume_question = "What are the expected user roles/permissions and expected user volume?"
-    if roles_volume_question.lower() not in {q.lower() for q in non_blocking_questions}:
-        non_blocking_questions.append(roles_volume_question)
+    answered_topics = _answered_clarification_topics(state)
+    present_topics = {
+        topic
+        for topic in (_question_topic(q) for q in non_blocking_questions)
+        if topic
+    }
+    if "user_volume" not in answered_topics and "user_volume" not in present_topics:
+        if _filter_answered_questions([VOLUME_FOLLOW_UP_QUESTION], state):
+            non_blocking_questions.append(VOLUME_FOLLOW_UP_QUESTION)
+    if (
+        "roles_permissions" not in answered_topics
+        and "roles_permissions" not in present_topics
+    ):
+        if _filter_answered_questions([ROLES_FOLLOW_UP_QUESTION], state):
+            non_blocking_questions.append(ROLES_FOLLOW_UP_QUESTION)
 
     # A customer-confirmed answer must never be reopened as a blocker.
     answered_topics = _answered_clarification_topics(state)
@@ -1304,10 +1476,16 @@ REQUIREMENTS:
         "reasons": reasons,
         "questions": blocking_questions,
         "blocking_questions": blocking_questions,
-        "non_blocking_questions": [
-            q for q in non_blocking_questions
-            if q.lower() not in {b.lower() for b in blocking_questions}
-        ],
+        "non_blocking_questions": _filter_answered_questions(
+            _coalesce_optional_questions(
+                [
+                    q for q in non_blocking_questions
+                    if q.lower() not in {b.lower() for b in blocking_questions}
+                ],
+                state,
+            ),
+            state,
+        ),
         "estimable": not blocking_questions,
         "missing_evidence": [gap.reason for gap in evidence_gaps],
     }
