@@ -2557,12 +2557,19 @@ function updateRunningStatus(message) {
         button.textContent = "Analyzing…";
         updateRunningStatus("Running workflow…");
 
+        if (window.DeliveryAnalytics && typeof DeliveryAnalytics.trackAnalyzeStarted === "function") {
+            DeliveryAnalytics.trackAnalyzeStarted();
+        }
+
         try {
             await consumeWorkflowStream(
                 "/analyze/stream",
                 { user_request: request },
                 renderResult
             );
+            if (window.DeliveryAnalytics && typeof DeliveryAnalytics.trackAnalyzeCompleted === "function") {
+                DeliveryAnalytics.trackAnalyzeCompleted();
+            }
         } catch (error) {
             showError(error.message);
         } finally {
@@ -2681,5 +2688,6 @@ function updateRunningStatus(message) {
         }
     });
 </script>
+<script src="/static/ga4.js"></script>
 </body>
 </html>
