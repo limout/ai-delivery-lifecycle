@@ -4,6 +4,7 @@ from app.providers import AIProvider
 from app.state import DeliveryState
 from app.evidence import (
     customer_authored_text,
+    has_substantive_first_release_scope_answer,
     is_estimable,
     material_evidence_gaps,
 )
@@ -471,6 +472,9 @@ def _answered_clarification_topics(state: DeliveryState) -> set[str]:
         "integration", "api", "authentication", "identity provider", "existing", "current state"
     )):
         topics.add("entra_integration")
+
+    if has_substantive_first_release_scope_answer(state):
+        topics.add("first_release_scope")
 
     return topics
 

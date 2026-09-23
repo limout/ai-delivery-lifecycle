@@ -948,10 +948,13 @@
     .priority-required{background:#fee2e2;color:#b91c1c}
     .priority-recommended{background:#fef3c7;color:#92400e}
     .priority-optional{background:#f1f5f9;color:#475569}
-    .question-card{border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;background:#fff}
-    .question-card .clarification-answer{width:100%;min-height:58px;padding:10px 11px;border:1px solid #d1d5db;border-radius:8px;font:inherit;line-height:1.45;resize:vertical;background:#fff;box-sizing:border-box;margin-top:2px}
-    .question-card .clarification-answer:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
-    .question-reason{font-size:12px;color:var(--muted);margin:6px 0 12px}
+    .question-group{border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-top:10px;background:#fff}
+    .question-item{padding:8px 0}
+    .question-item + .question-item{border-top:1px solid var(--border)}
+    .question-item.question-card{border:0;border-radius:0;padding:8px 0;margin:0;background:transparent}
+    .question-item .clarification-answer{width:100%;min-height:44px;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font:inherit;line-height:1.4;resize:vertical;background:#fff;box-sizing:border-box;margin-top:4px}
+    .question-item .clarification-answer:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
+    .question-reason{font-size:12px;color:var(--muted);margin:4px 0 6px}
     .clarification-summary{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 4px}
     .clarification-count{padding:7px 10px;border-radius:10px;background:#f8fafc;font-size:12px;font-weight:700}
     .clarification-count.required{background:#fef2f2;color:#b91c1c}
@@ -1055,8 +1058,12 @@
                 Answer the required questions below so the assessment can continue.
                 Optional follow-ups are listed separately and do not block the workflow.
             </div>
-            <div id="questionList"></div>
-            <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
+            <div id="optionalQuestionsIntro" class="hidden"></div>
+            <button type="button" id="optionalQuestionsToggle" class="secondary-button hidden">Answer questions</button>
+            <div id="optionalQuestionsForm">
+                <div id="questionList"></div>
+                <button id="clarifyButton" type="button">Submit Answers &amp; Re-run</button>
+            </div>
         </div>
 
         <div class="card summary-card">
@@ -2176,29 +2183,66 @@
         if (data.validation) take(data.validation.non_blocking_questions, false);
 
         const needsInfo = data.status === "NEEDS_INFO" || data.awaiting_customer;
+        const questionsTitle = questionsContainer.querySelector(".card-title");
+        const questionsNote = questionsContainer.querySelector(".clarification-note");
+        const clarifyButton = document.getElementById("clarifyButton");
+        const optionalToggle = document.getElementById("optionalQuestionsToggle");
+        const optionalForm = document.getElementById("optionalQuestionsForm");
+        const optionalIntro = document.getElementById("optionalQuestionsIntro");
+        if (optionalIntro) {
+            optionalIntro.innerHTML = "";
+            optionalIntro.classList.add("hidden");
+        }
         if (needsInfo && blockingQuestions.length > 0) {
             questionsContainer.classList.remove("hidden");
+            if (questionsTitle) questionsTitle.textContent = "Clarification required";
+            if (questionsNote) {
+                questionsNote.textContent =
+                    "Answer the required questions below so the assessment can continue. Optional follow-ups are listed separately and do not block the workflow.";
+            }
+            if (optionalToggle) optionalToggle.classList.add("hidden");
+            if (optionalForm) optionalForm.classList.remove("hidden");
+            if (clarifyButton) clarifyButton.textContent = "Submit Answers & Re-run";
             const intro = document.createElement("div");
             intro.className = "clarification-summary";
             intro.innerHTML = `<span class="clarification-count required">${blockingQuestions.length} required to continue</span>
             <p class="section-kicker">The assessment cannot responsibly continue yet. Independent estimate: not yet estimable. Answer the required questions, then resume.</p>`;
             questionList.appendChild(intro);
 
-            blockingQuestions.forEach((item, index) => {
-                questionList.appendChild(buildQuestionCard(item, index, true));
-            });
+            questionList.appendChild(buildQuestionGroup(blockingQuestions, true, 0));
 
             if (laterQuestions.length) {
                 const details = document.createElement("details");
                 details.className = "later-questions";
                 details.innerHTML = `<summary>Additional questions — useful later (${laterQuestions.length})</summary>`;
-                laterQuestions.forEach((item, index) => {
-                    details.appendChild(buildQuestionCard(item, blockingQuestions.length + index, false));
-                });
+                details.appendChild(buildQuestionGroup(laterQuestions, false, blockingQuestions.length));
                 questionList.appendChild(details);
             }
+        } else if (laterQuestions.length > 0) {
+            questionsContainer.classList.remove("hidden");
+            if (questionsTitle) questionsTitle.textContent = "Clarification questions";
+            if (questionsNote) {
+                questionsNote.textContent =
+                    "These questions do not block the current assessment. Answer any subset to refine the analysis and run another iteration.";
+            }
+            if (optionalIntro) {
+                optionalIntro.classList.remove("hidden");
+                optionalIntro.innerHTML = `<div class="clarification-summary">
+                    <span class="clarification-count recommended">${laterQuestions.length} recommended</span>
+                    <p class="section-kicker">The workflow is complete. You can still add information and request another iteration.</p>
+                </div>`;
+            }
+            if (optionalToggle) {
+                optionalToggle.classList.remove("hidden");
+                optionalToggle.textContent = "Answer questions";
+                optionalToggle.setAttribute("aria-expanded", "false");
+            }
+            if (optionalForm) optionalForm.classList.add("hidden");
+            if (clarifyButton) clarifyButton.textContent = "Refine analysis";
+            questionList.appendChild(buildQuestionGroup(laterQuestions, false, 0));
         } else {
             questionsContainer.classList.add("hidden");
+            if (optionalToggle) optionalToggle.classList.add("hidden");
         }
 
         selectTab(preferredTabAfterResult(data, source || "analyze"));
@@ -2215,13 +2259,39 @@
         return "needs-info";
     }
 
+    function toggleOptionalQuestions() {
+        const form = document.getElementById("optionalQuestionsForm");
+        const toggle = document.getElementById("optionalQuestionsToggle");
+        if (!form || !toggle || toggle.classList.contains("hidden")) return;
+        const expanded = !form.classList.contains("hidden");
+        if (expanded) {
+            form.classList.add("hidden");
+            toggle.textContent = "Answer questions";
+            toggle.setAttribute("aria-expanded", "false");
+        } else {
+            form.classList.remove("hidden");
+            toggle.textContent = "Hide questions";
+            toggle.setAttribute("aria-expanded", "true");
+        }
+    }
+
+    function buildQuestionGroup(items, required, startIndex) {
+        const group = document.createElement("div");
+        group.className = required ? "question-group question-group-required" : "question-group question-group-optional";
+        const label = document.createElement("div");
+        label.className = required ? "question-priority priority-required" : "question-priority priority-optional";
+        label.textContent = required ? "Required" : "Optional";
+        group.appendChild(label);
+        items.forEach((item, offset) => {
+            group.appendChild(buildQuestionCard(item, startIndex + offset, required));
+        });
+        return group;
+    }
+
     function buildQuestionCard(item, index, required) {
         const wrapper = document.createElement("div");
-        wrapper.className = "question-card";
+        wrapper.className = "question-item question-card";
         wrapper.innerHTML = `
-            <div class="question-priority ${required ? "priority-required" : "priority-recommended"}">
-                ${required ? "Required" : "Useful later"}
-            </div>
             <div><strong>${index + 1}. ${escapeHtml(item.question)}</strong></div>
             ${item.reason ? `<div class="question-reason">${escapeHtml(item.reason)}</div>` : ""}
         `;
@@ -2669,6 +2739,10 @@ function updateRunningStatus(message) {
     // Use an explicit event listener rather than an inline onclick handler.
     // This makes clarification submission reliable even when the page is
     // served with stricter script/content-security settings.
+    const optionalQuestionsToggle = document.getElementById("optionalQuestionsToggle");
+    if (optionalQuestionsToggle) {
+        optionalQuestionsToggle.addEventListener("click", toggleOptionalQuestions);
+    }
     const clarifyButton = document.getElementById("clarifyButton");
     if (clarifyButton) {
         clarifyButton.addEventListener("click", clarify);
