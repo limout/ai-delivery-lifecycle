@@ -181,6 +181,25 @@ PLAN_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
         },
+        "delivery_methodology": {
+            "type": "object",
+            "properties": {
+                "recommended_methodology": {
+                    "type": "string",
+                    "enum": ["SCRUM", "KANBAN", "WATERFALL", "HYBRID"],
+                },
+                "rationale": {"type": "array", "items": {"type": "string"}},
+                "cadence": {"type": "string"},
+                "core_practices": {"type": "array", "items": {"type": "string"}},
+                "governance": {"type": "array", "items": {"type": "string"}},
+                "considered_alternatives": {"type": "array", "items": {"type": "string"}},
+                "confidence": {
+                    "type": "string",
+                    "enum": ["LOW", "MEDIUM", "HIGH"],
+                },
+                "unconfirmed_assumptions": {"type": "array", "items": {"type": "string"}},
+            },
+        },
     },
     "required": [
         "delivery_phases",
@@ -1624,6 +1643,176 @@ Rules:
     }
 
 
+_METHODOLOGY_VALUES = ("SCRUM", "KANBAN", "WATERFALL", "HYBRID")
+_METHODOLOGY_CONFIDENCE = ("LOW", "MEDIUM", "HIGH")
+_METHODOLOGY_INDICATIVE = (
+    "This methodology recommendation is indicative planning information "
+    "and is not a customer commitment."
+)
+_METHODOLOGY_EVIDENCE_SIGNALS = (
+    ("requirements stability", ("evolving requirement", "stable requirement", "changing scope", "fixed scope", "requirements are")),
+    ("planned vs interrupt-driven work", ("interrupt", "unpredictable incoming", "planned work", "backlog-driven", "incoming work")),
+    ("stakeholder feedback", ("stakeholder feedback", "sprint review", "repriorit", "stage review", "regular feedback")),
+    ("incremental vs single-cutover release", ("incremental", "single cutover", "big-bang", "big bang", "go-live", "phased release")),
+    ("contractual/compliance phase gates", ("phase gate", "stage gate", "compliance", "contractual", "regulatory")),
+    ("backlog/prioritization maturity", ("backlog", "priorit", "wip", "frozen scope", "scope baseline")),
+    ("dependency structure", ("dependenc", "sequential", "vendor handoff", "parallel")),
+)
+_INCREMENTAL_RELEASE_FACTS = (
+    "first release",
+    "first-release",
+    "phased first release",
+)
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _methodology_evidence_text(state: DeliveryState) -> str:
+    discovery = state.get("discovery") or {}
+    requirements = state.get("requirements") or {}
+    solution = state.get("solution") or {}
+    parts = [
+        str(state.get("user_request") or ""),
+        str(discovery.get("problem") or ""),
+        str(discovery.get("business_goal") or ""),
+        " ".join(str(item) for item in discovery.get("constraints") or []),
+        " ".join(str(item) for item in requirements.get("functional_requirements") or []),
+        " ".join(str(item) for item in requirements.get("non_functional_requirements") or []),
+        str(solution.get("solution_summary") or ""),
+        " ".join(str(item) for item in solution.get("dependencies") or []),
+        _clarification_context(state),
+    ]
+    return " ".join(parts).lower()
+
+
+def _populated_items(value) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(str(item).strip() for item in value)
+
+
+def _has_incremental_release_fact(state: DeliveryState, text: str) -> bool:
+    if has_substantive_first_release_scope_answer(state):
+        return True
+    return any(marker in text for marker in _INCREMENTAL_RELEASE_FACTS)
+
+
+def _has_dependency_structure_fact(state: DeliveryState) -> bool:
+    discovery = state.get("discovery") or {}
+    solution = state.get("solution") or {}
+    return (
+        _populated_items(discovery.get("existing_systems"))
+        or _populated_items(solution.get("integration_approach"))
+        or _populated_items(solution.get("dependencies"))
+    )
+
+
+def _methodology_evidence_gaps(state: DeliveryState) -> list[str]:
+    text = _methodology_evidence_text(state)
+    missing = []
+    for label, markers in _METHODOLOGY_EVIDENCE_SIGNALS:
+        if any(marker in text for marker in markers):
+            continue
+        if label == "incremental vs single-cutover release" and _has_incremental_release_fact(state, text):
+            continue
+        if label == "dependency structure" and _has_dependency_structure_fact(state):
+            continue
+        missing.append(label)
+    return missing
+
+
+def _methodology_reference_section(state: DeliveryState) -> str:
+    """Retrieve delivery-methodology guidelines when RAG is enabled."""
+    discovery = state.get("discovery") or {}
+    query = " ".join(
+        part
+        for part in (
+            "delivery methodology Scrum Kanban Waterfall Hybrid selection criteria",
+            str(state.get("user_request") or ""),
+            str(discovery.get("problem") or ""),
+            str(discovery.get("business_goal") or ""),
+        )
+        if part
+    )
+    try:
+        from app.rag.config import rag_enabled
+
+        if not rag_enabled():
+            return ""
+        from app.rag.retrieve import format_reference_section, retrieve_relevant_context
+
+        return format_reference_section(retrieve_relevant_context(query))
+    except Exception:
+        _log.exception("RAG retrieval failed; delivery planning continues without methodology excerpts")
+        return ""
+
+
+def _normalize_delivery_methodology(methodology, state: DeliveryState) -> dict:
+    """Keep a valid pick; lower confidence when selection-criteria evidence is thin."""
+    source = methodology if isinstance(methodology, dict) else {}
+    gaps = _methodology_evidence_gaps(state)
+    evidence_sufficient = len(gaps) <= 4
+
+    recommended = str(source.get("recommended_methodology") or "").strip().upper()
+    confidence = str(source.get("confidence") or "").strip().upper()
+    assumptions = _string_list(source.get("unconfirmed_assumptions"))
+    valid_pick = recommended in _METHODOLOGY_VALUES
+
+    if not valid_pick:
+        recommended = ""
+        confidence = "LOW"
+        for gap in gaps:
+            note = f"Unconfirmed: {gap}."
+            if note not in assumptions:
+                assumptions.append(note)
+        assumptions.append(
+            "A methodology was not selected because the returned value was not one of "
+            "SCRUM, KANBAN, WATERFALL, or HYBRID."
+        )
+    elif not evidence_sufficient:
+        confidence = "LOW"
+        for gap in gaps:
+            note = f"Unconfirmed: {gap}."
+            if note not in assumptions:
+                assumptions.append(note)
+    elif confidence not in _METHODOLOGY_CONFIDENCE:
+        confidence = "LOW"
+
+    if _METHODOLOGY_INDICATIVE not in assumptions:
+        assumptions.append(_METHODOLOGY_INDICATIVE)
+
+    normalized = {
+        "rationale": _string_list(source.get("rationale")),
+        "cadence": str(source.get("cadence") or "").strip(),
+        "core_practices": _string_list(source.get("core_practices")),
+        "governance": _string_list(source.get("governance")),
+        "considered_alternatives": _string_list(source.get("considered_alternatives")),
+        "confidence": confidence,
+        "unconfirmed_assumptions": assumptions,
+    }
+    if recommended:
+        normalized["recommended_methodology"] = recommended
+    return normalized
+
+
+def delivery_plan_without_methodology(plan) -> dict:
+    """Copy of the delivery plan for downstream prompts that must not see methodology."""
+    if not isinstance(plan, dict):
+        return {}
+    stripped = dict(plan)
+    stripped.pop("delivery_methodology", None)
+    return stripped
+
+
 def delivery_planning_agent(
     state: DeliveryState,
     provider: AIProvider,
@@ -1633,6 +1822,7 @@ def delivery_planning_agent(
     requirements = state["requirements"]
     solution = state["solution"]
     clarification_context = _clarification_context(state)
+    methodology_reference = _methodology_reference_section(state)
 
     prompt = f"""
 You are a senior Delivery Manager.
@@ -1662,13 +1852,35 @@ Rules:
 4. Identify roles needed.
 5. Do not invent a specific team size.
 6. Highlight delivery risks.
+7. Also fill optional delivery_methodology from Discovery, Requirements,
+   Solution, and customer clarification facts only.
+8. Use the delivery methodology reference excerpts, when present, as
+   selection guidance. They are not facts about this customer.
+9. Recommend SCRUM, KANBAN, WATERFALL, or HYBRID only when those inputs
+   contain evidence for the selection criteria: requirements stability,
+   planned vs interrupt-driven work, stakeholder feedback, incremental vs
+   single-cutover release, contractual or compliance phase gates, backlog
+   or prioritization maturity, and dependency structure.
+10. Do not invent customer facts to justify a methodology.
+11. If that evidence is insufficient, set confidence to LOW, list the missing
+    criteria in unconfirmed_assumptions, and omit recommended_methodology.
+    Do not choose a methodology merely because the evidence is thin.
+12. delivery_methodology is indicative planning information. It is not a
+    customer commitment, even if a methodology is recommended.
 """
+    if methodology_reference:
+        prompt = f"{prompt.rstrip()}\n\n{methodology_reference}\n"
 
     plan = provider.generate_json(
         prompt=prompt,
         schema=PLAN_SCHEMA,
     )
     plan = _ground_downstream_artifact(plan, state)
+    if isinstance(plan, dict):
+        plan["delivery_methodology"] = _normalize_delivery_methodology(
+            plan.get("delivery_methodology"),
+            state,
+        )
 
     return {
         "delivery_plan": plan,
@@ -1727,7 +1939,7 @@ def estimation_agent(
     discovery = state["discovery"]
     requirements = state["requirements"]
     solution = state["solution"]
-    delivery_plan = state["delivery_plan"]
+    delivery_plan = delivery_plan_without_methodology(state["delivery_plan"])
     clarification_context = _clarification_context(state)
 
     timeline_sources = deadline_source_texts(
@@ -1932,7 +2144,7 @@ def ai_optimization_agent(
     discovery = state.get("discovery", {}) or {}
     requirements = state.get("requirements", {}) or {}
     solution = state.get("solution", {}) or {}
-    delivery_plan = state.get("delivery_plan", {}) or {}
+    delivery_plan = delivery_plan_without_methodology(state.get("delivery_plan", {}) or {})
     estimate = state.get("estimate", {}) or {}
     clarification_context = _clarification_context(state)
 
@@ -2274,7 +2486,7 @@ def sow_agent(
     discovery = state["discovery"]
     requirements = state["requirements"]
     solution = state["solution"]
-    delivery_plan = state["delivery_plan"]
+    delivery_plan = delivery_plan_without_methodology(state["delivery_plan"])
     estimate = state["estimate"]
     clarification_context = _clarification_context(state)
 
@@ -2548,7 +2760,7 @@ def delivery_review_agent(
     discovery = state["discovery"]
     requirements = state["requirements"]
     solution = state["solution"]
-    delivery_plan = state["delivery_plan"]
+    delivery_plan = delivery_plan_without_methodology(state["delivery_plan"])
     estimate = state["estimate"]
     ai_optimization = state.get("ai_optimization")
 
