@@ -605,7 +605,10 @@
         }
 
         .artifact-panel { display: none; }
-        .artifact-panel.active { display: block; }
+        .artifact-panel.active {
+            display: block;
+            scroll-margin-top: 16px;
+        }
 
         .section-kicker {
             color: var(--muted);
@@ -1666,6 +1669,23 @@
             panel.classList.remove("printing");
         });
         currentArtifactTab = tabName;
+        const panel = document.getElementById(`panel-${tabName}`);
+        if (!panel || !panel.classList.contains("active")) {
+            return;
+        }
+        requestAnimationFrame(() => {
+            if (!panel.isConnected || !panel.classList.contains("active")) {
+                return;
+            }
+            const main = document.querySelector(".app-main");
+            if (main) {
+                const offset = panel.getBoundingClientRect().top
+                    - main.getBoundingClientRect().top
+                    + main.scrollTop;
+                main.scrollTo({ top: Math.max(0, offset), behavior: "smooth" });
+            }
+            panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
     }
 
     function formatExportSection(title, value) {

@@ -174,6 +174,11 @@ def test_sidebar_artifact_buttons_call_select_tab():
     assert tabs.count("class=\"artifact-tab") == 10
     assert INDEX.count('id="artifactTabs"') == 1
     assert "function selectTab" in INDEX
+    select_tab_fn = INDEX.split("function selectTab", 1)[1].split("function formatExportSection", 1)[0]
+    assert "requestAnimationFrame" in select_tab_fn
+    assert 'scrollIntoView({ behavior: "smooth", block: "start" })' in select_tab_fn
+    assert "main.scrollTo" in select_tab_fn
+    assert "panel-${tabName}" in select_tab_fn
     assert 'closest(".artifact-tab")' in INDEX
     assert 'addEventListener("click"' in INDEX
     assert ", true)" in INDEX.split('closest(".artifact-tab")', 1)[1][:400]
