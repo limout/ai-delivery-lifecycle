@@ -846,9 +846,17 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+def _config_build() -> str:
+    commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
+    return commit[:7]
+
+
 @router.get("/config")
 def config() -> dict:
-    return {"ai_provider": os.getenv("AI_PROVIDER", "gemini").lower()}
+    return {
+        "ai_provider": os.getenv("AI_PROVIDER", "gemini").lower(),
+        "build": _config_build(),
+    }
 
 
 @router.post("/rag/ingest")

@@ -15,6 +15,25 @@ def test_health():
     assert response.json() == {"status": "ok"}
 
 
+def test_config_build_from_render_git_commit(monkeypatch):
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "8f3a21c9abcdef012345")
+    monkeypatch.setenv("AI_PROVIDER", "mock")
+    response = client.get("/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ai_provider"] == "mock"
+    assert data["build"] == "8f3a21c"
+
+
+def test_config_build_empty_when_commit_missing(monkeypatch):
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    response = client.get("/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert "ai_provider" in data
+    assert data["build"] == ""
+
+
 def test_analyze_needs_info_has_structured_questions():
     response = client.post(
         "/analyze",
@@ -133,6 +152,9 @@ def test_home_page():
     assert "before you commit to a date" in response.text
     assert "Tell the Copilot what needs to be delivered" in response.text
     assert 'class="app-shell"' in response.text
+    assert 'id="appBuild"' in response.text
+    assert "function loadBuildLabel" in response.text
+    assert 'fetch("/config")' in response.text
     assert "data-client-name" in response.text
     assert "function resolveClientName" in response.text
     assert 'id="optimizeButton"' not in response.text
