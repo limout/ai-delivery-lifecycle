@@ -13,9 +13,12 @@ from app.evidence import (
 )
 from app.timeline import (
     WEEKS_PER_MONTH,
+    classify_date_commitment,
+    commitment_status_fact,
     deadline_source_texts,
     parse_customer_estimate,
     parse_requested_deadline,
+    stated_date_phrase,
 )
 
 _log = logging.getLogger("app.agents")
@@ -2692,6 +2695,9 @@ def _extract_explicit_timeline_facts(request: str) -> list[str]:
     estimate = parse_customer_estimate([request])
     if deadline:
         facts.append(f"Target delivery timeline: {deadline.display}")
+        status = commitment_status_fact(classify_date_commitment([request]))
+        if status:
+            facts.append(status)
     if estimate:
         facts.append(f"Customer-provided estimate: {estimate.display}")
     return facts
@@ -2773,10 +2779,35 @@ def _parse_max_months(constraints: list[str]) -> float | None:
     return min(values) if values else None
 
 
+_BINDING_DATE_CLAIM = re.compile(
+    r"(?:(?:a|an|the)\s+)?(?:mandatory|binding|contractual|hard|required|explicit)\s+"
+    r"(?:customer\s+)?(?:target\s+)?(?:delivery\s+)?(?:deadline|timeline)|"
+    r"explicit customer deadline|"
+    r"mandatory target delivery timeline",
+    re.I,
+)
+
+
+def _rewrite_commitment_overclaim(text: str, kind: str) -> str:
+    """Replace invented binding-deadline language when the source is not contractual."""
+    if kind == "contractual" or not str(text or "").strip():
+        return text
+    replacement = stated_date_phrase(kind)
+    if kind == "unspecified":
+        replacement = "stated delivery date (commitment status unconfirmed)"
+    updated = _BINDING_DATE_CLAIM.sub(replacement, str(text))
+    return updated
+
+
+def _sanitize_review_commitment_language(items: list, kind: str) -> list:
+    return [_rewrite_commitment_overclaim(str(item), kind) for item in (items or [])]
+
+
 def _deterministic_delivery_gate(
     discovery: dict,
     requirements: dict,
     estimate: dict,
+    source_text: str = "",
 ) -> tuple[list[str], list[str], list[str]]:
     """Enforce objective delivery invariants independently of the LLM."""
     blocking: list[str] = []
@@ -2784,33 +2815,38 @@ def _deterministic_delivery_gate(
     checks: list[str] = []
 
     # 1. Deadline feasibility is an assessment, not an automatic customer blocker.
-    requested = parse_requested_deadline(discovery.get("constraints", []))
+    constraint_texts = [str(item) for item in discovery.get("constraints", []) or []]
+    requested = parse_requested_deadline(constraint_texts)
     deadline_weeks = requested.weeks if requested is not None else None
     estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
-    customer_estimate = parse_customer_estimate(discovery.get("constraints", []))
+    customer_estimate = parse_customer_estimate(constraint_texts)
+    date_kind = classify_date_commitment([source_text, *constraint_texts])
+    date_label = stated_date_phrase(date_kind)
 
     if deadline_weeks is not None and estimate_max_weeks is not None:
         if customer_estimate is not None and customer_estimate.weeks > deadline_weeks:
             fit = str(estimate.get("standard_deadline_fit") or "").upper()
             if fit == "FITS":
                 warnings.append(
-                    "The customer-provided baseline exceeds the deadline, but the independent "
+                    f"The customer-provided baseline exceeds the {date_label}, but the independent "
                     "estimate does not. Keep the customer baseline as reference only; do not "
                     "treat the date as proven by the customer's own estimate."
                 )
             else:
                 warnings.append(
-                    "Customer baseline exceeds the deadline. Deadline feasibility is not demonstrated "
+                    f"Customer baseline exceeds the {date_label}. Feasibility is not demonstrated "
                     "by the current independent estimate; an explicit AI-optimized scenario is required "
                     "before claiming the target is achievable."
                 )
         elif estimate_max_weeks > deadline_weeks:
             warnings.append(
-                "The current AI delivery scenario exceeds the explicit customer deadline; "
+                f"The current AI delivery scenario exceeds the {date_label}; "
                 "this is a feasibility risk, not by itself a customer clarification blocker."
             )
         else:
-            checks.append("The current delivery scenario does not exceed the explicit customer deadline.")
+            checks.append(
+                f"The current delivery scenario does not exceed the {date_label}."
+            )
     else:
         warnings.append("A machine-checkable customer deadline or estimate duration was not available.")
 
@@ -2868,6 +2904,11 @@ def delivery_review_agent(
     delivery_plan = delivery_plan_without_methodology(state["delivery_plan"])
     estimate = state["estimate"]
     ai_optimization = state.get("ai_optimization")
+    clarification_context = _clarification_context(state)
+    source = customer_authored_text(state)
+    date_kind = classify_date_commitment(
+        [source, *[str(item) for item in discovery.get("constraints") or []]]
+    )
 
     prompt = f"""
 You are a senior Delivery Lead performing a cross-agent quality gate
@@ -2876,6 +2917,10 @@ before a customer proposal and Statement of Work are produced.
 Review the artifacts below for grounding, consistency, and delivery
 feasibility.
 
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
+{clarification_context}
 DISCOVERY:
 {discovery}
 
@@ -2929,6 +2974,12 @@ Rules:
 13. If there are no material blockers, return READY.
 14. READY does not mean every project detail is finalized; it means the
     available information is sufficient to produce a preliminary delivery package.
+15. Honor the stated date's commitment status. If the source says the date is
+    an internal target and not contractual, do not call it a mandatory, binding,
+    hard, or contractual deadline. Still compare that target with the independent
+    estimate as a planning date; a target can be at risk without being a contract.
+    An aspirational date is not a deadline. If commitment status is unconfirmed,
+    say so rather than inventing a contract.
 """
 
     review = provider.generate_json(
@@ -2940,6 +2991,7 @@ Rules:
         discovery=discovery,
         requirements=requirements,
         estimate=estimate,
+        source_text=source,
     )
 
     # The LLM review is advisory. It can identify risks, inconsistencies and
@@ -3010,9 +3062,9 @@ Rules:
 
     if deadline_review_removed:
         warnings.append(
-            "The standard delivery estimate does not demonstrate the customer's target deadline. "
+            f"The standard delivery estimate does not demonstrate the {stated_date_phrase(date_kind)}. "
             "AI optimization is optional and must be run separately before assessing whether AI-native "
-            "delivery can close the remaining deadline gap."
+            "delivery can close the remaining date gap."
         )
     for issue in deterministic_blocking:
         if issue not in blocking_issues:
@@ -3085,6 +3137,9 @@ Rules:
         )
 
     status = "BLOCKED" if blocking_issues else "READY"
+    warnings = _sanitize_review_commitment_language(warnings, date_kind)
+    checks = _sanitize_review_commitment_language(checks, date_kind)
+    blocking_issues = _sanitize_review_commitment_language(blocking_issues, date_kind)
 
     return {
         "delivery_review": {
