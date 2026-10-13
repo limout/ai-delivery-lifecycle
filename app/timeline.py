@@ -43,6 +43,51 @@ _ESTIMATE_MARKERS = (
     "we currently estimate", "our estimate", "team estimate",
 )
 
+COMMITMENT_CONTRACTUAL = "contractual"
+COMMITMENT_INTERNAL_TARGET = "internal_target"
+COMMITMENT_ASPIRATIONAL = "aspirational"
+COMMITMENT_UNSPECIFIED = "unspecified"
+
+_NOT_CONTRACTUAL = re.compile(
+    r"\b(?:not|non)[-\s](?:a\s+)?(?:contractual|binding|mandatory)\b",
+    re.I,
+)
+_INTERNAL_TARGET = re.compile(
+    r"\b(?:internal\s+target|planning\s+target|planning\s+date|"
+    r"planning\s+horizon|flexible\s+target)\b",
+    re.I,
+)
+_CONTRACTUAL_CLAIM = re.compile(
+    r"\b(?:contractual\s+deadline|binding\s+deadline|mandatory\s+deadline|"
+    r"hard\s+deadline|fixed\s+deadline|legally\s+binding|"
+    r"liquidated\s+damages|penalt(?:y|ies)\b.{0,40}\bmiss|"
+    r"date\s+is\s+contractual|deadline\s+is\s+contractual|"
+    r"contractually\s+(?:required|binding|committed)|"
+    r"is\s+a\s+contractual\s+(?:deadline|commitment|date))\b",
+    re.I,
+)
+_ASPIRATIONAL = re.compile(
+    r"\b(?:aspirational|stretch\s+goal|if\s+possible|"
+    r"nice(?:-|\s+)to(?:-|\s+)have|hope\s+to|hoping\s+to)\b",
+    re.I,
+)
+_STATED_DATE_PHRASE = {
+    COMMITMENT_CONTRACTUAL: "contractual customer deadline",
+    COMMITMENT_INTERNAL_TARGET: "stated internal target",
+    COMMITMENT_ASPIRATIONAL: "stated aspirational date",
+    COMMITMENT_UNSPECIFIED: "stated delivery date",
+}
+_COMMITMENT_FACT = {
+    COMMITMENT_INTERNAL_TARGET: (
+        "The stated date is an internal planning target, not a contractual "
+        "or mandatory deadline."
+    ),
+    COMMITMENT_CONTRACTUAL: "The stated date is a contractual delivery deadline.",
+    COMMITMENT_ASPIRATIONAL: (
+        "The stated date is an aspirational planning preference, not a deadline."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class TimelineSpan:
@@ -170,6 +215,51 @@ def collect_spans(texts: list[str] | None) -> list[TimelineSpan]:
     for text in texts or []:
         spans.extend(extract_timeline_spans(str(text)))
     return spans
+
+
+def _blob(texts: list[str] | None) -> str:
+    return " ".join(str(item) for item in (texts or []) if str(item).strip())
+
+
+def _has_positive_contractual_claim(text: str) -> bool:
+    for match in _CONTRACTUAL_CLAIM.finditer(text or ""):
+        before = text[max(0, match.start() - 24):match.start()].lower()
+        if re.search(r"\b(?:not|non)[-\s](?:a\s+)?$", before):
+            continue
+        if before.rstrip().endswith("not a") or before.rstrip().endswith("not"):
+            continue
+        return True
+    return False
+
+
+def classify_date_commitment(texts: list[str] | None) -> str:
+    """Classify a stated date as contractual, internal target, aspirational, or unspecified.
+
+    Does not invent a contract when the source is silent. Explicit non-contractual
+    or internal-target language wins over a nearby use of the word deadline.
+    """
+    blob = _blob(texts)
+    if not blob.strip():
+        return COMMITMENT_UNSPECIFIED
+    not_contractual = bool(_NOT_CONTRACTUAL.search(blob))
+    internal = bool(_INTERNAL_TARGET.search(blob))
+    contractual = _has_positive_contractual_claim(blob)
+    aspirational = bool(_ASPIRATIONAL.search(blob))
+    if contractual and not not_contractual:
+        return COMMITMENT_CONTRACTUAL
+    if not_contractual or internal:
+        return COMMITMENT_INTERNAL_TARGET
+    if aspirational:
+        return COMMITMENT_ASPIRATIONAL
+    return COMMITMENT_UNSPECIFIED
+
+
+def stated_date_phrase(kind: str) -> str:
+    return _STATED_DATE_PHRASE.get(kind, _STATED_DATE_PHRASE[COMMITMENT_UNSPECIFIED])
+
+
+def commitment_status_fact(kind: str) -> str:
+    return _COMMITMENT_FACT.get(kind, "")
 
 
 def parse_requested_deadline(texts: list[str] | None) -> TimelineSpan | None:
