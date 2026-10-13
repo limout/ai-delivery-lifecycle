@@ -30,6 +30,7 @@ from app.backlog_client import (
     BacklogDownstreamError,
     BacklogGenerationUnconfirmedError,
     BacklogNotReadyError,
+    BacklogUnauthorizedError,
     BacklogUnavailableError,
     backlog_status,
     generate_backlog,
@@ -894,6 +895,14 @@ async def create_backlog(payload: dict):
             content={
                 "error": "BACKLOG_STARTING",
                 "message": "Backlog Agent did not become ready in time.",
+            },
+        )
+    except BacklogUnauthorizedError:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "BACKLOG_UNAUTHORIZED",
+                "message": "Backlog Agent authentication failed.",
             },
         )
     except BacklogUnavailableError:

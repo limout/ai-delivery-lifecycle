@@ -21,9 +21,150 @@ def is_complete_envelope(data):
     )
 
 
-def can_generate_backlog(current_data, agent_status, generating=False):
+def can_generate_backlog(current_data, agent_status, generating=False, pending=False):
     """Mirrors canGenerateBacklog() in app/static/index.html."""
-    return is_complete_envelope(current_data) and agent_status == "ready" and not generating
+    return (
+        is_complete_envelope(current_data)
+        and agent_status == "ready"
+        and not generating
+        and not pending
+    )
+
+
+def can_queue_backlog_generate(
+    current_data,
+    agent_status,
+    generating=False,
+    pending=False,
+    startup_failed=False,
+):
+    """Mirrors canQueueBacklogGenerate() in app/static/index.html."""
+    return (
+        is_complete_envelope(current_data)
+        and not generating
+        and not pending
+        and not startup_failed
+        and agent_status not in {"not_configured", "unauthorized"}
+        and agent_status in {"ready", "starting", "unknown"}
+    )
+
+
+WAKE_BUDGET_MS = 90000
+WAKE_POLL_MS = 3000
+IDLE_POLL_MS = 60000
+PERMANENT_STATUSES = {"not_configured", "unauthorized"}
+
+
+class BacklogWakeUi:
+    """Deterministic stand-in for Copilot Backlog wake/generate UI state."""
+
+    def __init__(self):
+        self.status = "unknown"
+        self.pending_generate = False
+        self.generating = False
+        self.startup_failed = False
+        self.wake_deadline = 0
+        self.generate_posts = 0
+        self.poll_interval_ms = IDLE_POLL_MS
+        self.status_in_flight = False
+        self.status_checks = 0
+        self.error = ""
+        self.retry_visible = False
+        self.label = "Backlog Agent availability is unknown."
+
+    def _label(self):
+        if self.status == "ready":
+            return "Backlog Agent is ready."
+        if self.status == "starting":
+            return "Starting backlog service…"
+        if self.status == "not_configured":
+            return "Backlog Agent is not configured on the server."
+        if self.status == "unauthorized":
+            return "Backlog Agent authentication failed."
+        if self.startup_failed:
+            return "Backlog Agent did not become ready in time."
+        if self.status == "unavailable":
+            return "Backlog Agent is unavailable."
+        return "Backlog Agent availability is unknown."
+
+    def apply_status(self, status, now_ms):
+        known = {"ready", "starting", "unavailable", "not_configured", "unauthorized"}
+        next_status = status if status in known else "unavailable"
+        if next_status in PERMANENT_STATUSES:
+            self.status = next_status
+            self.startup_failed = False
+            self.pending_generate = False
+            self.wake_deadline = 0
+        elif next_status == "ready":
+            self.status = "ready"
+            self.startup_failed = False
+            self.wake_deadline = 0
+        elif next_status in {"starting", "unavailable"}:
+            if not self.wake_deadline:
+                self.wake_deadline = now_ms + WAKE_BUDGET_MS
+            if now_ms >= self.wake_deadline:
+                self.status = "unavailable"
+                self.startup_failed = True
+                self.pending_generate = False
+            else:
+                self.status = "starting"
+                self.startup_failed = False
+        self.retry_visible = self.startup_failed
+        self.label = self._label()
+        self.poll_interval_ms = WAKE_POLL_MS if self._needs_wake() else IDLE_POLL_MS
+
+    def _needs_wake(self):
+        if self.status in PERMANENT_STATUSES or self.startup_failed or self.status == "ready":
+            return False
+        return self.status in {"starting", "unknown"} or self.pending_generate
+
+    def open_tab(self, now_ms=0):
+        if not self.wake_deadline and not self.startup_failed and self.status not in PERMANENT_STATUSES:
+            self.wake_deadline = now_ms + WAKE_BUDGET_MS
+
+    def retry(self, now_ms):
+        self.startup_failed = False
+        self.wake_deadline = now_ms + WAKE_BUDGET_MS
+        self.error = ""
+        if self.status != "ready":
+            self.status = "starting"
+        self.retry_visible = False
+        self.label = self._label()
+        self.poll_interval_ms = WAKE_POLL_MS
+
+    def click_generate(self):
+        if self.generating:
+            return
+        if self.status != "ready":
+            if not can_queue_backlog_generate(
+                {"status": "COMPLETE", "workflow_status": "COMPLETE"},
+                self.status,
+                generating=self.generating,
+                pending=self.pending_generate,
+                startup_failed=self.startup_failed,
+            ):
+                return
+            self.pending_generate = True
+            return
+        self._post_generate_once()
+
+    def _post_generate_once(self):
+        if self.generating:
+            return
+        self.pending_generate = False
+        self.generating = True
+        self.generate_posts += 1
+        self.generating = False
+
+    def on_status(self, status, now_ms):
+        if self.status_in_flight:
+            return
+        self.status_in_flight = True
+        self.status_checks += 1
+        self.apply_status(status, now_ms)
+        self.status_in_flight = False
+        if self.pending_generate and not self.generating and self.status == "ready":
+            self._post_generate_once()
 
 
 def should_poll_backlog_status(current_tab, page_hidden):
@@ -323,9 +464,8 @@ def test_generate_posts_copilot_backlog_once_with_envelope():
     assert "const envelope = currentData;" in source
     assert "isCompleteEnvelope(envelope)" in source
     assert "backlogGenerating" in source
-    assert "retry" not in source.lower()
+    assert "backlogPendingGenerate" in source
     assert "selectTab('backlog')" not in source
-    open_workspace = INDEX.split("function startBacklogStatusPolling", 1)[0]
     assert "generateBacklog()" not in INDEX.split("function selectTab", 1)[1].split("function formatExportSection", 1)[0]
 
 
@@ -339,6 +479,8 @@ def test_generation_failure_preserves_analysis_contract():
 
 def test_polling_only_while_backlog_visible():
     assert "const BACKLOG_POLL_MS = 60000;" in INDEX
+    assert "const BACKLOG_WAKE_POLL_MS = 3000;" in INDEX
+    assert "const BACKLOG_WAKE_BUDGET_MS = 90000;" in INDEX
     assert "function shouldPollBacklogStatus()" in INDEX
     assert 'currentArtifactTab === "backlog" && !document.hidden' in INDEX
     assert "visibilitychange" in INDEX
@@ -353,6 +495,116 @@ def test_polling_only_while_backlog_visible():
     assert should_poll_backlog_status("estimate", False) is False
     assert "if (backlogStatusInFlight) return;" in INDEX
     assert "if (!shouldPollBacklogStatus()) return;" in INDEX.split("async function checkBacklogStatus", 1)[1]
+    assert "if (backlogPollTimer && backlogPollIntervalMs === interval) return;" in INDEX
+
+
+def test_cold_start_ui_already_awake():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("ready", 0)
+    assert ui.status == "ready"
+    assert ui.label == "Backlog Agent is ready."
+    assert ui.poll_interval_ms == IDLE_POLL_MS
+    envelope = {"status": "COMPLETE", "workflow_status": "COMPLETE"}
+    assert can_generate_backlog(envelope, ui.status) is True
+    ui.click_generate()
+    assert ui.generate_posts == 1
+
+
+def test_cold_start_ui_recovers_after_initial_failure():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("starting", 0)
+    assert ui.label == "Starting backlog service…"
+    assert ui.poll_interval_ms == WAKE_POLL_MS
+    ui.on_status("ready", 3000)
+    assert ui.status == "ready"
+    assert ui.poll_interval_ms == IDLE_POLL_MS
+
+
+def test_cold_start_ui_multiple_checks_then_ready():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    for now in (0, 3000, 6000, 9000):
+        ui.on_status("starting", now)
+        assert ui.status == "starting"
+        assert not ui.startup_failed
+    ui.on_status("ready", 12000)
+    assert ui.status == "ready"
+    assert ui.label == "Backlog Agent is ready."
+
+
+def test_cold_start_ui_timeout_then_retry():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("starting", 0)
+    ui.on_status("starting", WAKE_BUDGET_MS)
+    assert ui.startup_failed is True
+    assert ui.retry_visible is True
+    assert "did not become ready" in ui.label
+    ui.retry(WAKE_BUDGET_MS + 1000)
+    assert ui.startup_failed is False
+    assert ui.retry_visible is False
+    ui.on_status("ready", WAKE_BUDGET_MS + 4000)
+    assert ui.status == "ready"
+
+
+def test_cold_start_ui_permanent_config_does_not_retry():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("not_configured", 0)
+    assert ui.status == "not_configured"
+    assert ui.poll_interval_ms == IDLE_POLL_MS
+    assert ui.pending_generate is False
+    envelope = {"status": "COMPLETE", "workflow_status": "COMPLETE"}
+    assert can_queue_backlog_generate(envelope, "not_configured") is False
+    ui.click_generate()
+    assert ui.generate_posts == 0
+    assert ui.pending_generate is False
+
+
+def test_cold_start_ui_unauthorized_stops_wake():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("unauthorized", 0)
+    assert ui.status == "unauthorized"
+    assert "authentication failed" in ui.label
+    envelope = {"status": "COMPLETE", "workflow_status": "COMPLETE"}
+    assert can_queue_backlog_generate(envelope, "unauthorized") is False
+
+
+def test_concurrent_status_checks_do_not_stack():
+    ui = BacklogWakeUi()
+    ui.status_in_flight = True
+    ui.on_status("ready", 0)
+    assert ui.status_checks == 0
+    assert ui.status == "unknown"
+    ui.status_in_flight = False
+    ui.on_status("ready", 0)
+    assert ui.status_checks == 1
+
+
+def test_pending_generate_resumes_once():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("starting", 0)
+    ui.click_generate()
+    ui.click_generate()
+    assert ui.pending_generate is True
+    assert ui.generate_posts == 0
+    ui.on_status("ready", 6000)
+    assert ui.generate_posts == 1
+    ui.on_status("ready", 9000)
+    assert ui.generate_posts == 1
+
+
+def test_ui_exposes_retry_without_agent_token():
+    assert 'id="retryBacklogButton"' in INDEX
+    assert "Starting backlog service…" in INDEX
+    assert "retryBacklogStartup" in INDEX
+    script = INDEX.split("<script>", 1)[1]
+    assert "BACKLOG_API_TOKEN" not in script
+    assert "Bearer " not in script
 
 
 def test_new_analysis_does_not_keep_previous_backlog():

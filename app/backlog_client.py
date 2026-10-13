@@ -13,10 +13,12 @@ import httpx
 _LOG = logging.getLogger("app.backlog_client")
 
 _DEFAULT_GENERATE_TIMEOUT = 300.0
-_DEFAULT_STARTUP_TIMEOUT = 120.0
-_STATUS_HEALTH_TIMEOUT = 2.0
-_POLL_HEALTH_TIMEOUT = 3.0
+_DEFAULT_STARTUP_TIMEOUT = 90.0
+_STATUS_HEALTH_TIMEOUT = 5.0
+_POLL_HEALTH_TIMEOUT = 5.0
 _POLL_INTERVAL_SECONDS = 1.0
+_TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+_AUTH_HTTP = frozenset({401, 403})
 
 
 class BacklogConfigError(Exception):
@@ -29,6 +31,10 @@ class BacklogNotReadyError(Exception):
 
 class BacklogUnavailableError(Exception):
     """Backlog Agent is not reachable or not healthy."""
+
+
+class BacklogUnauthorizedError(Exception):
+    """Backlog Agent rejected the bearer token."""
 
 
 class BacklogGenerationUnconfirmedError(Exception):
@@ -78,32 +84,51 @@ def _health_is_ready(response: httpx.Response) -> bool:
     return str(payload.get("status") or "").strip().lower() in {"ok", "ready"}
 
 
+def _status_payload(status: str) -> dict[str, bool | str]:
+    return {"available": status == "ready", "status": status}
+
+
+def _classify_health_response(response: httpx.Response) -> str:
+    if _health_is_ready(response):
+        return "ready"
+    code = response.status_code
+    if code in _AUTH_HTTP:
+        return "unauthorized"
+    if code in _TRANSIENT_HTTP:
+        return "starting"
+    return "unavailable"
+
+
+def _classify_health_exception(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        _LOG.info("backlog health check timed out")
+        return "starting"
+    if isinstance(exc, httpx.RequestError):
+        _LOG.info("backlog health check could not connect")
+        return "starting"
+    return "unavailable"
+
+
 async def backlog_status() -> dict[str, bool | str]:
     """One short health check. Does not wait for the startup timeout."""
 
     try:
         url, _token, _generate_timeout, _startup_timeout = _settings()
     except BacklogConfigError:
-        return {"available": False, "status": "unavailable"}
+        return _status_payload("not_configured")
 
     try:
         async with httpx.AsyncClient(timeout=_STATUS_HEALTH_TIMEOUT) as client:
             response = await client.get(f"{url}/health")
-    except httpx.TimeoutException:
-        _LOG.info("backlog health check timed out")
-        return {"available": False, "status": "starting"}
-    except httpx.RequestError:
-        _LOG.info("backlog health check could not connect")
-        return {"available": False, "status": "unavailable"}
+    except Exception as exc:
+        return _status_payload(_classify_health_exception(exc))
 
-    if _health_is_ready(response):
-        return {"available": True, "status": "ready"}
-    return {"available": False, "status": "unavailable"}
+    return _status_payload(_classify_health_response(response))
 
 
 async def _wait_until_ready(url: str, startup_timeout: float) -> None:
     deadline = time.monotonic() + startup_timeout
-    last = "unavailable"
+    last = "starting"
     attempted = False
     while True:
         remaining = deadline - time.monotonic()
@@ -114,9 +139,17 @@ async def _wait_until_ready(url: str, startup_timeout: float) -> None:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(f"{url}/health")
-            if _health_is_ready(response):
+            last = _classify_health_response(response)
+            if last == "ready":
                 return
-            last = "unavailable"
+            if last == "unauthorized":
+                raise BacklogUnauthorizedError
+            if last == "unavailable":
+                raise BacklogUnavailableError
+        except BacklogUnauthorizedError:
+            raise
+        except BacklogUnavailableError:
+            raise
         except httpx.TimeoutException:
             last = "starting"
         except httpx.RequestError:
@@ -146,6 +179,8 @@ async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
         _LOG.info("backlog generation did not return a confirmed result")
         raise BacklogGenerationUnconfirmedError from None
 
+    if response.status_code in _AUTH_HTTP:
+        raise BacklogUnauthorizedError
     if response.status_code == 200:
         try:
             payload = response.json()

@@ -114,19 +114,29 @@ def test_backlog_status_starting_on_timeout(monkeypatch):
     assert response.json() == {"available": False, "status": "starting"}
 
 
-def test_backlog_status_unavailable_on_connection_error(monkeypatch):
+def test_backlog_status_starting_on_connection_error(monkeypatch):
     _configure(monkeypatch)
     _patch_http(monkeypatch, [httpx.ConnectError("connection refused")])
 
     response = client.get("/backlog/status")
 
     assert response.status_code == 200
-    assert response.json() == {"available": False, "status": "unavailable"}
+    assert response.json() == {"available": False, "status": "starting"}
 
 
-def test_backlog_status_unavailable_on_non_success(monkeypatch):
+def test_backlog_status_starting_on_transient_http(monkeypatch):
     _configure(monkeypatch)
     _patch_http(monkeypatch, [_response(503, {"status": "error"})])
+
+    response = client.get("/backlog/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"available": False, "status": "starting"}
+
+
+def test_backlog_status_unavailable_on_permanent_http(monkeypatch):
+    _configure(monkeypatch)
+    _patch_http(monkeypatch, [_response(404, {"detail": "not found"})])
 
     response = client.get("/backlog/status")
 
@@ -134,7 +144,17 @@ def test_backlog_status_unavailable_on_non_success(monkeypatch):
     assert response.json() == {"available": False, "status": "unavailable"}
 
 
-def test_backlog_status_unavailable_when_unconfigured(monkeypatch):
+def test_backlog_status_unauthorized(monkeypatch):
+    _configure(monkeypatch)
+    _patch_http(monkeypatch, [_response(401, {"detail": "unauthorized"})])
+
+    response = client.get("/backlog/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"available": False, "status": "unauthorized"}
+
+
+def test_backlog_status_not_configured(monkeypatch):
     monkeypatch.delenv("BACKLOG_AGENT_URL", raising=False)
     monkeypatch.delenv("BACKLOG_API_TOKEN", raising=False)
     calls = _patch_http(monkeypatch, [])
@@ -142,8 +162,33 @@ def test_backlog_status_unavailable_when_unconfigured(monkeypatch):
     response = client.get("/backlog/status")
 
     assert response.status_code == 200
-    assert response.json() == {"available": False, "status": "unavailable"}
+    assert response.json() == {"available": False, "status": "not_configured"}
     assert calls == []
+    assert AGENT_TOKEN not in response.text
+
+
+def test_backlog_status_does_not_block_on_startup_timeout(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "120")
+    calls = _patch_http(monkeypatch, [httpx.ConnectError("connection refused")])
+
+    response = client.get("/backlog/status")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "starting"
+    assert len(calls) == 1
+
+
+def test_backlog_status_does_not_leak_token(monkeypatch, caplog):
+    _configure(monkeypatch)
+    caplog.set_level("DEBUG")
+    _patch_http(monkeypatch, [_ok_health()])
+
+    response = client.get("/backlog/status")
+
+    assert AGENT_TOKEN not in response.text
+    assert AGENT_TOKEN not in caplog.text
+    assert "Authorization" not in response.text
 
 
 def test_backlog_complete_health_then_single_generate(monkeypatch):
@@ -303,6 +348,45 @@ def test_backlog_generation_timeout_is_unconfirmed(monkeypatch):
     assert "unknown" in data["message"].lower()
     assert "generation failed" not in data["message"].lower()
     assert [call["method"] for call in calls] == ["GET", "POST"]
+
+
+def test_backlog_unauthorized_generate(monkeypatch):
+    _configure(monkeypatch)
+    calls = _patch_http(
+        monkeypatch,
+        [_ok_health(), _response(401, {"detail": "bad token"})],
+    )
+
+    response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    assert response.status_code == 401
+    data = response.json()
+    assert data["error"] == "BACKLOG_UNAUTHORIZED"
+    assert "bad token" not in response.text
+    assert AGENT_TOKEN not in response.text
+    assert [call["method"] for call in calls] == ["GET", "POST"]
+
+
+def test_backlog_unauthorized_health_does_not_generate(monkeypatch):
+    _configure(monkeypatch)
+    calls = _patch_http(monkeypatch, [_response(403, {"detail": "forbidden"})])
+
+    response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "BACKLOG_UNAUTHORIZED"
+    assert all(call["method"] != "POST" for call in calls)
+
+
+def test_backlog_permanent_health_error_does_not_generate(monkeypatch):
+    _configure(monkeypatch)
+    calls = _patch_http(monkeypatch, [_response(404, {"detail": "missing"})])
+
+    response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "BACKLOG_UNAVAILABLE"
+    assert all(call["method"] != "POST" for call in calls)
 
 
 def test_backlog_does_not_retry_generation(monkeypatch):

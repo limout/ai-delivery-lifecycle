@@ -1446,6 +1446,7 @@
                         <h3>Generate</h3>
                         <p id="backlogAgentStatus" class="section-kicker">Backlog Agent availability is unknown.</p>
                         <button id="generateBacklogButton" type="button" disabled>Generate Backlog</button>
+                        <button id="retryBacklogButton" type="button" class="hidden">Retry</button>
                         <p id="backlogGenerateProgress" class="section-kicker hidden">Generating backlog…</p>
                         <p id="backlogGenerateError" class="backlog-error hidden" role="alert"></p>
                     </div>
@@ -2908,14 +2909,24 @@ function updateRunningStatus(message) {
     }
 
     const BACKLOG_POLL_MS = 60000;
+    const BACKLOG_WAKE_POLL_MS = 3000;
+    const BACKLOG_WAKE_BUDGET_MS = 90000;
     const BACKLOG_TYPE_ORDER = ["epic", "feature", "user_story", "task", "subtask"];
+    const BACKLOG_PERMANENT_STATUSES = {
+        not_configured: true,
+        unauthorized: true
+    };
     let backlogAgentStatus = "unknown";
     let backlogGenerating = false;
+    let backlogPendingGenerate = false;
+    let backlogStartupFailed = false;
+    let backlogWakeDeadline = 0;
     let backlogResult = null;
     let backlogResultKey = null;
     let backlogSelectedId = null;
     let backlogExpanded = {};
     let backlogPollTimer = null;
+    let backlogPollIntervalMs = 0;
     let backlogStatusInFlight = false;
     let backlogIndex = null;
 
@@ -2938,11 +2949,35 @@ function updateRunningStatus(message) {
             isCompleteEnvelope(currentData)
             && backlogAgentStatus === "ready"
             && !backlogGenerating
+            && !backlogPendingGenerate
+        );
+    }
+
+    function canQueueBacklogGenerate() {
+        return (
+            isCompleteEnvelope(currentData)
+            && !backlogGenerating
+            && !backlogPendingGenerate
+            && !backlogStartupFailed
+            && !BACKLOG_PERMANENT_STATUSES[backlogAgentStatus]
+            && (backlogAgentStatus === "ready"
+                || backlogAgentStatus === "starting"
+                || backlogAgentStatus === "unknown")
         );
     }
 
     function shouldPollBacklogStatus() {
         return currentArtifactTab === "backlog" && !document.hidden;
+    }
+
+    function needsBacklogWakePolling() {
+        if (!shouldPollBacklogStatus()) return false;
+        if (BACKLOG_PERMANENT_STATUSES[backlogAgentStatus]) return false;
+        if (backlogStartupFailed) return false;
+        if (backlogAgentStatus === "ready") return false;
+        return backlogAgentStatus === "starting"
+            || backlogAgentStatus === "unknown"
+            || backlogPendingGenerate;
     }
 
     function setHidden(id, hidden) {
@@ -2960,13 +2995,19 @@ function updateRunningStatus(message) {
 
     function backlogStatusLabel(status) {
         if (status === "ready") return "Backlog Agent is ready.";
-        if (status === "starting") return "Backlog Agent is starting. Generation is unavailable until it is ready.";
+        if (status === "starting") return "Starting backlog service…";
+        if (status === "not_configured") {
+            return "Backlog Agent is not configured on the server.";
+        }
+        if (status === "unauthorized") return "Backlog Agent authentication failed.";
+        if (backlogStartupFailed) return "Backlog Agent did not become ready in time.";
         if (status === "unavailable") return "Backlog Agent is unavailable.";
         return "Backlog Agent availability is unknown.";
     }
 
     function updateBacklogGenerateButton() {
         const button = document.getElementById("generateBacklogButton");
+        const retryButton = document.getElementById("retryBacklogButton");
         const statusEl = document.getElementById("backlogAgentStatus");
         if (statusEl) {
             if (!isCompleteEnvelope(currentData)) {
@@ -2976,10 +3017,26 @@ function updateRunningStatus(message) {
                 statusEl.textContent = backlogStatusLabel(backlogAgentStatus);
             }
         }
-        if (!button) return;
-        button.disabled = !canGenerateBacklog();
-        button.textContent = backlogGenerating ? "Generating…" : "Generate Backlog";
-        setHidden("backlogGenerateProgress", !backlogGenerating);
+        const waiting = backlogPendingGenerate && !backlogGenerating;
+        if (button) {
+            button.disabled = !canQueueBacklogGenerate();
+            button.textContent = backlogGenerating
+                ? "Generating…"
+                : waiting
+                    ? "Waiting to generate…"
+                    : "Generate Backlog";
+        }
+        if (retryButton) {
+            retryButton.classList.toggle("hidden", !backlogStartupFailed);
+            retryButton.disabled = backlogGenerating;
+        }
+        setHidden("backlogGenerateProgress", !(backlogGenerating || waiting || backlogAgentStatus === "starting"));
+        const progress = document.getElementById("backlogGenerateProgress");
+        if (progress && !progress.classList.contains("hidden")) {
+            progress.textContent = backlogGenerating
+                ? "Generating backlog…"
+                : "Starting backlog service…";
+        }
     }
 
     function clearBacklogViewer() {
@@ -3010,6 +3067,7 @@ function updateRunningStatus(message) {
     function resetBacklogForNewWorkflow() {
         backlogResult = null;
         backlogResultKey = null;
+        backlogPendingGenerate = false;
         setBacklogError("");
         clearBacklogViewer();
         updateBacklogGenerateButton();
@@ -3031,19 +3089,95 @@ function updateRunningStatus(message) {
             clearInterval(backlogPollTimer);
             backlogPollTimer = null;
         }
+        backlogPollIntervalMs = 0;
     }
 
-    function startBacklogStatusPolling() {
-        if (!shouldPollBacklogStatus()) return;
-        checkBacklogStatus();
-        if (backlogPollTimer) return;
+    function desiredBacklogPollInterval() {
+        return needsBacklogWakePolling() ? BACKLOG_WAKE_POLL_MS : BACKLOG_POLL_MS;
+    }
+
+    function ensureBacklogStatusPolling() {
+        if (!shouldPollBacklogStatus()) {
+            stopBacklogStatusPolling();
+            return;
+        }
+        const interval = desiredBacklogPollInterval();
+        if (backlogPollTimer && backlogPollIntervalMs === interval) return;
+        stopBacklogStatusPolling();
+        backlogPollIntervalMs = interval;
         backlogPollTimer = setInterval(() => {
             if (!shouldPollBacklogStatus()) {
                 stopBacklogStatusPolling();
                 return;
             }
             checkBacklogStatus();
-        }, BACKLOG_POLL_MS);
+        }, interval);
+    }
+
+    function startBacklogStatusPolling() {
+        if (!shouldPollBacklogStatus()) return;
+        if (!backlogWakeDeadline && !backlogStartupFailed && !BACKLOG_PERMANENT_STATUSES[backlogAgentStatus]) {
+            backlogWakeDeadline = Date.now() + BACKLOG_WAKE_BUDGET_MS;
+        }
+        checkBacklogStatus();
+        ensureBacklogStatusPolling();
+    }
+
+    function retryBacklogStartup() {
+        backlogStartupFailed = false;
+        backlogWakeDeadline = Date.now() + BACKLOG_WAKE_BUDGET_MS;
+        setBacklogError("");
+        if (backlogAgentStatus !== "ready") {
+            backlogAgentStatus = "starting";
+        }
+        updateBacklogGenerateButton();
+        checkBacklogStatus();
+        ensureBacklogStatusPolling();
+    }
+
+    function maybeResumePendingGenerate() {
+        if (!backlogPendingGenerate || backlogGenerating) return;
+        if (backlogAgentStatus !== "ready") return;
+        backlogPendingGenerate = false;
+        generateBacklog();
+    }
+
+    function applyBacklogStatus(status) {
+        const known = {
+            ready: true,
+            starting: true,
+            unavailable: true,
+            not_configured: true,
+            unauthorized: true
+        };
+        const next = known[status] ? status : "unavailable";
+        if (BACKLOG_PERMANENT_STATUSES[next]) {
+            backlogAgentStatus = next;
+            backlogStartupFailed = false;
+            backlogPendingGenerate = false;
+            backlogWakeDeadline = 0;
+            return;
+        }
+        if (next === "ready") {
+            backlogAgentStatus = "ready";
+            backlogStartupFailed = false;
+            backlogWakeDeadline = 0;
+            return;
+        }
+        if (next === "starting" || next === "unavailable") {
+            const now = Date.now();
+            if (!backlogWakeDeadline) {
+                backlogWakeDeadline = now + BACKLOG_WAKE_BUDGET_MS;
+            }
+            if (now >= backlogWakeDeadline) {
+                backlogAgentStatus = "unavailable";
+                backlogStartupFailed = true;
+                backlogPendingGenerate = false;
+                return;
+            }
+            backlogAgentStatus = "starting";
+            backlogStartupFailed = false;
+        }
     }
 
     async function checkBacklogStatus() {
@@ -3060,24 +3194,41 @@ function updateRunningStatus(message) {
             }
             const status = payload && typeof payload.status === "string"
                 ? payload.status
-                : "unavailable";
-            if (status === "ready" || status === "starting" || status === "unavailable") {
-                backlogAgentStatus = status;
-            } else {
-                backlogAgentStatus = "unavailable";
-            }
+                : "starting";
+            applyBacklogStatus(status);
         } catch (_) {
-            backlogAgentStatus = "unavailable";
+            applyBacklogStatus("starting");
         } finally {
             backlogStatusInFlight = false;
             updateBacklogGenerateButton();
+            ensureBacklogStatusPolling();
+            maybeResumePendingGenerate();
         }
     }
 
     async function generateBacklog() {
-        if (backlogGenerating || !canGenerateBacklog()) return;
+        if (backlogGenerating) return;
         const envelope = currentData;
         if (!isCompleteEnvelope(envelope)) return;
+        if (backlogAgentStatus !== "ready") {
+            if (!canQueueBacklogGenerate()) return;
+            backlogPendingGenerate = true;
+            if (!backlogWakeDeadline || backlogStartupFailed) {
+                backlogWakeDeadline = Date.now() + BACKLOG_WAKE_BUDGET_MS;
+                backlogStartupFailed = false;
+            }
+            if (backlogAgentStatus === "unknown" || backlogAgentStatus === "unavailable") {
+                backlogAgentStatus = "starting";
+            }
+            setBacklogError("");
+            updateBacklogGenerateButton();
+            checkBacklogStatus();
+            ensureBacklogStatusPolling();
+            return;
+        }
+        if (backlogPendingGenerate) {
+            backlogPendingGenerate = false;
+        }
         backlogGenerating = true;
         setBacklogError("");
         updateBacklogGenerateButton();
@@ -3094,9 +3245,22 @@ function updateRunningStatus(message) {
                 payload = null;
             }
             if (!response.ok) {
+                const error = payload && payload.error ? String(payload.error) : "";
                 const message = payload && (payload.message || payload.error)
                     ? String(payload.message || payload.error)
                     : "Backlog generation did not complete.";
+                if (error === "BACKLOG_STARTING") {
+                    backlogPendingGenerate = true;
+                    applyBacklogStatus("starting");
+                    setBacklogError("");
+                    ensureBacklogStatusPolling();
+                    return;
+                }
+                if (error === "BACKLOG_NOT_CONFIGURED") {
+                    applyBacklogStatus("not_configured");
+                } else if (error === "BACKLOG_UNAUTHORIZED") {
+                    applyBacklogStatus("unauthorized");
+                }
                 setBacklogError(message);
                 return;
             }
@@ -3607,6 +3771,10 @@ function updateRunningStatus(message) {
     const generateBacklogButton = document.getElementById("generateBacklogButton");
     if (generateBacklogButton) {
         generateBacklogButton.addEventListener("click", generateBacklog);
+    }
+    const retryBacklogButton = document.getElementById("retryBacklogButton");
+    if (retryBacklogButton) {
+        retryBacklogButton.addEventListener("click", retryBacklogStartup);
     }
     const backlogPanel = document.getElementById("panel-backlog");
     if (backlogPanel) {
