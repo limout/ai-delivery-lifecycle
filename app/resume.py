@@ -18,6 +18,7 @@ from app.agents import (
 )
 from app.evidence import customer_authored_text
 from app.state import DeliveryState
+from app.timeline import sanitize_timeline_constraints
 
 
 _TIMELINE_MARKERS = (
@@ -158,7 +159,10 @@ def apply_clarification_facts(state: DeliveryState) -> dict:
             fact = f"Customer clarification — {question}: {answer}".strip(" —:")
             _add_constraint(fact)
 
-    discovery["constraints"] = constraints
+    discovery["constraints"] = sanitize_timeline_constraints(
+        constraints,
+        [customer_authored_text(state)],
+    )
     discovery = _filter_answered_discovery(discovery, state)
     requirements = _filter_answered_requirement_questions(requirements, state)
 

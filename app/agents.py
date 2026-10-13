@@ -12,12 +12,17 @@ from app.evidence import (
     uncovered_request_outcomes,
 )
 from app.timeline import (
+    COMMITMENT_ASPIRATIONAL,
+    COMMITMENT_CONTRACTUAL,
+    COMMITMENT_INTERNAL_TARGET,
+    COMMITMENT_UNSPECIFIED,
     WEEKS_PER_MONTH,
     classify_date_commitment,
     commitment_status_fact,
     deadline_source_texts,
     parse_customer_estimate,
     parse_requested_deadline,
+    sanitize_timeline_constraints,
     stated_date_phrase,
 )
 
@@ -501,6 +506,14 @@ def _answered_clarification_topics(state: DeliveryState) -> set[str]:
     if has_substantive_first_release_scope_answer(state):
         topics.add("first_release_scope")
 
+    source = customer_authored_text(state) or str(state.get("user_request") or "")
+    if classify_date_commitment([source]) in {
+        COMMITMENT_INTERNAL_TARGET,
+        COMMITMENT_CONTRACTUAL,
+        COMMITMENT_ASPIRATIONAL,
+    }:
+        topics.add("deadline_type")
+
     for record in _clarification_records(state):
         question, body = _record_question_and_answer(record)
         if is_non_substantive_clarification_answer(body):
@@ -535,7 +548,10 @@ def _is_deadline_type_question(text: str) -> bool:
     if _is_penalty_only_question(t):
         return False
     has_date = bool(re.search(
-        r"\b(deadline|date|2-month|two-month|2 month|two month)\b",
+        r"\b(deadline|date|timeline|launch|go-?live|"
+        r"\d+[-\s]?(?:week|month)s?|"
+        r"2-month|two-month|2 month|two month|"
+        r"(?:two|three|four|six|eight|ten|twelve)[-\s](?:week|month)s?)\b",
         t,
     ))
     has_nature = any(marker in t for marker in (
@@ -846,6 +862,10 @@ IMPORTANT RULES:
    confirmed that fact. If scalability for Black Friday traffic is unknown,
    record it as unconfirmed/unknown rather than as an assumption presented
    as fact.
+10. Honor the stated date's commitment status from the original request.
+    An explicitly internal, planning, or non-binding target is not a
+    contractual or mandatory deadline. Do not reclassify it, and do not
+    treat that already-stated status as an unknown or contradiction.
 
 Original customer request:
 
@@ -875,6 +895,11 @@ Original customer request:
             if fact.lower() not in existing_constraint_text:
                 constraints.append(fact)
         discovery["constraints"] = constraints
+    source_text = customer_authored_text(state) or request
+    discovery["constraints"] = sanitize_timeline_constraints(
+        discovery.get("constraints", []) or [],
+        [source_text],
+    )
 
     normalized_assumptions = []
     for item in discovery.get("assumptions", []) or []:
@@ -949,7 +974,50 @@ def _requirements_need_grounding_retry(discovery: dict, requirements: dict) -> b
     return False
 
 
-def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> dict:
+def _is_settled_commitment_contradiction(text: str, source_text: str) -> bool:
+    """True when the model treats an already-stated date status as a conflict."""
+    kind = classify_date_commitment([source_text])
+    if kind == COMMITMENT_UNSPECIFIED:
+        return False
+    lower = str(text or "").lower()
+    nature = any(
+        marker in lower
+        for marker in (
+            "contractual",
+            "binding",
+            "mandatory",
+            "approved delivery",
+            "internal target",
+            "planning target",
+            "non-binding",
+            "not a commitment",
+            "not an approved",
+        )
+    )
+    tension = any(
+        marker in lower
+        for marker in (
+            "contradict",
+            "conflict",
+            "inconsist",
+            "versus",
+            " vs ",
+            "mismatch",
+            "disagrees",
+            "but ",
+            "although",
+            "unclear",
+            "whether",
+        )
+    )
+    return nature and tension
+
+
+def _ground_requirements_to_discovery(
+    discovery: dict,
+    requirements: dict,
+    source_text: str = "",
+) -> dict:
     """Remove unsupported commitments after the model pass."""
     confirmed_text = _flatten_confirmed_discovery(discovery)
     unknown_text = " ".join(str(item) for item in discovery.get("unknowns", [])).lower()
@@ -1071,6 +1139,7 @@ def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> di
             is_non_blocking_ux_gap
             or is_non_blocking_scope_gap
             or is_non_blocking_technical_gap
+            or _is_settled_commitment_contradiction(lower, source_text)
         )
         if is_non_blocking_contradiction:
             # Keep the underlying refinement question as non-blocking when it
@@ -1200,7 +1269,9 @@ IMPORTANT RULES:
 9. If information is insufficient, put the missing detail into
    open_questions rather than inventing an answer.
 10. Identify contradictions between request facts, discovery facts, and
-    requirements.
+    requirements. Do not invent a contradiction when the request already
+    states that a date is an internal or non-binding target rather than a
+    contractual deadline.
 11. Do not treat assumptions as confirmed requirements.
 12. Do not return empty requirement lists when the request or discovery
     contains concrete capabilities or constraints.
@@ -1286,7 +1357,9 @@ Return the complete requirements schema.
             schema=REQUIREMENTS_SCHEMA,
         )
 
-    requirements = _ground_requirements_to_discovery(discovery, requirements)
+    requirements = _ground_requirements_to_discovery(
+        discovery, requirements, source_text=source,
+    )
     requirements = _filter_answered_requirement_questions(requirements, state)
 
     has_any_requirements = any(
@@ -1327,7 +1400,9 @@ request-stated outcome.
             prompt=retry_prompt,
             schema=REQUIREMENTS_SCHEMA,
         )
-        requirements = _ground_requirements_to_discovery(discovery, requirements)
+        requirements = _ground_requirements_to_discovery(
+            discovery, requirements, source_text=source,
+        )
         requirements = _filter_answered_requirement_questions(requirements, state)
 
     return {
@@ -2820,7 +2895,9 @@ def _deterministic_delivery_gate(
     deadline_weeks = requested.weeks if requested is not None else None
     estimate_max_weeks = _parse_max_weeks(estimate.get("duration_range", ""))
     customer_estimate = parse_customer_estimate(constraint_texts)
-    date_kind = classify_date_commitment([source_text, *constraint_texts])
+    date_kind = classify_date_commitment(
+        [source_text] if str(source_text or "").strip() else constraint_texts
+    )
     date_label = stated_date_phrase(date_kind)
 
     if deadline_weeks is not None and estimate_max_weeks is not None:
@@ -2906,9 +2983,7 @@ def delivery_review_agent(
     ai_optimization = state.get("ai_optimization")
     clarification_context = _clarification_context(state)
     source = customer_authored_text(state)
-    date_kind = classify_date_commitment(
-        [source, *[str(item) for item in discovery.get("constraints") or []]]
-    )
+    date_kind = classify_date_commitment([source])
 
     prompt = f"""
 You are a senior Delivery Lead performing a cross-agent quality gate

@@ -49,12 +49,17 @@ COMMITMENT_ASPIRATIONAL = "aspirational"
 COMMITMENT_UNSPECIFIED = "unspecified"
 
 _NOT_CONTRACTUAL = re.compile(
-    r"\b(?:not|non)[-\s](?:a\s+)?(?:contractual|binding|mandatory)\b",
+    r"\b(?:not|non)[-\s](?:a\s+|an\s+)?"
+    r"(?:contractual|binding|mandatory|"
+    r"approved(?:\s+\w+){0,2}\s+commitment|"
+    r"(?:delivery\s+)?commitment)\b",
     re.I,
 )
 _INTERNAL_TARGET = re.compile(
     r"\b(?:internal\s+target|planning\s+target|planning\s+date|"
-    r"planning\s+horizon|flexible\s+target)\b",
+    r"planning\s+horizon|flexible\s+target|"
+    r"this\s+is\s+(?:an?\s+)?(?:internal\s+|planning\s+|non[-\s]binding\s+)?target|"
+    r"a\s+target,\s+not)\b",
     re.I,
 )
 _CONTRACTUAL_CLAIM = re.compile(
@@ -236,7 +241,8 @@ def classify_date_commitment(texts: list[str] | None) -> str:
     """Classify a stated date as contractual, internal target, aspirational, or unspecified.
 
     Does not invent a contract when the source is silent. Explicit non-contractual
-    or internal-target language wins over a nearby use of the word deadline.
+    or internal-target language wins over a nearby use of the word deadline and
+    over a later model-written contractual claim in the same corpus.
     """
     blob = _blob(texts)
     if not blob.strip():
@@ -245,13 +251,42 @@ def classify_date_commitment(texts: list[str] | None) -> str:
     internal = bool(_INTERNAL_TARGET.search(blob))
     contractual = _has_positive_contractual_claim(blob)
     aspirational = bool(_ASPIRATIONAL.search(blob))
-    if contractual and not not_contractual:
-        return COMMITMENT_CONTRACTUAL
     if not_contractual or internal:
         return COMMITMENT_INTERNAL_TARGET
+    if contractual:
+        return COMMITMENT_CONTRACTUAL
     if aspirational:
         return COMMITMENT_ASPIRATIONAL
     return COMMITMENT_UNSPECIFIED
+
+
+def sanitize_timeline_constraints(
+    constraints: list | None,
+    source_texts: list[str] | None,
+) -> list[str]:
+    """Keep duration facts; drop invented contractual claims that contradict the source."""
+    kind = classify_date_commitment(source_texts)
+    status = commitment_status_fact(kind)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in constraints or []:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if (
+            kind != COMMITMENT_CONTRACTUAL
+            and _has_positive_contractual_claim(text)
+            and not _NOT_CONTRACTUAL.search(text)
+        ):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    if status and status.lower() not in seen:
+        cleaned.append(status)
+    return cleaned
 
 
 def stated_date_phrase(kind: str) -> str:

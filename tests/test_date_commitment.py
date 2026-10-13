@@ -1,8 +1,10 @@
 from app.agents import (
     _deterministic_delivery_gate,
     _extract_explicit_timeline_facts,
+    _ground_requirements_to_discovery,
     _rewrite_commitment_overclaim,
     delivery_review_agent,
+    discovery_agent,
 )
 from app.timeline import (
     COMMITMENT_ASPIRATIONAL,
@@ -10,6 +12,7 @@ from app.timeline import (
     COMMITMENT_INTERNAL_TARGET,
     COMMITMENT_UNSPECIFIED,
     classify_date_commitment,
+    sanitize_timeline_constraints,
 )
 from tests.test_phase0 import ScriptedProvider, _estimate_state
 
@@ -29,6 +32,11 @@ ASPIRATIONAL_REQUEST = (
 UNSPECIFIED_REQUEST = (
     "Build a catalog so members can search holdings. "
     "The first production release is in 8 weeks."
+)
+TWELVE_WEEK_INTERNAL_REQUEST = (
+    "Build a catalog so members can search holdings. "
+    "We want to launch in approximately 12 weeks. This is a target, "
+    "not an approved delivery commitment."
 )
 
 
@@ -165,3 +173,139 @@ def test_delivery_review_sanitizes_internal_target_overclaims_and_keeps_the_gap(
     assert "commitment status" in provider.prompts[0].lower()
     assert result["status"] == "READY"
     assert not result["blocking_issues"]
+
+
+def test_twelve_week_non_binding_target_is_source_internal():
+    assert classify_date_commitment([TWELVE_WEEK_INTERNAL_REQUEST]) == (
+        COMMITMENT_INTERNAL_TARGET
+    )
+    assert classify_date_commitment([UNSPECIFIED_REQUEST]) == COMMITMENT_UNSPECIFIED
+    facts = _extract_explicit_timeline_facts(TWELVE_WEEK_INTERNAL_REQUEST)
+    joined = " ".join(facts).lower()
+    assert "12" in joined and "week" in joined
+    assert "internal planning target" in joined
+    assert "not a contractual" in joined
+    assert not any("is a contractual delivery deadline" == item.lower() for item in facts)
+
+
+def test_llm_constraint_cannot_reclassify_a_non_binding_target():
+    mixed = sanitize_timeline_constraints(
+        [
+            "Target delivery timeline: 12 weeks",
+            "The 12-week launch is a contractual deadline.",
+        ],
+        [TWELVE_WEEK_INTERNAL_REQUEST],
+    )
+    blob = " ".join(mixed).lower()
+    assert "internal planning target" in blob
+    assert not any(
+        "contractual" in item.lower() and "not a contractual" not in item.lower()
+        for item in mixed
+    )
+    assert classify_date_commitment([TWELVE_WEEK_INTERNAL_REQUEST, *mixed]) == (
+        COMMITMENT_INTERNAL_TARGET
+    )
+
+
+def test_discovery_keeps_twelve_week_target_non_contractual():
+    provider = ScriptedProvider(
+        {
+            "problem": "Members need a catalog.",
+            "business_goal": "Search holdings.",
+            "users": ["Members"],
+            "stakeholders": [],
+            "existing_systems": [],
+            "constraints": [
+                "The launch in 12 weeks is a contractual deadline.",
+            ],
+            "assumptions": [],
+            "unknowns": [
+                "Whether the 12-week date is a contractual deadline or an internal target",
+            ],
+            "clarification_questions": [
+                "Is the 12-week date a target or a contractual deadline?",
+            ],
+        }
+    )
+    discovery = discovery_agent(
+        {"user_request": TWELVE_WEEK_INTERNAL_REQUEST},
+        provider,
+    )["discovery"]
+    constraints = " ".join(str(item) for item in discovery["constraints"]).lower()
+    assert "internal planning target" in constraints
+    assert "12" in constraints
+    assert not any(
+        "contractual deadline" in str(item).lower()
+        and "not a contractual" not in str(item).lower()
+        for item in discovery["constraints"]
+    )
+    assert discovery["unknowns"] == []
+    assert discovery["clarification_questions"] == []
+
+
+def test_requirements_do_not_contradict_stated_non_binding_target():
+    grounded = _ground_requirements_to_discovery(
+        {
+            "problem": "Members need a catalog.",
+            "business_goal": "Search holdings.",
+            "users": ["Members"],
+            "stakeholders": [],
+            "existing_systems": [],
+            "constraints": _extract_explicit_timeline_facts(TWELVE_WEEK_INTERNAL_REQUEST),
+            "assumptions": [],
+            "unknowns": [],
+        },
+        {
+            "functional_requirements": ["Members can search holdings."],
+            "non_functional_requirements": [],
+            "acceptance_criteria": ["A member can search holdings."],
+            "open_questions": [],
+            "contradictions": [
+                "Discovery treats the 12-week launch as a contractual deadline, "
+                "but the request says it is a target, not an approved delivery commitment."
+            ],
+        },
+        source_text=TWELVE_WEEK_INTERNAL_REQUEST,
+    )
+    assert grounded["contradictions"] == []
+
+
+def test_twelve_week_target_still_compared_to_independent_estimate():
+    facts = _extract_explicit_timeline_facts(TWELVE_WEEK_INTERNAL_REQUEST)
+    blocking, warnings, checks = _deterministic_delivery_gate(
+        discovery={"constraints": facts, "unknowns": []},
+        requirements={
+            "functional_requirements": [],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [],
+        },
+        estimate={"duration_range": "16-20 weeks", "standard_deadline_fit": "EXCEEDS"},
+        source_text=TWELVE_WEEK_INTERNAL_REQUEST,
+    )
+    joined = " ".join(warnings).lower()
+    assert blocking == []
+    assert "exceeds" in joined
+    assert "stated internal target" in joined
+    assert "feasibility" in joined
+    assert "contractual" not in joined
+    assert "mandatory" not in joined
+    assert checks == [] or "contractual" not in " ".join(checks).lower()
+
+    provider = ScriptedProvider(
+        {
+            "status": "READY",
+            "blocking_issues": [],
+            "clarification_questions": [],
+            "warnings": ["The contractual deadline of 12 weeks is at risk."],
+            "checks": [],
+        }
+    )
+    review = delivery_review_agent(
+        _review_state(TWELVE_WEEK_INTERNAL_REQUEST, "16-20 weeks", constraints=facts),
+        provider,
+    )["delivery_review"]
+    blob = " ".join(review["warnings"] + review["checks"]).lower()
+    assert "exceeds" in blob
+    assert "stated internal target" in blob
+    assert "contractual" not in blob
+    assert review["status"] == "READY"
