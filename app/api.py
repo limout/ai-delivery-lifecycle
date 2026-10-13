@@ -29,6 +29,7 @@ from app.backlog_client import (
     BacklogConfigError,
     BacklogDownstreamError,
     BacklogGenerationUnconfirmedError,
+    BacklogInvalidUrlError,
     BacklogNotReadyError,
     BacklogUnauthorizedError,
     BacklogUnavailableError,
@@ -887,6 +888,14 @@ async def create_backlog(payload: dict):
             content={
                 "error": "BACKLOG_NOT_CONFIGURED",
                 "message": "Backlog Agent is not configured.",
+            },
+        )
+    except BacklogInvalidUrlError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "BACKLOG_INVALID_URL",
+                "message": "Backlog Agent URL is invalid.",
             },
         )
     except BacklogNotReadyError:

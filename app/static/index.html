@@ -2910,11 +2910,12 @@ function updateRunningStatus(message) {
 
     const BACKLOG_POLL_MS = 60000;
     const BACKLOG_WAKE_POLL_MS = 3000;
-    const BACKLOG_WAKE_BUDGET_MS = 90000;
+    const BACKLOG_WAKE_BUDGET_MS = 180000;
     const BACKLOG_TYPE_ORDER = ["epic", "feature", "user_story", "task", "subtask"];
     const BACKLOG_PERMANENT_STATUSES = {
         not_configured: true,
-        unauthorized: true
+        unauthorized: true,
+        invalid_url: true
     };
     let backlogAgentStatus = "unknown";
     let backlogGenerating = false;
@@ -2995,12 +2996,13 @@ function updateRunningStatus(message) {
 
     function backlogStatusLabel(status) {
         if (status === "ready") return "Backlog Agent is ready.";
-        if (status === "starting") return "Starting backlog service…";
         if (status === "not_configured") {
             return "Backlog Agent is not configured on the server.";
         }
+        if (status === "invalid_url") return "Backlog Agent URL is invalid.";
         if (status === "unauthorized") return "Backlog Agent authentication failed.";
         if (backlogStartupFailed) return "Backlog Agent did not become ready in time.";
+        if (status === "starting") return "Starting backlog service…";
         if (status === "unavailable") return "Backlog Agent is unavailable.";
         return "Backlog Agent availability is unknown.";
     }
@@ -3148,7 +3150,8 @@ function updateRunningStatus(message) {
             starting: true,
             unavailable: true,
             not_configured: true,
-            unauthorized: true
+            unauthorized: true,
+            invalid_url: true
         };
         const next = known[status] ? status : "unavailable";
         if (BACKLOG_PERMANENT_STATUSES[next]) {
@@ -3164,13 +3167,19 @@ function updateRunningStatus(message) {
             backlogWakeDeadline = 0;
             return;
         }
-        if (next === "starting" || next === "unavailable") {
+        if (next === "unavailable") {
+            backlogAgentStatus = "unavailable";
+            backlogStartupFailed = true;
+            backlogPendingGenerate = false;
+            return;
+        }
+        if (next === "starting") {
             const now = Date.now();
             if (!backlogWakeDeadline) {
                 backlogWakeDeadline = now + BACKLOG_WAKE_BUDGET_MS;
             }
             if (now >= backlogWakeDeadline) {
-                backlogAgentStatus = "unavailable";
+                backlogAgentStatus = "starting";
                 backlogStartupFailed = true;
                 backlogPendingGenerate = false;
                 return;
@@ -3258,6 +3267,8 @@ function updateRunningStatus(message) {
                 }
                 if (error === "BACKLOG_NOT_CONFIGURED") {
                     applyBacklogStatus("not_configured");
+                } else if (error === "BACKLOG_INVALID_URL") {
+                    applyBacklogStatus("invalid_url");
                 } else if (error === "BACKLOG_UNAUTHORIZED") {
                     applyBacklogStatus("unauthorized");
                 }

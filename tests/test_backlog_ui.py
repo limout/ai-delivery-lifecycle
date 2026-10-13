@@ -44,15 +44,15 @@ def can_queue_backlog_generate(
         and not generating
         and not pending
         and not startup_failed
-        and agent_status not in {"not_configured", "unauthorized"}
+        and agent_status not in {"not_configured", "unauthorized", "invalid_url"}
         and agent_status in {"ready", "starting", "unknown"}
     )
 
 
-WAKE_BUDGET_MS = 90000
+WAKE_BUDGET_MS = 180000
 WAKE_POLL_MS = 3000
 IDLE_POLL_MS = 60000
-PERMANENT_STATUSES = {"not_configured", "unauthorized"}
+PERMANENT_STATUSES = {"not_configured", "unauthorized", "invalid_url"}
 
 
 class BacklogWakeUi:
@@ -75,20 +75,22 @@ class BacklogWakeUi:
     def _label(self):
         if self.status == "ready":
             return "Backlog Agent is ready."
-        if self.status == "starting":
-            return "Starting backlog service…"
         if self.status == "not_configured":
             return "Backlog Agent is not configured on the server."
+        if self.status == "invalid_url":
+            return "Backlog Agent URL is invalid."
         if self.status == "unauthorized":
             return "Backlog Agent authentication failed."
         if self.startup_failed:
             return "Backlog Agent did not become ready in time."
+        if self.status == "starting":
+            return "Starting backlog service…"
         if self.status == "unavailable":
             return "Backlog Agent is unavailable."
         return "Backlog Agent availability is unknown."
 
     def apply_status(self, status, now_ms):
-        known = {"ready", "starting", "unavailable", "not_configured", "unauthorized"}
+        known = {"ready", "starting", "unavailable", "not_configured", "unauthorized", "invalid_url"}
         next_status = status if status in known else "unavailable"
         if next_status in PERMANENT_STATUSES:
             self.status = next_status
@@ -99,11 +101,15 @@ class BacklogWakeUi:
             self.status = "ready"
             self.startup_failed = False
             self.wake_deadline = 0
-        elif next_status in {"starting", "unavailable"}:
+        elif next_status == "unavailable":
+            self.status = "unavailable"
+            self.startup_failed = True
+            self.pending_generate = False
+        elif next_status == "starting":
             if not self.wake_deadline:
                 self.wake_deadline = now_ms + WAKE_BUDGET_MS
             if now_ms >= self.wake_deadline:
-                self.status = "unavailable"
+                self.status = "starting"
                 self.startup_failed = True
                 self.pending_generate = False
             else:
@@ -480,7 +486,7 @@ def test_generation_failure_preserves_analysis_contract():
 def test_polling_only_while_backlog_visible():
     assert "const BACKLOG_POLL_MS = 60000;" in INDEX
     assert "const BACKLOG_WAKE_POLL_MS = 3000;" in INDEX
-    assert "const BACKLOG_WAKE_BUDGET_MS = 90000;" in INDEX
+    assert "const BACKLOG_WAKE_BUDGET_MS = 180000;" in INDEX
     assert "function shouldPollBacklogStatus()" in INDEX
     assert 'currentArtifactTab === "backlog" && !document.hidden' in INDEX
     assert "visibilitychange" in INDEX
@@ -538,6 +544,9 @@ def test_cold_start_ui_timeout_then_retry():
     ui = BacklogWakeUi()
     ui.open_tab(0)
     ui.on_status("starting", 0)
+    ui.on_status("starting", 90000)
+    assert ui.startup_failed is False
+    assert ui.status == "starting"
     ui.on_status("starting", WAKE_BUDGET_MS)
     assert ui.startup_failed is True
     assert ui.retry_visible is True
@@ -547,6 +556,18 @@ def test_cold_start_ui_timeout_then_retry():
     assert ui.retry_visible is False
     ui.on_status("ready", WAKE_BUDGET_MS + 4000)
     assert ui.status == "ready"
+
+
+def test_cold_start_ui_invalid_url_does_not_poll():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("invalid_url", 0)
+    assert ui.status == "invalid_url"
+    assert "URL is invalid" in ui.label
+    envelope = {"status": "COMPLETE", "workflow_status": "COMPLETE"}
+    assert can_queue_backlog_generate(envelope, "invalid_url") is False
+    ui.click_generate()
+    assert ui.generate_posts == 0
 
 
 def test_cold_start_ui_permanent_config_does_not_retry():
