@@ -3335,13 +3335,7 @@ function updateRunningStatus(message) {
     }
 
     function renderFindingCard(finding) {
-        const refs = asList(finding.source_references)
-            .filter(item => item && typeof item === "object")
-            .map(ref => {
-                const path = ref.json_path ? escapeHtml(String(ref.json_path)) : "";
-                const excerpt = ref.excerpt ? escapeHtml(String(ref.excerpt)) : "";
-                return `<div class="backlog-id">${path}</div>${excerpt ? `<p>${excerpt}</p>` : ""}`;
-            }).join("");
+        const refs = renderProvenance(finding.source_references);
         const items = asList(finding.canonical_ids).map(id => itemLink(id)).join(" ");
         return `<article class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
             <strong>${escapeHtml(String(finding.severity || "info"))}</strong>
@@ -3379,16 +3373,17 @@ function updateRunningStatus(message) {
         return `<ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
     }
 
+    function sourceExcerpts(references) {
+        return asList(references)
+            .filter(item => item && typeof item === "object")
+            .map(ref => String(ref.excerpt || "").trim())
+            .filter(Boolean);
+    }
+
     function renderProvenance(references) {
-        const items = asList(references).filter(item => item && typeof item === "object");
-        if (!items.length) return '<p class="empty">No source references provided.</p>';
-        return items.map(ref => {
-            const path = ref.json_path ? `<div class="backlog-id">${escapeHtml(String(ref.json_path))}</div>` : "";
-            const field = ref.field_name ? `<div>${escapeHtml(String(ref.field_name))}</div>` : "";
-            const excerpt = ref.excerpt ? `<p>${escapeHtml(String(ref.excerpt))}</p>` : "";
-            const contract = ref.contract_id ? `<div class="backlog-id">${escapeHtml(String(ref.contract_id))}</div>` : "";
-            return `<div class="backlog-field">${contract}${path}${field}${excerpt}</div>`;
-        }).join("");
+        const excerpts = sourceExcerpts(references);
+        if (!excerpts.length) return "";
+        return excerpts.map(excerpt => `<p>${escapeHtml(excerpt)}</p>`).join("");
     }
 
     function renderEffort(effort) {
@@ -3435,6 +3430,7 @@ function updateRunningStatus(message) {
             : "";
         const criteria = renderStringList(item.acceptance_criteria);
         const tests = renderStringList(item.test_requirements);
+        const sourceHtml = renderProvenance(item.provenance);
         const findings = (backlogIndex.findingsByItem.get(String(item.canonical_id || "")) || [])
             .map(finding => `<div class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
                 <strong>${escapeHtml(String(finding.severity || ""))}</strong>
@@ -3457,7 +3453,7 @@ function updateRunningStatus(message) {
             ${tests ? `<div class="backlog-field"><h4>Test requirements</h4>${tests}</div>` : ""}
             ${depsHtml ? `<div class="backlog-field"><h4>Dependencies</h4>${depsHtml}</div>` : ""}
             ${renderEffort(item.effort)}
-            <div class="backlog-field"><h4>Source references</h4>${renderProvenance(item.provenance)}</div>
+            ${sourceHtml ? `<div class="backlog-field"><h4>Source</h4>${sourceHtml}</div>` : ""}
             ${findings ? `<div class="backlog-field"><h4>Related findings</h4>${findings}</div>` : ""}
         `;
     }

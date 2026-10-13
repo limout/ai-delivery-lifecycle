@@ -145,7 +145,13 @@ SAMPLE_PAYLOAD = {
                         "json_path": "$.requirements.functional_requirements[0]",
                         "field_name": "functional_requirements",
                         "excerpt": "Customers can sign in",
-                    }
+                    },
+                    {
+                        "contract_id": "copilot.workflow_response.v1",
+                        "json_path": "$.sow.deliverables[0]",
+                        "field_name": "deliverables",
+                        "excerpt": "Authenticated portal for enterprise customers",
+                    },
                 ],
                 "effort": {"story_points": 5},
             },
@@ -422,9 +428,10 @@ def test_viewer_renders_canonical_hierarchy_and_findings():
     epic = SAMPLE_PAYLOAD["backlog"]["items"][0]
     assert epic["provenance"][0]["json_path"] == "$.requirements.functional_requirements[0]"
     assert epic["provenance"][0]["excerpt"] == "Customers can sign in"
+    assert epic["provenance"][0]["contract_id"] == "copilot.workflow_response.v1"
+    assert epic["provenance"][0]["field_name"] == "functional_requirements"
     assert "data-backlog-item" in INDEX
-    assert "Source references" in INDEX
-    assert "json_path" in INDEX
+    assert "<h4>Source</h4>" in INDEX
     assert "Acceptance criteria" in INDEX
     assert "Test requirements" in INDEX
     assert "Show raw backlog JSON" in INDEX
@@ -466,6 +473,75 @@ def test_findings_are_grouped_without_merging_or_dropping():
     flat = [item for section in sections for group in section["codes"] for item in group["items"]]
     assert len(flat) == 6
     assert {item["message"] for item in findings} == {item["message"] for item in flat}
+
+
+def source_excerpts(references):
+    """Mirrors sourceExcerpts() in app/static/index.html."""
+    items = references if isinstance(references, list) else []
+    excerpts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        excerpt = str(item.get("excerpt") or "").strip()
+        if excerpt:
+            excerpts.append(excerpt)
+    return excerpts
+
+
+def render_provenance_html(references):
+    """Mirrors renderProvenance() in app/static/index.html."""
+    return "".join(f"<p>{excerpt}</p>" for excerpt in source_excerpts(references))
+
+
+def test_item_detail_shows_source_excerpts_not_technical_metadata():
+    epic = SAMPLE_PAYLOAD["backlog"]["items"][0]
+    html = render_provenance_html(epic["provenance"])
+    assert "Customers can sign in" in html
+    assert "Authenticated portal for enterprise customers" in html
+    assert html.index("Customers can sign in") < html.index("Authenticated portal")
+    assert "copilot.workflow_response.v1" not in html
+    assert "$.requirements.functional_requirements[0]" not in html
+    assert "$.sow.deliverables[0]" not in html
+    assert "functional_requirements" not in html
+    assert "deliverables" not in html
+    provenance_fn = INDEX.split("function renderProvenance", 1)[1].split("function renderEffort", 1)[0]
+    assert "excerpt" in provenance_fn
+    assert "contract_id" not in provenance_fn
+    assert "json_path" not in provenance_fn
+    assert "field_name" not in provenance_fn
+    detail_fn = INDEX.split("function renderBacklogDetail", 1)[1].split("function renderBacklogFindings", 1)[0]
+    assert "sourceHtml" in detail_fn
+    assert "<h4>Source</h4>" in detail_fn
+
+
+def test_full_provenance_remains_in_payload_and_raw_json_view():
+    refs = SAMPLE_PAYLOAD["backlog"]["items"][0]["provenance"]
+    assert len(refs) == 2
+    assert refs[0]["contract_id"] == "copilot.workflow_response.v1"
+    assert refs[0]["json_path"] == "$.requirements.functional_requirements[0]"
+    assert refs[0]["field_name"] == "functional_requirements"
+    assert refs[1]["json_path"] == "$.sow.deliverables[0]"
+    assert "Show raw backlog JSON" in INDEX
+    assert "JSON.stringify(payload, null, 2)" in INDEX
+    assert 'id="backlogRawJson"' in INDEX
+
+
+def test_empty_or_missing_excerpts_do_not_break_the_viewer():
+    assert render_provenance_html([]) == ""
+    assert render_provenance_html([{"json_path": "$.x", "field_name": "text", "contract_id": "c"}]) == ""
+    assert render_provenance_html([{"excerpt": "   "}]) == ""
+    assert source_excerpts(SAMPLE_PAYLOAD["backlog"]["items"][1]["provenance"]) == []
+    assert "No source references provided." not in INDEX
+    assert "No description provided." in INDEX
+    finding_fn = INDEX.split("function renderFindingCard", 1)[1].split("function renderBacklogTreeRows", 1)[0]
+    assert "renderProvenance(finding.source_references)" in finding_fn
+    assert "json_path" not in finding_fn
+    warning = SAMPLE_PAYLOAD["findings"]["items"][0]
+    warning_html = render_provenance_html(warning["source_references"])
+    assert "Enterprise customers need self-service" in warning_html
+    assert "$.discovery.problem" not in warning_html
+    error = SAMPLE_PAYLOAD["findings"]["items"][1]
+    assert render_provenance_html(error["source_references"]) == ""
 
 
 def test_empty_and_unknown_fields_are_not_invented():
