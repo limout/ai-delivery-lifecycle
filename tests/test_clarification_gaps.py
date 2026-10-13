@@ -827,3 +827,118 @@ def test_volume_and_roles_both_answered_return_neither():
     assert not [q for q in items if _question_topic(q) == "user_volume"]
     assert not [q for q in items if _question_topic(q) == "roles_permissions"]
 
+
+USERS_QUESTION = "Who will use the first release, and what will they do in it?"
+FIELD_INSPECTION_REQUEST = """
+Build a mobile application for field technicians to complete on-site equipment inspections.
+The first release must integrate with existing systems.
+""".strip()
+USERS_ANSWER = (
+    "Field technicians will complete on-site inspections and submit the results."
+)
+SYSTEMS_ANSWER = (
+    "The existing equipment catalog is the source of truth. "
+    "API access and technical documentation are available and verified."
+)
+
+
+def test_answered_systems_question_is_not_repeated_on_clarify():
+    first = client.post("/analyze", json={"user_request": FIELD_INSPECTION_REQUEST}).json()
+    assert first["status"] == "NEEDS_INFO"
+    asked = _question_text(first.get("blocking_questions"))
+    assert USERS_QUESTION.lower() in asked
+    assert SYSTEMS_QUESTION.lower() in asked
+
+    second = client.post(
+        "/clarify",
+        json={
+            "user_request": FIELD_INSPECTION_REQUEST,
+            "clarification_answers": [
+                f"{USERS_QUESTION}: {USERS_ANSWER}",
+                f"{SYSTEMS_QUESTION}: {SYSTEMS_ANSWER}",
+            ],
+            "iteration": first["iteration"],
+            "run_id": first["run_id"],
+            "prior_state": first,
+            "clarification_history": first.get("clarification_history") or [],
+        },
+    )
+    assert second.status_code == 200
+    data = second.json()
+    asked_again = _question_text(data.get("blocking_questions"))
+    asked_again += " " + _question_text(data.get("clarification_questions"))
+    assert SYSTEMS_QUESTION.lower() not in asked_again
+    assert USERS_QUESTION.lower() not in asked_again
+    assert "integrations" not in _codes({
+        "user_request": FIELD_INSPECTION_REQUEST,
+        "clarification_history": data.get("clarification_history") or [],
+        "clarification_answers": [
+            f"{USERS_QUESTION}: {USERS_ANSWER}",
+            f"{SYSTEMS_QUESTION}: {SYSTEMS_ANSWER}",
+        ],
+    })
+    assert data["status"] != "NEEDS_INFO" or SYSTEMS_QUESTION.lower() not in asked_again
+    assert data["iteration"] == first["iteration"] + 1
+    assert data["status"] in {"COMPLETE", "READY", "BLOCKED"}
+
+    third = client.post(
+        "/clarify",
+        json={
+            "user_request": FIELD_INSPECTION_REQUEST,
+            "clarification_answers": [f"{SYSTEMS_QUESTION}: {SYSTEMS_ANSWER}"],
+            "iteration": data["iteration"],
+            "run_id": data["run_id"],
+            "prior_state": data,
+            "clarification_history": data.get("clarification_history") or [],
+        },
+    )
+    assert third.status_code == 200
+    again = third.json()
+    asked_third = _question_text(again.get("blocking_questions"))
+    asked_third += " " + _question_text(again.get("clarification_questions"))
+    assert SYSTEMS_QUESTION.lower() not in asked_third
+    assert again["status"] in {"COMPLETE", "READY", "BLOCKED"}
+
+
+def test_unanswered_systems_question_still_blocks():
+    first = client.post("/analyze", json={"user_request": FIELD_INSPECTION_REQUEST}).json()
+    assert SYSTEMS_QUESTION.lower() in _question_text(first.get("blocking_questions"))
+
+    second = client.post(
+        "/clarify",
+        json={
+            "user_request": FIELD_INSPECTION_REQUEST,
+            "clarification_answers": [f"{USERS_QUESTION}: {USERS_ANSWER}"],
+            "iteration": first["iteration"],
+            "run_id": first["run_id"],
+            "prior_state": first,
+            "clarification_history": first.get("clarification_history") or [],
+        },
+    )
+    assert second.status_code == 200
+    data = second.json()
+    assert data["status"] == "NEEDS_INFO"
+    asked = _question_text(data.get("blocking_questions"))
+    assert SYSTEMS_QUESTION.lower() in asked
+    assert USERS_QUESTION.lower() not in asked
+
+
+def test_non_substantive_systems_answer_does_not_clear_required_question():
+    first = client.post("/analyze", json={"user_request": FIELD_INSPECTION_REQUEST}).json()
+    second = client.post(
+        "/clarify",
+        json={
+            "user_request": FIELD_INSPECTION_REQUEST,
+            "clarification_answers": [
+                f"{USERS_QUESTION}: {USERS_ANSWER}",
+                f"{SYSTEMS_QUESTION}: I don't know / TBD",
+            ],
+            "iteration": first["iteration"],
+            "run_id": first["run_id"],
+            "prior_state": first,
+            "clarification_history": first.get("clarification_history") or [],
+        },
+    ).json()
+    assert second["status"] == "NEEDS_INFO"
+    assert SYSTEMS_QUESTION.lower() in _question_text(second.get("blocking_questions"))
+

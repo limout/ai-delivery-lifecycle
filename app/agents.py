@@ -7,9 +7,13 @@ from app.evidence import (
     customer_authored_text,
     has_substantive_first_release_scope_answer,
     is_estimable,
+    is_first_release_scope_question,
     is_non_substantive_clarification_answer,
     material_evidence_gaps,
+    normalize_question_text,
+    substantive_answered_questions,
     uncovered_request_outcomes,
+    unpack_clarification_record,
 )
 from app.timeline import (
     COMMITMENT_ASPIRATIONAL,
@@ -518,9 +522,9 @@ def _answered_clarification_topics(state: DeliveryState) -> set[str]:
         question, body = _record_question_and_answer(record)
         if is_non_substantive_clarification_answer(body):
             continue
-        if _question_topic(question) == "deadline_type":
-            topics.add("deadline_type")
-            break
+        topic = _question_topic(question)
+        if topic:
+            topics.add(topic)
 
     return topics
 
@@ -569,11 +573,14 @@ def _question_topic(question: str) -> str | None:
     """Map a clarification question to the canonical topic it resolves."""
     text = str(question or "").lower()
 
-    if any(marker in text for marker in (
-        "first release", "first-release", "in scope", "out of scope",
-        "main capabilities", "core function",
-    )):
+    if is_first_release_scope_question(text):
         return "first_release_scope"
+    if "who will use" in text:
+        return "users"
+    if "source of truth" in text or (
+        "which systems" in text and "integrat" in text
+    ):
+        return "integrations"
     if _is_deadline_type_question(text):
         return "deadline_type"
     if any(marker in text for marker in (
@@ -598,7 +605,7 @@ def _question_topic(question: str) -> str | None:
 
 def _normalize_question_text(text: str) -> str:
     """Normalize question text for exact answered-question matching."""
-    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+    return normalize_question_text(text)
 
 
 _INTERROGATIVE_PREFIXES = (
@@ -658,50 +665,22 @@ def _coalesce_optional_questions(questions: list, state: DeliveryState) -> list:
 
 def _split_legacy_clarification_blob(blob: str) -> tuple[str, str]:
     """Recover question/answer from the UI string `${questionText}: ${answer}`."""
-    text = str(blob or "").strip()
-    if not text:
-        return "", ""
-    # Prefer "?: " so colons inside the question (for example S/4HANA notes)
-    # are not treated as the answer separator. Questions from the UI end with ?.
-    marker = "?: "
-    index = text.rfind(marker)
-    if index != -1:
-        return text[: index + 1].strip(), text[index + len(marker) :].strip()
-    marker = ": "
-    index = text.rfind(marker)
-    if index != -1:
-        question = text[:index].strip()
-        answer = text[index + len(marker) :].strip()
-        if question and answer:
-            return question, answer
-    return "", text
+    from app.evidence import split_legacy_clarification_blob
+
+    return split_legacy_clarification_blob(blob)
 
 
 def _record_question_and_answer(record: dict) -> tuple[str, str]:
     """Return the real question/answer, unpacking legacy UI history rows."""
-    question = str(record.get("question") or "").strip()
-    answer = str(record.get("answer") or "").strip()
-    placeholder = _normalize_question_text(question) in {"", "customer clarification"}
-    if placeholder:
-        inner_question, inner_answer = _split_legacy_clarification_blob(answer)
-        if inner_question:
-            return inner_question, inner_answer
-        return question, answer
-    return question, clarification_answer_body(question, answer)
+    return unpack_clarification_record(
+        str(record.get("question") or ""),
+        str(record.get("answer") or ""),
+    )
 
 
 def _answered_question_texts(state: DeliveryState) -> set[str]:
     """Questions that already have a substantive customer answer."""
-    answered: set[str] = set()
-    for record in _clarification_records(state):
-        question, body = _record_question_and_answer(record)
-        normalized = _normalize_question_text(question)
-        if not normalized:
-            continue
-        if is_non_substantive_clarification_answer(body):
-            continue
-        answered.add(normalized)
-    return answered
+    return substantive_answered_questions(state)
 
 
 def _filter_answered_questions(questions: list, state: DeliveryState) -> list:
@@ -1635,13 +1614,18 @@ REQUIREMENTS:
         if _filter_answered_questions([ROLES_FOLLOW_UP_QUESTION], state):
             non_blocking_questions.append(ROLES_FOLLOW_UP_QUESTION)
 
-    # A customer-confirmed answer must never be reopened as a blocker.
+    # A customer-confirmed answer must never be reopened as a blocker,
+    # including when a heuristic evidence gap still cannot parse the answer.
+    answered_texts = _answered_question_texts(state)
     answered_topics = _answered_clarification_topics(state)
     gap_questions = {gap.question.lower() for gap in evidence_gaps}
     blocking_questions = [
         q for q in blocking_questions
-        if q.lower() in gap_questions
-        or not (_question_topic(q) and _question_topic(q) in answered_topics)
+        if _normalize_question_text(q) not in answered_texts
+        and (
+            q.lower() in gap_questions
+            or not (_question_topic(q) and _question_topic(q) in answered_topics)
+        )
     ]
 
     status = "NEEDS_INFO" if blocking_questions else "READY"

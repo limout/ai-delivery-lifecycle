@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
-from app.evidence import is_numeric_duration
+from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
 from app.providers import (
@@ -794,6 +794,17 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
             result.get("blocking_questions") or validation.get("blocking_questions"),
             required=True,
         )
+    answered = substantive_answered_questions(result)
+    if answered:
+        blocking_questions = [
+            item for item in blocking_questions
+            if normalize_question_text(item.get("question")) not in answered
+        ]
+        clarification_questions = [
+            item for item in clarification_questions
+            if not item.get("blocks_workflow")
+            or normalize_question_text(item.get("question")) not in answered
+        ]
     if not clarification_questions:
         clarification_questions = list(blocking_questions)
 

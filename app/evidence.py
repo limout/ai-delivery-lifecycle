@@ -336,6 +336,43 @@ def is_non_substantive_clarification_answer(text: str) -> bool:
     return not content
 
 
+def normalize_question_text(text: str) -> str:
+    """Normalize question text for exact answered-question matching."""
+    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+
+
+def split_legacy_clarification_blob(blob: str) -> tuple[str, str]:
+    """Recover question/answer from the UI string `${questionText}: ${answer}`."""
+    text = str(blob or "").strip()
+    if not text:
+        return "", ""
+    marker = "?: "
+    index = text.rfind(marker)
+    if index != -1:
+        return text[: index + 1].strip(), text[index + len(marker):].strip()
+    marker = ": "
+    index = text.rfind(marker)
+    if index != -1:
+        question = text[:index].strip()
+        answer = text[index + len(marker):].strip()
+        if question and answer:
+            return question, answer
+    return "", text
+
+
+def unpack_clarification_record(question: str, answer: str) -> tuple[str, str]:
+    """Return the real question/answer, unpacking legacy UI history rows."""
+    question_text = str(question or "").strip()
+    answer_text = str(answer or "").strip()
+    placeholder = normalize_question_text(question_text) in {"", "customer clarification"}
+    if placeholder:
+        inner_question, inner_answer = split_legacy_clarification_blob(answer_text)
+        if inner_question:
+            return inner_question, inner_answer
+        return question_text, answer_text
+    return question_text, clarification_answer_body(question_text, answer_text)
+
+
 def clarification_answer_body(question: str, answer: str) -> str:
     """Strip a duplicated question prefix from legacy 'question: answer' strings."""
     answer_text = str(answer or "").strip()
@@ -368,6 +405,28 @@ def _clarification_pairs(state: dict | None) -> list[tuple[str, str]]:
     return [(q.strip(), a.strip()) for q, a in pairs if str(a).strip()]
 
 
+def substantive_answered_questions(state: dict | None) -> set[str]:
+    """Normalized question texts that already have a substantive customer answer."""
+    answered: set[str] = set()
+    for question, answer in _clarification_pairs(state):
+        real_question, body = unpack_clarification_record(question, answer)
+        normalized = normalize_question_text(real_question)
+        if not normalized:
+            continue
+        if is_non_substantive_clarification_answer(body):
+            continue
+        answered.add(normalized)
+    return answered
+
+
+def has_substantive_answer_for_question(state: dict | None, question: str) -> bool:
+    """True when this exact required question already has a usable customer answer."""
+    normalized = normalize_question_text(question)
+    if not normalized:
+        return False
+    return normalized in substantive_answered_questions(state)
+
+
 def has_substantive_first_release_scope_answer(state: dict | None) -> bool:
     """True when the customer substantively answered the first-release scope question."""
     for question, answer in _clarification_pairs(state):
@@ -381,6 +440,9 @@ def has_substantive_first_release_scope_answer(state: dict | None) -> bool:
         if not is_non_substantive_clarification_answer(body):
             return True
     return False
+
+
+def is_non_blocking_topic(text: str) -> bool:
     lower = str(text or "").lower()
     return any(marker in lower for marker in _NON_BLOCKING_MARKERS)
 
@@ -641,7 +703,12 @@ def material_evidence_gaps(state: dict | None) -> list[EvidenceGap]:
             reason="Mandatory compliance constraints are claimed but not specified.",
         ))
 
-    return gaps
+    answered = substantive_answered_questions(state)
+    return [
+        gap
+        for gap in gaps
+        if normalize_question_text(gap.question) not in answered
+    ]
 
 
 def is_estimable(state: dict | None) -> bool:
