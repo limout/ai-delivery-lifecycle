@@ -6,6 +6,8 @@ rather than being filled with invented narrative.
 
 from __future__ import annotations
 
+import re
+
 from app.evidence import (
     customer_authored_text,
     is_numeric_duration,
@@ -13,7 +15,13 @@ from app.evidence import (
     statement_is_explicit,
 )
 from app.risks import normalize_delivery_risks
-from app.timeline import deadline_source_texts, parse_requested_deadline
+from app.timeline import (
+    WEEKS_PER_MONTH,
+    classify_date_commitment,
+    deadline_source_texts,
+    parse_requested_deadline,
+    stated_date_phrase,
+)
 
 ESTIMATE_DISCLAIMER = (
     "Indicative estimate — based on the information provided, not a delivery "
@@ -29,6 +37,115 @@ ASSESSMENT_DISCLAIMER = (
 
 STANDARD_DEADLINE_FIT_VALUES = ("FITS", "EXCEEDS", "NOT_DEMONSTRATED")
 
+_DURATION_ANY = re.compile(
+    r"(?P<low>\d+(?:\.\d+)?)"
+    r"(?:\s*(?:-|–|—|to)\s*(?P<high>\d+(?:\.\d+)?))?"
+    r"\s*-?\s*(?P<unit>days?|weeks?|months?)",
+    re.I,
+)
+_EXCEEDS_CLAUSE = re.compile(
+    r"(?P<left>[^.!?]{0,160}?)\b(?P<neg>does\s+not\s+)?exceeds?\b(?P<right>[^.!?]{0,160})",
+    re.I,
+)
+
+
+def _duration_to_weeks(value: float, unit: str) -> float:
+    unit = unit.lower()
+    if unit.startswith("day"):
+        return value / 7.0
+    if unit.startswith("month"):
+        return value * WEEKS_PER_MONTH
+    return value
+
+
+def fragment_max_weeks(text: str) -> float | None:
+    """Largest duration in a free-text fragment, including hyphenated units."""
+    best: float | None = None
+    source = str(text or "").replace("–", "-").replace("—", "-")
+    for match in _DURATION_ANY.finditer(source):
+        high = match.group("high") or match.group("low")
+        weeks = _duration_to_weeks(float(high), match.group("unit"))
+        best = weeks if best is None else max(best, weeks)
+    return best
+
+
+def _date_kind_from_result(result: dict | None) -> str:
+    source = customer_authored_text(result or {})
+    return classify_date_commitment([source] if source.strip() else [])
+
+
+def _display_date_label(date_kind: str) -> str:
+    phrase = stated_date_phrase(date_kind)
+    return phrase[:1].upper() + phrase[1:] if phrase else "Stated date"
+
+
+def canonical_fit_comparison(estimate: dict | None, date_kind: str = "") -> str:
+    """Comparison sentence derived from the target, independent estimate, and fit."""
+    estimate = estimate or {}
+    fit = standard_deadline_fit(estimate)
+    target = str(estimate.get("customer_deadline") or "").strip()
+    independent = str(
+        estimate.get("baseline_duration_range") or estimate.get("duration_range") or ""
+    ).strip()
+    if not target or not independent or not is_numeric_duration(independent):
+        return ""
+    label = stated_date_phrase(date_kind) if date_kind else "stated target"
+    if fit == "EXCEEDS":
+        return (
+            f"The independent estimate of {independent} exceeds the {label} of {target}."
+        )
+    if fit == "FITS":
+        return (
+            f"The independent estimate of {independent} does not exceed the {label} of {target}."
+        )
+    return (
+        f"The independent estimate of {independent} does not demonstrate the {label} of {target}."
+    )
+
+
+def sanitize_comparison_wording(
+    text: str,
+    estimate: dict | None,
+    date_kind: str = "",
+) -> str:
+    """Rewrite inverted 'A exceeds B' duration comparisons using actual values."""
+    source = str(text or "")
+    if not source.strip():
+        return source
+    canonical = canonical_fit_comparison(estimate, date_kind)
+    if not canonical:
+        return source
+    target_w = fragment_max_weeks(str((estimate or {}).get("customer_deadline") or ""))
+    est_w = fragment_max_weeks(
+        str(
+            (estimate or {}).get("baseline_duration_range")
+            or (estimate or {}).get("duration_range")
+            or ""
+        )
+    )
+
+    def replace_clause(match: re.Match) -> str:
+        left_w = fragment_max_weeks(match.group("left"))
+        right_w = fragment_max_weeks(match.group("right"))
+        if left_w is None or right_w is None:
+            return match.group(0)
+        negated = bool(match.group("neg"))
+        if target_w is not None and est_w is not None:
+            left_is_target = abs(left_w - target_w) <= abs(left_w - est_w)
+            right_is_estimate = abs(right_w - est_w) <= abs(right_w - target_w)
+            left_is_estimate = abs(left_w - est_w) <= abs(left_w - target_w)
+            right_is_target = abs(right_w - target_w) <= abs(right_w - est_w)
+            if (left_is_target and right_is_estimate) or (left_is_estimate and right_is_target):
+                return canonical.rstrip(".")
+        inverted = (not negated and left_w + 0.05 < right_w) or (
+            negated and left_w > right_w + 0.05
+        )
+        if inverted:
+            return canonical.rstrip(".")
+        return match.group(0)
+
+    return _EXCEEDS_CLAUSE.sub(replace_clause, source)
+
 
 def standard_deadline_fit(estimate: dict | None) -> str:
     """Return the canonical standard-estimate deadline assessment."""
@@ -40,7 +157,7 @@ def standard_deadline_fit(estimate: dict | None) -> str:
     return "NOT_DEMONSTRATED"
 
 
-def deadline_honesty_timeline(estimate: dict | None) -> str:
+def deadline_honesty_timeline(estimate: dict | None, date_kind: str = "") -> str:
     """Build a proposal/SOW timeline that cannot imply a fake commitment."""
     estimate = estimate or {}
     fit = standard_deadline_fit(estimate)
@@ -50,6 +167,8 @@ def deadline_honesty_timeline(estimate: dict | None) -> str:
         or estimate.get("duration_range")
         or ""
     ).strip() or "not demonstrated"
+    label = stated_date_phrase(date_kind) if date_kind else "stated target"
+    comparison = canonical_fit_comparison(estimate, date_kind)
 
     if estimate.get("not_yet_estimable") or not is_numeric_duration(baseline):
         return (
@@ -60,19 +179,20 @@ def deadline_honesty_timeline(estimate: dict | None) -> str:
     if fit == "FITS":
         return (
             f"Customer target: {customer}; independent indicative estimate: {baseline}. "
-            "The independent estimate does not exceed the stated target. "
+            f"{comparison or 'The independent estimate does not exceed the stated target.'} "
             "This remains an indicative assessment, not a delivery commitment."
         )
     if fit == "EXCEEDS":
         return (
             f"Customer target: {customer}; independent indicative estimate: {baseline}. "
-            "Deadline assessment: EXCEEDS. The requested date is not supported by the "
-            "independent estimate and must not be treated as a delivery commitment."
+            f"Deadline assessment: EXCEEDS. "
+            f"{comparison or f'The independent estimate exceeds the {label}.'} "
+            "The date must not be treated as a delivery commitment."
         )
     return (
         f"Customer target: {customer}; independent indicative estimate: {baseline}. "
         "Deadline assessment: NOT DEMONSTRATED. There is not enough evidence to treat "
-        "the requested date as achievable."
+        f"the {label} as achievable."
     )
 
 
@@ -115,6 +235,9 @@ def build_verdict(result: dict) -> dict:
     validation = result.get("validation") or {}
     estimate = result.get("estimate") or {}
     fit = standard_deadline_fit(estimate) if estimate else ""
+    date_kind = _date_kind_from_result(result)
+    date_label = stated_date_phrase(date_kind)
+    comparison = canonical_fit_comparison(estimate, date_kind)
 
     if status == "BLOCKED" or str(review.get("status") or "").upper() == "BLOCKED":
         code = "BLOCKED"
@@ -138,22 +261,23 @@ def build_verdict(result: dict) -> dict:
         code = "DEADLINE_AT_RISK"
         label = "Deadline at risk"
         summary = (
-            "An independent estimate is available, but it exceeds the requested deadline. "
+            f"{comparison or f'An independent estimate is available, but it exceeds the {date_label}.'} "
             "Do not treat the date as a commitment without scope, sequence, or capacity changes."
         )
     elif estimate and fit == "FITS":
         code = "DEADLINE_FIT"
         label = "Ready — deadline fit"
         summary = (
-            "There is enough information for a preliminary assessment, and the independent "
-            "estimate does not exceed the requested deadline. This is still indicative, not a quote."
+            "There is enough information for a preliminary assessment. "
+            f"{comparison or f'The independent estimate does not exceed the {date_label}.'} "
+            "This is still indicative, not a quote."
         )
     elif estimate and fit == "NOT_DEMONSTRATED":
         code = "DEADLINE_UNCLEAR"
         label = "Deadline not demonstrated"
         summary = (
-            "A preliminary assessment is available, but the requested deadline cannot be "
-            "shown as achievable from the current evidence."
+            "A preliminary assessment is available, but the "
+            f"{date_label} cannot be shown as achievable from the current evidence."
         )
     elif status in {"COMPLETE", "READY"}:
         code = "READY"
@@ -207,7 +331,7 @@ def _explicit_known_facts(result: dict) -> tuple[list[str], list[str]]:
 
     deadline = str(estimate.get("customer_deadline") or "").strip()
     if deadline:
-        known.append(f"Requested deadline: {deadline}")
+        known.append(f"{_display_date_label(_date_kind_from_result(result))}: {deadline}")
     customer_est = str(estimate.get("customer_baseline_duration") or "").strip()
     if customer_est:
         known.append(f"Customer estimate: {customer_est}")
@@ -365,13 +489,18 @@ def build_assessment(result: dict) -> dict:
     elif customer_deadline and (needs_info or not is_numeric_duration(independent)):
         fit = "NOT_DEMONSTRATED"
 
+    date_kind = _date_kind_from_result(result)
+    date_label = stated_date_phrase(date_kind)
+    comparison = canonical_fit_comparison(estimate, date_kind)
     deadline = {
         "requested": customer_deadline,
         "independent_estimate": independent,
         "customer_estimate": str(estimate.get("customer_baseline_duration") or "").strip(),
         "fit": fit,
+        "stated_date_kind": date_kind,
+        "stated_date_label": _display_date_label(date_kind),
         "gap": (
-            "Independent estimate exceeds the requested deadline."
+            (comparison or f"Independent estimate exceeds the {date_label}.")
             if verdict["code"] == "DEADLINE_AT_RISK"
             else (
                 str(optimization.get("deadline_gap") or "")
@@ -385,17 +514,23 @@ def build_assessment(result: dict) -> dict:
 
     evidence = ""
     if customer_deadline and is_numeric_duration(independent):
-        evidence = f"Independent estimate is {independent} vs requested {customer_deadline}."
-    risks = normalize_delivery_risks(
-        [
-            *_as_list(solution.get("delivery_risks")),
-            *_as_list(plan.get("delivery_risks")),
-            *_as_list(estimate.get("risks_affecting_estimate")),
-        ],
-        deadline_fit=fit,
-        evidence=evidence,
-        limit=5,
-    )
+        evidence = (
+            comparison
+            or f"Independent estimate is {independent} vs {date_label} {customer_deadline}."
+        )
+    risks = [
+        sanitize_comparison_wording(item, estimate, date_kind)
+        for item in normalize_delivery_risks(
+            [
+                *_as_list(solution.get("delivery_risks")),
+                *_as_list(plan.get("delivery_risks")),
+                *_as_list(estimate.get("risks_affecting_estimate")),
+            ],
+            deadline_fit=fit,
+            evidence=evidence,
+            limit=5,
+        )
+    ]
 
     blocking = result.get("blocking_questions") or validation.get("blocking_questions") or []
     recommended = (
@@ -406,14 +541,17 @@ def build_assessment(result: dict) -> dict:
     ask_next = _unique_texts([*_as_list(blocking), *_as_list(recommended)], limit=5)
     next_steps = _recommended_next_steps(result, verdict, blocking, deadline)
 
-    why = _unique_texts(
-        [
-            verdict.get("summary") or "",
-            *_as_list(validation.get("missing_evidence"))[:2],
-            evidence,
-        ],
-        limit=3,
-    )
+    why = [
+        sanitize_comparison_wording(item, estimate, date_kind)
+        for item in _unique_texts(
+            [
+                verdict.get("summary") or "",
+                *_as_list(validation.get("missing_evidence"))[:2],
+                evidence,
+            ],
+            limit=3,
+        )
+    ]
 
     return {
         "title": "AI Delivery Assessment",
@@ -466,7 +604,7 @@ def format_assessment_text(assessment: dict) -> str:
             verdict.get("summary") or "",
             "",
             "DEADLINE",
-            f"- Requested deadline: {deadline.get('requested') or 'Not provided'}",
+            f"- {deadline.get('stated_date_label') or 'Requested deadline'}: {deadline.get('requested') or 'Not provided'}",
             f"- Independent estimate: {deadline.get('independent_estimate') or 'Not yet produced'}",
             f"- Customer estimate: {deadline.get('customer_estimate') or 'Not provided'}",
             f"- Deadline fit: {deadline.get('fit') or 'Not assessed'}",
@@ -522,7 +660,7 @@ def format_print_assessment(assessment: dict) -> str:
         verdict.get("label") or "Unknown",
         "",
         "DEADLINE",
-        f"- Requested deadline: {deadline.get('requested') or 'Not provided'}",
+        f"- {deadline.get('stated_date_label') or 'Requested deadline'}: {deadline.get('requested') or 'Not provided'}",
         f"- Independent estimate: {deadline.get('independent_estimate') or 'Not yet estimable'}",
         f"- Customer estimate: {deadline.get('customer_estimate') or 'Not provided'}",
         f"- Deadline fit: {deadline.get('fit') or 'Not assessed'}",

@@ -1,3 +1,5 @@
+import re
+
 from app.agents import (
     _deterministic_delivery_gate,
     _extract_explicit_timeline_facts,
@@ -5,7 +7,11 @@ from app.agents import (
     _rewrite_commitment_overclaim,
     delivery_review_agent,
     discovery_agent,
+    proposal_agent,
+    sow_agent,
 )
+from app.api import workflow_response
+from app.assessment import canonical_fit_comparison, sanitize_comparison_wording
 from app.timeline import (
     COMMITMENT_ASPIRATIONAL,
     COMMITMENT_CONTRACTUAL,
@@ -309,3 +315,209 @@ def test_twelve_week_target_still_compared_to_independent_estimate():
     assert "stated internal target" in blob
     assert "contractual" not in blob
     assert review["status"] == "READY"
+
+
+FIELD_SERVICE_INTERNAL_REQUEST = (
+    "Build a field-service dispatch board so coordinators can assign jobs. "
+    "The first release is an internal target of 2 months, not a contractual deadline."
+)
+
+
+def _proposal_payload(summary: str, risks=None):
+    return {
+        "executive_summary": summary,
+        "scope": ["Dispatch board"],
+        "delivery_approach": ["Phased"],
+        "timeline": summary,
+        "assumptions": [],
+        "risks": risks or [summary],
+        "next_steps": ["Review"],
+        "objectives": ["Assign jobs"],
+        "deliverables": ["Dispatch board"],
+        "in_scope": ["Job assignment"],
+        "out_of_scope": [],
+        "dependencies": [],
+        "acceptance": [],
+    }
+
+
+def _no_target_exceeds_estimate(text: str) -> None:
+    compact = re.sub(r"\s+", " ", str(text or "").lower().replace("–", "-").replace("—", "-"))
+    assert re.search(
+        r"(?:internal\s+target|stated\s+(?:internal\s+)?target|2-month|2 months)"
+        r".{0,40}exceeds.{0,40}(?:independent|3-4 months)",
+        compact,
+    ) is None
+
+
+def test_sanitize_inverts_target_exceeds_estimate_for_internal_target():
+    estimate = {
+        "standard_deadline_fit": "EXCEEDS",
+        "customer_deadline": "2 months",
+        "duration_range": "3-4 months",
+        "baseline_duration_range": "3-4 months",
+    }
+    inverted = (
+        "The 2-month internal target exceeds an independent estimate of 3-4 months."
+    )
+    rewritten = sanitize_comparison_wording(
+        inverted, estimate, COMMITMENT_INTERNAL_TARGET
+    ).lower()
+    _no_target_exceeds_estimate(rewritten)
+    assert "independent estimate of 3-4 months" in rewritten
+    assert "exceeds the stated internal target of 2 months" in rewritten
+    assert "contractual" not in rewritten
+
+
+def test_sanitize_fits_when_estimate_is_shorter_than_target():
+    estimate = {
+        "standard_deadline_fit": "FITS",
+        "customer_deadline": "2 months",
+        "duration_range": "4-6 weeks",
+        "baseline_duration_range": "4-6 weeks",
+    }
+    inverted = (
+        "The independent estimate of 4-6 weeks exceeds the 2-month internal target."
+    )
+    rewritten = sanitize_comparison_wording(
+        inverted, estimate, COMMITMENT_INTERNAL_TARGET
+    ).lower()
+    assert "does not exceed the stated internal target of 2 months" in rewritten
+    assert re.search(r"4-6 weeks exceeds", rewritten) is None
+
+
+def test_executive_summary_verdict_review_and_proposal_agree_when_estimate_exceeds_target():
+    request = FIELD_SERVICE_INTERNAL_REQUEST
+    inverted = (
+        "The 2-month internal target exceeds an independent estimate of 3-4 months."
+    )
+    estimate = {
+        "effort_range": "40-80 person-days",
+        "duration_range": "3-4 months",
+        "baseline_duration_range": "3-4 months",
+        "customer_deadline": "2 months",
+        "confidence": "MEDIUM",
+        "assumptions": [],
+        "risks_affecting_estimate": [inverted],
+        "standard_deadline_fit": "EXCEEDS",
+    }
+    facts = _extract_explicit_timeline_facts(request)
+    state = _estimate_state(facts, "3-4 months")
+    state["user_request"] = request
+    state["estimate"] = estimate
+    proposal = proposal_agent(state, ScriptedProvider(_proposal_payload(inverted)))["proposal"]
+    sow = sow_agent(state, ScriptedProvider(_proposal_payload(inverted)))["sow"]
+    review = delivery_review_agent(
+        state,
+        ScriptedProvider(
+            {
+                "status": "READY",
+                "blocking_issues": [],
+                "clarification_questions": [],
+                "warnings": [inverted],
+                "checks": [],
+            }
+        ),
+    )["delivery_review"]
+    payload = workflow_response(
+        {
+            "workflow_status": "COMPLETE",
+            "user_request": request,
+            "discovery": {
+                "problem": "Coordinators assign field jobs.",
+                "business_goal": "Dispatch work.",
+                "constraints": facts,
+                "unknowns": [],
+            },
+            "estimate": estimate,
+            "proposal": proposal,
+            "sow": sow,
+            "delivery_review": review,
+            "solution": {"delivery_risks": [inverted]},
+            "blocking_questions": [],
+            "non_blocking_questions": [],
+        }
+    )
+    blobs = [
+        payload["verdict"]["summary"],
+        payload["assessment_text"],
+        payload["assessment"]["deadline"]["gap"],
+        proposal["executive_summary"],
+        proposal["timeline"],
+        sow["timeline"],
+        " ".join(review["warnings"] + review["checks"]),
+    ]
+    joined = " ".join(blobs)
+    _no_target_exceeds_estimate(joined)
+    assert payload["verdict"]["code"] == "DEADLINE_AT_RISK"
+    assert payload["estimate"]["standard_deadline_fit"] == "EXCEEDS"
+    assert "stated internal target" in joined.lower()
+    canonical = canonical_fit_comparison(estimate, COMMITMENT_INTERNAL_TARGET).lower()
+    assert canonical.rstrip(".") in proposal["executive_summary"].lower()
+    assert canonical.rstrip(".") in payload["verdict"]["summary"].lower()
+    assert "contractual" not in payload["verdict"]["summary"].lower()
+    assert "mandatory" not in " ".join(review["warnings"]).lower()
+
+
+def test_artifacts_agree_when_independent_estimate_fits_internal_target():
+    request = FIELD_SERVICE_INTERNAL_REQUEST
+    inverted = (
+        "The independent estimate of 4-6 weeks exceeds the 2-month internal target."
+    )
+    estimate = {
+        "effort_range": "20-40 person-days",
+        "duration_range": "4-6 weeks",
+        "baseline_duration_range": "4-6 weeks",
+        "customer_deadline": "2 months",
+        "confidence": "MEDIUM",
+        "assumptions": [],
+        "risks_affecting_estimate": [inverted],
+        "standard_deadline_fit": "FITS",
+    }
+    facts = _extract_explicit_timeline_facts(request)
+    state = _estimate_state(facts, "4-6 weeks")
+    state["user_request"] = request
+    state["estimate"] = estimate
+    proposal = proposal_agent(state, ScriptedProvider(_proposal_payload(inverted)))["proposal"]
+    review = delivery_review_agent(
+        state,
+        ScriptedProvider(
+            {
+                "status": "READY",
+                "blocking_issues": [],
+                "clarification_questions": [],
+                "warnings": [inverted],
+                "checks": [],
+            }
+        ),
+    )["delivery_review"]
+    payload = workflow_response(
+        {
+            "workflow_status": "COMPLETE",
+            "user_request": request,
+            "discovery": {
+                "problem": "Coordinators assign field jobs.",
+                "business_goal": "Dispatch work.",
+                "constraints": facts,
+                "unknowns": [],
+            },
+            "estimate": estimate,
+            "proposal": proposal,
+            "delivery_review": review,
+            "solution": {"delivery_risks": [inverted]},
+            "blocking_questions": [],
+            "non_blocking_questions": [],
+        }
+    )
+    joined = " ".join(
+        [
+            payload["verdict"]["summary"],
+            payload["assessment_text"],
+            proposal["executive_summary"],
+            " ".join(review["warnings"] + review["checks"]),
+        ]
+    ).lower()
+    assert payload["verdict"]["code"] == "DEADLINE_FIT"
+    assert "does not exceed the stated internal target" in joined
+    assert re.search(r"4-6 weeks exceeds", joined) is None
+    assert payload["estimate"]["standard_deadline_fit"] == "FITS"

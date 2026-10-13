@@ -2654,7 +2654,11 @@ Rules:
     )
     proposal = _ground_downstream_artifact(proposal, state)
     if isinstance(proposal, dict):
-        proposal = _apply_deadline_honesty(proposal, estimate)
+        proposal = _apply_deadline_honesty(
+            proposal,
+            estimate,
+            date_kind=classify_date_commitment([state.get("user_request") or ""]),
+        )
 
     return {
         "proposal": proposal,
@@ -2718,34 +2722,63 @@ Rules:
     )
     sow = _ground_downstream_artifact(sow, state)
     if isinstance(sow, dict):
-        sow = _apply_deadline_honesty(sow, estimate)
+        sow = _apply_deadline_honesty(
+            sow,
+            estimate,
+            date_kind=classify_date_commitment([state.get("user_request") or ""]),
+        )
 
     return {
         "sow": sow,
     }
 
-def _apply_deadline_honesty(document: dict, estimate: dict) -> dict:
+def _apply_deadline_honesty(document: dict, estimate: dict, date_kind: str = "") -> dict:
     """Force proposal/SOW timeline text to match standard_deadline_fit."""
-    from app.assessment import deadline_honesty_timeline, standard_deadline_fit
+    from app.assessment import (
+        canonical_fit_comparison,
+        deadline_honesty_timeline,
+        sanitize_comparison_wording,
+        standard_deadline_fit,
+    )
 
     fit = standard_deadline_fit(estimate)
-    document["timeline"] = deadline_honesty_timeline(estimate)
+    document["timeline"] = deadline_honesty_timeline(estimate, date_kind)
+    canonical = canonical_fit_comparison(estimate, date_kind)
     summary = document.get("executive_summary")
-    if isinstance(summary, str) and fit in {"EXCEEDS", "NOT_DEMONSTRATED"}:
-        commitment_markers = (
-            "complete within",
-            "completed within",
-            "delivered within",
-            "will be done by",
-            "guaranteed",
-            "commit to deliver by",
-        )
-        if any(marker in summary.lower() for marker in commitment_markers):
-            document["executive_summary"] = (
-                summary.rstrip()
-                + " The requested deadline is not a demonstrated delivery commitment; "
-                f"the independent estimate assessment is {fit.replace('_', ' ')}."
+    if isinstance(summary, str):
+        summary = sanitize_comparison_wording(summary, estimate, date_kind)
+        if date_kind:
+            summary = _rewrite_commitment_overclaim(summary, date_kind)
+        if fit in {"EXCEEDS", "NOT_DEMONSTRATED"}:
+            commitment_markers = (
+                "complete within",
+                "completed within",
+                "delivered within",
+                "will be done by",
+                "guaranteed",
+                "commit to deliver by",
             )
+            if any(marker in summary.lower() for marker in commitment_markers):
+                summary = (
+                    summary.rstrip()
+                    + " The stated date is not a demonstrated delivery commitment; "
+                    f"the independent estimate assessment is {fit.replace('_', ' ')}."
+                )
+        if canonical and fit in {"EXCEEDS", "FITS"}:
+            if canonical.lower().rstrip(".") not in summary.lower():
+                summary = (summary.rstrip() + " " + canonical).strip()
+            summary = sanitize_comparison_wording(summary, estimate, date_kind)
+        document["executive_summary"] = summary
+    risks = document.get("risks")
+    if isinstance(risks, list):
+        document["risks"] = [
+            sanitize_comparison_wording(
+                _rewrite_commitment_overclaim(str(item), date_kind) if date_kind else str(item),
+                estimate,
+                date_kind,
+            )
+            for item in risks
+        ]
     return document
 
 
@@ -2874,8 +2907,15 @@ def _rewrite_commitment_overclaim(text: str, kind: str) -> str:
     return updated
 
 
-def _sanitize_review_commitment_language(items: list, kind: str) -> list:
-    return [_rewrite_commitment_overclaim(str(item), kind) for item in (items or [])]
+def _sanitize_review_commitment_language(items: list, kind: str, estimate: dict | None = None) -> list:
+    from app.assessment import sanitize_comparison_wording
+
+    cleaned = []
+    for item in items or []:
+        text = _rewrite_commitment_overclaim(str(item), kind)
+        text = sanitize_comparison_wording(text, estimate, kind)
+        cleaned.append(text)
+    return cleaned
 
 
 def _deterministic_delivery_gate(
@@ -3212,9 +3252,9 @@ Rules:
         )
 
     status = "BLOCKED" if blocking_issues else "READY"
-    warnings = _sanitize_review_commitment_language(warnings, date_kind)
-    checks = _sanitize_review_commitment_language(checks, date_kind)
-    blocking_issues = _sanitize_review_commitment_language(blocking_issues, date_kind)
+    warnings = _sanitize_review_commitment_language(warnings, date_kind, estimate)
+    checks = _sanitize_review_commitment_language(checks, date_kind, estimate)
+    blocking_issues = _sanitize_review_commitment_language(blocking_issues, date_kind, estimate)
 
     return {
         "delivery_review": {
