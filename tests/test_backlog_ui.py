@@ -358,6 +358,59 @@ def test_new_analysis_does_not_keep_previous_backlog():
     assert result_belongs_to_workflow("run-1", {"status": "COMPLETE"}) is False
 
 
+def finding_severity_key(finding):
+    """Mirrors findingSeverityKey() in app/static/index.html."""
+    raw = str((finding or {}).get("severity") or "").strip().lower()
+    if raw in {"error", "warning", "info"}:
+        return raw
+    return raw or "unspecified"
+
+
+def finding_code_key(finding):
+    """Mirrors findingCodeKey() in app/static/index.html."""
+    code = (finding or {}).get("code")
+    if code is None or code == "":
+        return ""
+    return str(code)
+
+
+def group_findings_by_severity_and_code(findings):
+    """Mirrors groupFindingsBySeverityAndCode() in app/static/index.html."""
+    buckets = {"error": [], "warning": [], "info": []}
+    extras = []
+    extra_seen = {}
+    for finding in findings:
+        key = finding_severity_key(finding)
+        if key in buckets:
+            buckets[key].append(finding)
+            continue
+        if key not in extra_seen:
+            extra_seen[key] = []
+            extras.append((key, extra_seen[key]))
+        extra_seen[key].append(finding)
+
+    def group_codes(items):
+        order = []
+        by_code = {}
+        for finding in items:
+            code = finding_code_key(finding)
+            if code not in by_code:
+                by_code[code] = []
+                order.append(code)
+            by_code[code].append(finding)
+        return [{"code": code, "items": by_code[code]} for code in order]
+
+    sections = []
+    for severity, label in (("error", "Errors"), ("warning", "Warnings"), ("info", "Info")):
+        items = buckets[severity]
+        if items:
+            sections.append({"severity": severity, "label": label, "items": items, "codes": group_codes(items)})
+    for severity, items in extras:
+        if items:
+            sections.append({"severity": severity, "label": severity, "items": items, "codes": group_codes(items)})
+    return sections
+
+
 def test_viewer_renders_canonical_hierarchy_and_findings():
     index = build_backlog_index(SAMPLE_PAYLOAD)
     types = [node["item"]["type"] for node in _flatten(index["roots"])]
@@ -376,6 +429,43 @@ def test_viewer_renders_canonical_hierarchy_and_findings():
     assert "Test requirements" in INDEX
     assert "Show raw backlog JSON" in INDEX
     assert "Items outside the expected hierarchy" in INDEX
+    assert "Quality Findings" in INDEX
+    assert "data-findings-root" in INDEX
+    assert "groupFindingsBySeverityAndCode" in INDEX
+    render_fn = INDEX.split("function renderBacklogFindings", 1)[1].split("function renderBacklogViewer", 1)[0]
+    assert "generateBacklog" not in render_fn
+    assert "currentData =" not in render_fn
+    assert "preserved ? !!preserved.root : false" in INDEX
+    assert 'groupKey === "severity:error"' in INDEX
+    assert 'groupKey === "severity:warning"' in INDEX
+
+
+def test_findings_are_grouped_without_merging_or_dropping():
+    findings = [
+        {"severity": "info", "code": "GENERATED_CONTENT", "message": "Title inferred A"},
+        {"severity": "warning", "code": "AMBIGUOUS_DECOMPOSITION", "message": "Ambiguous one"},
+        {"severity": "info", "code": "ATOMIC_STORY", "message": "Atomic one"},
+        {"severity": "info", "code": "GENERATED_CONTENT", "message": "Title inferred B"},
+        {"severity": "error", "code": "UNCOVERED_FUNCTIONAL_REQUIREMENT", "message": "Missing FR"},
+        {"severity": "warning", "code": "AMBIGUOUS_DECOMPOSITION", "message": "Ambiguous two"},
+    ]
+    sections = group_findings_by_severity_and_code(findings)
+    assert [section["severity"] for section in sections] == ["error", "warning", "info"]
+    assert [section["label"] for section in sections] == ["Errors", "Warnings", "Info"]
+    generated = next(
+        group
+        for section in sections
+        if section["severity"] == "info"
+        for group in section["codes"]
+        if group["code"] == "GENERATED_CONTENT"
+    )
+    assert [item["message"] for item in generated["items"]] == [
+        "Title inferred A",
+        "Title inferred B",
+    ]
+    flat = [item for section in sections for group in section["codes"] for item in group["items"]]
+    assert len(flat) == 6
+    assert {item["message"] for item in findings} == {item["message"] for item in flat}
 
 
 def test_empty_and_unknown_fields_are_not_invented():

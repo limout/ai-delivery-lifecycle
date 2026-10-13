@@ -1023,6 +1023,13 @@
     .backlog-finding{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:0 0 8px;background:#fff}
     .backlog-finding.error{border-color:#fecaca;background:var(--red-soft)}
     .backlog-finding.warning{border-color:#fde68a;background:var(--amber-soft)}
+    .backlog-findings-root>summary,.backlog-finding-severity>summary,.backlog-finding-code>summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:8px;list-style:none;font-weight:700}
+    .backlog-findings-root>summary::-webkit-details-marker,.backlog-finding-severity>summary::-webkit-details-marker,.backlog-finding-code>summary::-webkit-details-marker{display:none}
+    .backlog-findings-root>summary{font-size:15px;margin:0}
+    .backlog-finding-severity{margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
+    .backlog-finding-severity>summary{font-size:13px}
+    .backlog-finding-code{margin:8px 0 4px 4px}
+    .backlog-finding-code>summary{font-size:12px;font-weight:600;color:#334155;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     .backlog-link{border:0;background:transparent;color:var(--blue);padding:0;margin:4px 8px 0 0;font-size:12px;font-weight:600;cursor:pointer}
     .backlog-link:hover{background:transparent;text-decoration:underline}
     @media (max-width:900px){
@@ -3099,6 +3106,8 @@ function updateRunningStatus(message) {
             }
             backlogResult = payload;
             backlogResultKey = workflowKey(currentData);
+            const findingsEl = document.getElementById("backlogFindings");
+            if (findingsEl) findingsEl.innerHTML = "";
             renderBacklogViewer(payload);
         } catch (_) {
             setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown.");
@@ -3232,6 +3241,117 @@ function updateRunningStatus(message) {
         return counts;
     }
 
+    function findingSeverityKey(finding) {
+        const raw = String((finding && finding.severity) || "").trim().toLowerCase();
+        if (raw === "error" || raw === "warning" || raw === "info") return raw;
+        return raw || "unspecified";
+    }
+
+    function findingCodeKey(finding) {
+        if (!finding || finding.code == null || finding.code === "") return "";
+        return String(finding.code);
+    }
+
+    function groupFindingsBySeverityAndCode(findings) {
+        const buckets = { error: [], warning: [], info: [] };
+        const extras = [];
+        const extraSeen = {};
+        asList(findings).forEach(finding => {
+            const key = findingSeverityKey(finding);
+            if (key === "error" || key === "warning" || key === "info") {
+                buckets[key].push(finding);
+                return;
+            }
+            if (!extraSeen[key]) {
+                extraSeen[key] = [];
+                extras.push({ severity: key, items: extraSeen[key] });
+            }
+            extraSeen[key].push(finding);
+        });
+        const groupCodes = items => {
+            const order = [];
+            const byCode = new Map();
+            items.forEach(finding => {
+                const code = findingCodeKey(finding);
+                if (!byCode.has(code)) {
+                    byCode.set(code, []);
+                    order.push(code);
+                }
+                byCode.get(code).push(finding);
+            });
+            return order.map(code => ({ code, items: byCode.get(code) }));
+        };
+        const sections = [
+            { severity: "error", label: "Errors", items: buckets.error },
+            { severity: "warning", label: "Warnings", items: buckets.warning },
+            { severity: "info", label: "Info", items: buckets.info }
+        ].filter(section => section.items.length);
+        extras.forEach(entry => {
+            if (!entry.items.length) return;
+            sections.push({
+                severity: entry.severity,
+                label: formatBacklogType(entry.severity),
+                items: entry.items
+            });
+        });
+        return sections.map(section => ({
+            ...section,
+            codes: groupCodes(section.items)
+        }));
+    }
+
+    function defaultFindingsGroupOpen(groupKey) {
+        if (groupKey === "severity:error" || groupKey === "severity:warning") return true;
+        if (String(groupKey || "").startsWith("code:error:") || String(groupKey || "").startsWith("code:warning:")) {
+            return true;
+        }
+        if (String(groupKey || "").startsWith("code:info:")) return true;
+        return false;
+    }
+
+    function readFindingsOpenState(container) {
+        if (!container) return null;
+        const root = container.querySelector("[data-findings-root]");
+        if (!root) return null;
+        const groups = {};
+        container.querySelectorAll("[data-findings-group]").forEach(el => {
+            groups[el.getAttribute("data-findings-group")] = el.open;
+        });
+        return { root: root.open, groups };
+    }
+
+    function applyFindingsOpenState(container, preserved) {
+        if (!container) return;
+        const root = container.querySelector("[data-findings-root]");
+        if (root) root.open = preserved ? !!preserved.root : false;
+        container.querySelectorAll("[data-findings-group]").forEach(el => {
+            const key = el.getAttribute("data-findings-group");
+            if (preserved && preserved.groups && Object.prototype.hasOwnProperty.call(preserved.groups, key)) {
+                el.open = !!preserved.groups[key];
+            } else {
+                el.open = defaultFindingsGroupOpen(key);
+            }
+        });
+    }
+
+    function renderFindingCard(finding) {
+        const refs = asList(finding.source_references)
+            .filter(item => item && typeof item === "object")
+            .map(ref => {
+                const path = ref.json_path ? escapeHtml(String(ref.json_path)) : "";
+                const excerpt = ref.excerpt ? escapeHtml(String(ref.excerpt)) : "";
+                return `<div class="backlog-id">${path}</div>${excerpt ? `<p>${excerpt}</p>` : ""}`;
+            }).join("");
+        const items = asList(finding.canonical_ids).map(id => itemLink(id)).join(" ");
+        return `<article class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
+            <strong>${escapeHtml(String(finding.severity || "info"))}</strong>
+            ${finding.code ? ` · ${escapeHtml(String(finding.code))}` : ""}
+            <p>${escapeHtml(String(finding.message || ""))}</p>
+            ${items ? `<div>${items}</div>` : ""}
+            ${refs}
+        </article>`;
+    }
+
     function renderBacklogTreeRows(nodes) {
         return nodes.map(node => {
             const item = node.item;
@@ -3345,27 +3465,42 @@ function updateRunningStatus(message) {
     function renderBacklogFindings(findings) {
         const container = document.getElementById("backlogFindings");
         if (!container) return;
+        const preserved = readFindingsOpenState(container);
         if (!findings.length) {
-            container.innerHTML = "<h3>Findings</h3><p class=\"empty\">No findings returned.</p>";
+            container.innerHTML = `<details class="backlog-findings-root" data-findings-root>
+                <summary>Quality Findings</summary>
+                <p class="empty">No findings returned.</p>
+            </details>`;
+            applyFindingsOpenState(container, preserved);
             return;
         }
-        container.innerHTML = "<h3>Findings</h3>" + findings.map(finding => {
-            const refs = asList(finding.source_references)
-                .filter(item => item && typeof item === "object")
-                .map(ref => {
-                    const path = ref.json_path ? escapeHtml(String(ref.json_path)) : "";
-                    const excerpt = ref.excerpt ? escapeHtml(String(ref.excerpt)) : "";
-                    return `<div class="backlog-id">${path}</div>${excerpt ? `<p>${excerpt}</p>` : ""}`;
-                }).join("");
-            const items = asList(finding.canonical_ids).map(id => itemLink(id)).join(" ");
-            return `<article class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
-                <strong>${escapeHtml(String(finding.severity || "info"))}</strong>
-                ${finding.code ? ` · ${escapeHtml(String(finding.code))}` : ""}
-                <p>${escapeHtml(String(finding.message || ""))}</p>
-                ${items ? `<div>${items}</div>` : ""}
-                ${refs}
-            </article>`;
+        const counts = severityCounts(findings);
+        const chips = [];
+        if (counts.error) chips.push(`<span class="backlog-chip error">errors: ${counts.error}</span>`);
+        if (counts.warning) chips.push(`<span class="backlog-chip warning">warnings: ${counts.warning}</span>`);
+        if (counts.info) chips.push(`<span class="backlog-chip">info: ${counts.info}</span>`);
+        const other = findings.length - counts.error - counts.warning - counts.info;
+        if (other > 0) chips.push(`<span class="backlog-chip">other: ${other}</span>`);
+        chips.push(`<span class="backlog-chip">${findings.length} total</span>`);
+        const sections = groupFindingsBySeverityAndCode(findings).map(section => {
+            const codes = section.codes.map(group => {
+                const label = group.code ? group.code : "Unspecified";
+                const cards = group.items.map(renderFindingCard).join("");
+                return `<details class="backlog-finding-code" data-findings-group="${escapeHtml(`code:${section.severity}:${group.code}`)}">
+                    <summary>${escapeHtml(label)} (${group.items.length})</summary>
+                    ${cards}
+                </details>`;
+            }).join("");
+            return `<details class="backlog-finding-severity" data-findings-group="${escapeHtml(`severity:${section.severity}`)}">
+                <summary>${escapeHtml(section.label)} (${section.items.length})</summary>
+                ${codes}
+            </details>`;
         }).join("");
+        container.innerHTML = `<details class="backlog-findings-root" data-findings-root>
+            <summary>Quality Findings ${chips.join("")}</summary>
+            ${sections}
+        </details>`;
+        applyFindingsOpenState(container, preserved);
     }
 
     function renderBacklogViewer(payload) {
