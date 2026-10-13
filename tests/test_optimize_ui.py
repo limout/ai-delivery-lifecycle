@@ -166,12 +166,15 @@ def test_sidebar_artifact_buttons_call_select_tab():
         "delivery_review",
         "proposal",
         "sow",
+        "backlog",
     )
     for name in names:
         assert f'data-tab="{name}"' in tabs
         assert f"selectTab('{name}')" in tabs
         assert f'id="panel-{name}"' in INDEX
-    assert tabs.count("class=\"artifact-tab") == 10
+    assert tabs.count('selectTab(\'') == 11
+    assert 'id="backlogIntegrateNav"' in tabs
+    assert "selectTab('backlog_integrate')" not in INDEX
     assert INDEX.count('id="artifactTabs"') == 1
     assert "function selectTab" in INDEX
     select_tab_fn = INDEX.split("function selectTab", 1)[1].split("function formatExportSection", 1)[0]

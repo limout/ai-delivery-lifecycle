@@ -604,6 +604,32 @@
             box-shadow: inset 2px 0 0 var(--blue);
         }
 
+        .artifact-tab:disabled,
+        .artifact-tab.artifact-tab-disabled {
+            background: transparent;
+            color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.7;
+            box-shadow: none;
+            pointer-events: none;
+        }
+
+        .artifact-tab:disabled:hover,
+        .artifact-tab.artifact-tab-disabled:hover {
+            background: transparent;
+            color: #9ca3af;
+        }
+
+        .tab-coming-later {
+            display: block;
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0;
+            text-transform: none;
+            color: #9ca3af;
+            margin-top: 1px;
+        }
+
         .artifact-panel { display: none; }
         .artifact-panel.active {
             display: block;
@@ -955,8 +981,55 @@
                 background: var(--blue-soft);
                 color: var(--blue);
             }
+            .artifact-tab:disabled,
+            .artifact-tab.artifact-tab-disabled {
+                background: #f9fafb;
+                border-color: var(--border);
+                color: #9ca3af;
+            }
+            .backlog-layout { grid-template-columns: 1fr; }
         }
     
+    .backlog-subsections{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 20px}
+    .backlog-subsection{border:1px solid var(--border);border-radius:12px;padding:14px 16px;background:#fff}
+    .backlog-subsection h3{margin:0 0 6px;font-size:15px}
+    .backlog-subsection-disabled{background:#f9fafb;color:var(--muted)}
+    .backlog-subsection-disabled button{background:#d1d5db;cursor:not-allowed}
+    .backlog-subsection-disabled button:hover{background:#d1d5db}
+    .backlog-error{color:var(--red);font-size:13px;margin:10px 0 0}
+    .backlog-summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+    .backlog-chip{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;background:#f1f5f9;color:#334155;font-size:12px;font-weight:700}
+    .backlog-chip.warning{background:var(--amber-soft);color:#92400e}
+    .backlog-chip.error{background:var(--red-soft);color:#991b1b}
+    .backlog-layout{display:grid;grid-template-columns:minmax(220px,36%) 1fr;gap:16px;min-height:280px;align-items:stretch}
+    .backlog-tree,.backlog-detail,.backlog-findings{border:1px solid var(--border);border-radius:12px;background:#fff}
+    .backlog-tree{max-height:520px;overflow:auto;padding:8px}
+    .backlog-detail{max-height:520px;overflow:auto;padding:16px}
+    .backlog-findings{margin-top:16px;padding:14px 16px}
+    .backlog-tree-row{display:flex;align-items:flex-start;gap:4px;width:100%;border:0;background:transparent;color:inherit;text-align:left;padding:6px 8px;margin:0;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer}
+    .backlog-tree-row:hover{background:rgba(37,99,235,0.06)}
+    .backlog-tree-row.active{background:var(--blue-soft);color:var(--blue);font-weight:600}
+    .backlog-tree-toggle{flex:0 0 18px;border:0;background:transparent;color:var(--muted);padding:0;margin:0;cursor:pointer;font-size:12px}
+    .backlog-tree-toggle:hover{background:transparent;color:var(--text)}
+    .backlog-tree-toggle:disabled{background:transparent;color:#d1d5db;cursor:default}
+    .backlog-type{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-right:6px}
+    .backlog-unplaced{margin:12px 0 0;padding:12px 14px;border:1px dashed #f59e0b;border-radius:12px;background:var(--amber-soft)}
+    .backlog-detail h3{margin:0 0 6px;font-size:16px}
+    .backlog-detail-meta{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+    .backlog-field{margin:0 0 12px}
+    .backlog-field h4{margin:0 0 4px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+    .backlog-field p,.backlog-field li{font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+    .backlog-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--muted)}
+    .backlog-finding{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:0 0 8px;background:#fff}
+    .backlog-finding.error{border-color:#fecaca;background:var(--red-soft)}
+    .backlog-finding.warning{border-color:#fde68a;background:var(--amber-soft)}
+    .backlog-link{border:0;background:transparent;color:var(--blue);padding:0;margin:4px 8px 0 0;font-size:12px;font-weight:600;cursor:pointer}
+    .backlog-link:hover{background:transparent;text-decoration:underline}
+    @media (max-width:900px){
+        .backlog-subsections,.backlog-layout{grid-template-columns:1fr}
+        .backlog-tree,.backlog-detail{max-height:320px}
+    }
+
     .ai-optimization-panel{margin:0 0 22px;border:1px solid #ddd6fe;border-radius:14px;padding:18px;background:#faf9ff}
     .ai-optimization-header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
     .ai-optimization-header h3{margin:0 0 4px;font-size:17px}
@@ -1020,6 +1093,14 @@
                     <span class="tab-group-label">Outputs</span>
                     <button type="button" class="artifact-tab" data-tab="proposal" onclick="selectTab('proposal')">Proposal</button>
                     <button type="button" class="artifact-tab" data-tab="sow" onclick="selectTab('sow')">SOW</button>
+                </span>
+                <span class="tab-group tab-group-backlog">
+                    <span class="tab-group-label">Backlog</span>
+                    <button type="button" class="artifact-tab" data-tab="backlog" onclick="selectTab('backlog')">Generate</button>
+                    <button type="button" class="artifact-tab artifact-tab-disabled" id="backlogIntegrateNav" disabled aria-disabled="true">
+                        Integrate
+                        <span class="tab-coming-later">Coming later</span>
+                    </button>
                 </span>
             </div>
         </nav>
@@ -1350,6 +1431,38 @@
                 <pre class="artifact-print-sheet" data-print-sheet="sow"></pre>
             </section>
 
+            <section id="panel-backlog" class="artifact-panel">
+                <h2 class="card-title">Backlog</h2>
+                <div class="section-kicker">Generate a canonical delivery backlog from a completed Copilot workflow.</div>
+                <div class="backlog-subsections">
+                    <div class="backlog-subsection">
+                        <h3>Generate</h3>
+                        <p id="backlogAgentStatus" class="section-kicker">Backlog Agent availability is unknown.</p>
+                        <button id="generateBacklogButton" type="button" disabled>Generate Backlog</button>
+                        <p id="backlogGenerateProgress" class="section-kicker hidden">Generating backlog…</p>
+                        <p id="backlogGenerateError" class="backlog-error hidden" role="alert"></p>
+                    </div>
+                    <div class="backlog-subsection backlog-subsection-disabled" aria-disabled="true">
+                        <h3>Integrate</h3>
+                        <p class="section-kicker">Coming later. Azure DevOps integration is not available yet.</p>
+                        <button type="button" id="backlogIntegrateButton" disabled>Integrate</button>
+                    </div>
+                </div>
+                <div id="backlogSummary" class="backlog-summary hidden"></div>
+                <div id="backlogViewer" class="backlog-layout hidden">
+                    <div id="backlogTree" class="backlog-tree" aria-label="Backlog hierarchy"></div>
+                    <div id="backlogDetail" class="backlog-detail">
+                        <p class="empty">Select a work item to inspect its details.</p>
+                    </div>
+                </div>
+                <div id="backlogUnplaced" class="backlog-unplaced hidden"></div>
+                <div id="backlogFindings" class="backlog-findings hidden"></div>
+                <details id="backlogRawDetails" class="json-details hidden">
+                    <summary>Show raw backlog JSON</summary>
+                    <pre id="backlogRawJson"></pre>
+                </details>
+            </section>
+
             <details class="json-details">
                 <summary>Show workflow state / raw response</summary>
                 <pre id="rawResponse"></pre>
@@ -1669,6 +1782,11 @@
             panel.classList.remove("printing");
         });
         currentArtifactTab = tabName;
+        if (tabName === "backlog") {
+            startBacklogStatusPolling();
+        } else {
+            stopBacklogStatusPolling();
+        }
         const panel = document.getElementById(`panel-${tabName}`);
         if (!panel || !panel.classList.contains("active")) {
             return;
@@ -2175,6 +2293,7 @@
         renderSow(data.sow);
         renderVerdict(data);
         renderAssessment(data);
+        syncBacklogWithWorkflow(data, source);
 
         document.getElementById("rawResponse").textContent =
             JSON.stringify(data, null, 2);
@@ -2674,6 +2793,7 @@ function updateRunningStatus(message) {
         button.disabled = true;
         button.textContent = "Analyzing…";
         updateRunningStatus("Running workflow…");
+        resetBacklogForNewWorkflow();
 
         if (window.DeliveryAnalytics && typeof DeliveryAnalytics.trackAnalyzeStarted === "function") {
             DeliveryAnalytics.trackAnalyzeStarted();
@@ -2747,6 +2867,7 @@ function updateRunningStatus(message) {
         button.disabled = true;
         button.textContent = "Re-running workflow…";
         updateRunningStatus("Running workflow…");
+        resetBacklogForNewWorkflow();
         requestAnimationFrame(() => {
             const main = document.querySelector(".app-main");
             if (main) main.scrollTo({ top: 0, behavior: "smooth" });
@@ -2779,15 +2900,599 @@ function updateRunningStatus(message) {
         }
     }
 
+    const BACKLOG_POLL_MS = 60000;
+    const BACKLOG_TYPE_ORDER = ["epic", "feature", "user_story", "task", "subtask"];
+    let backlogAgentStatus = "unknown";
+    let backlogGenerating = false;
+    let backlogResult = null;
+    let backlogResultKey = null;
+    let backlogSelectedId = null;
+    let backlogExpanded = {};
+    let backlogPollTimer = null;
+    let backlogStatusInFlight = false;
+    let backlogIndex = null;
+
+    function workflowKey(data) {
+        if (!data || typeof data !== "object") return "";
+        return data.run_id ? String(data.run_id) : "";
+    }
+
+    function isCompleteEnvelope(data) {
+        return !!(
+            data
+            && typeof data === "object"
+            && data.status === "COMPLETE"
+            && data.workflow_status === "COMPLETE"
+        );
+    }
+
+    function canGenerateBacklog() {
+        return (
+            isCompleteEnvelope(currentData)
+            && backlogAgentStatus === "ready"
+            && !backlogGenerating
+        );
+    }
+
+    function shouldPollBacklogStatus() {
+        return currentArtifactTab === "backlog" && !document.hidden;
+    }
+
+    function setHidden(id, hidden) {
+        const element = document.getElementById(id);
+        if (!element) return;
+        element.classList.toggle("hidden", hidden);
+    }
+
+    function setBacklogError(message) {
+        const element = document.getElementById("backlogGenerateError");
+        if (!element) return;
+        element.textContent = message || "";
+        element.classList.toggle("hidden", !message);
+    }
+
+    function backlogStatusLabel(status) {
+        if (status === "ready") return "Backlog Agent is ready.";
+        if (status === "starting") return "Backlog Agent is starting. Generation is unavailable until it is ready.";
+        if (status === "unavailable") return "Backlog Agent is unavailable.";
+        return "Backlog Agent availability is unknown.";
+    }
+
+    function updateBacklogGenerateButton() {
+        const button = document.getElementById("generateBacklogButton");
+        const statusEl = document.getElementById("backlogAgentStatus");
+        if (statusEl) {
+            if (!isCompleteEnvelope(currentData)) {
+                statusEl.textContent = backlogStatusLabel(backlogAgentStatus)
+                    + " Generate Backlog requires a COMPLETE workflow.";
+            } else {
+                statusEl.textContent = backlogStatusLabel(backlogAgentStatus);
+            }
+        }
+        if (!button) return;
+        button.disabled = !canGenerateBacklog();
+        button.textContent = backlogGenerating ? "Generating…" : "Generate Backlog";
+        setHidden("backlogGenerateProgress", !backlogGenerating);
+    }
+
+    function clearBacklogViewer() {
+        backlogIndex = null;
+        backlogSelectedId = null;
+        backlogExpanded = {};
+        const summary = document.getElementById("backlogSummary");
+        if (summary) summary.innerHTML = "";
+        const tree = document.getElementById("backlogTree");
+        if (tree) tree.innerHTML = "";
+        const detail = document.getElementById("backlogDetail");
+        if (detail) {
+            detail.innerHTML = '<p class="empty">Select a work item to inspect its details.</p>';
+        }
+        const findings = document.getElementById("backlogFindings");
+        if (findings) findings.innerHTML = "";
+        const unplaced = document.getElementById("backlogUnplaced");
+        if (unplaced) unplaced.innerHTML = "";
+        const raw = document.getElementById("backlogRawJson");
+        if (raw) raw.textContent = "";
+        setHidden("backlogSummary", true);
+        setHidden("backlogViewer", true);
+        setHidden("backlogFindings", true);
+        setHidden("backlogUnplaced", true);
+        setHidden("backlogRawDetails", true);
+    }
+
+    function resetBacklogForNewWorkflow() {
+        backlogResult = null;
+        backlogResultKey = null;
+        setBacklogError("");
+        clearBacklogViewer();
+        updateBacklogGenerateButton();
+    }
+
+    function syncBacklogWithWorkflow(data, source) {
+        const key = workflowKey(data);
+        const newWorkflow = source === "analyze" || source === "clarify" || !source;
+        if (backlogResult && backlogResultKey && key && backlogResultKey !== key) {
+            resetBacklogForNewWorkflow();
+        } else if (backlogResult && newWorkflow && key && backlogResultKey !== key) {
+            resetBacklogForNewWorkflow();
+        }
+        updateBacklogGenerateButton();
+    }
+
+    function stopBacklogStatusPolling() {
+        if (backlogPollTimer) {
+            clearInterval(backlogPollTimer);
+            backlogPollTimer = null;
+        }
+    }
+
+    function startBacklogStatusPolling() {
+        if (!shouldPollBacklogStatus()) return;
+        checkBacklogStatus();
+        if (backlogPollTimer) return;
+        backlogPollTimer = setInterval(() => {
+            if (!shouldPollBacklogStatus()) {
+                stopBacklogStatusPolling();
+                return;
+            }
+            checkBacklogStatus();
+        }, BACKLOG_POLL_MS);
+    }
+
+    async function checkBacklogStatus() {
+        if (backlogStatusInFlight) return;
+        if (!shouldPollBacklogStatus()) return;
+        backlogStatusInFlight = true;
+        try {
+            const response = await fetch("/backlog/status");
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (_) {
+                payload = null;
+            }
+            const status = payload && typeof payload.status === "string"
+                ? payload.status
+                : "unavailable";
+            if (status === "ready" || status === "starting" || status === "unavailable") {
+                backlogAgentStatus = status;
+            } else {
+                backlogAgentStatus = "unavailable";
+            }
+        } catch (_) {
+            backlogAgentStatus = "unavailable";
+        } finally {
+            backlogStatusInFlight = false;
+            updateBacklogGenerateButton();
+        }
+    }
+
+    async function generateBacklog() {
+        if (backlogGenerating || !canGenerateBacklog()) return;
+        const envelope = currentData;
+        if (!isCompleteEnvelope(envelope)) return;
+        backlogGenerating = true;
+        setBacklogError("");
+        updateBacklogGenerateButton();
+        try {
+            const response = await fetch("/backlog", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(envelope)
+            });
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (_) {
+                payload = null;
+            }
+            if (!response.ok) {
+                const message = payload && (payload.message || payload.error)
+                    ? String(payload.message || payload.error)
+                    : "Backlog generation did not complete.";
+                setBacklogError(message);
+                return;
+            }
+            if (!payload || typeof payload !== "object" || !("backlog" in payload) || !("findings" in payload)) {
+                setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown.");
+                return;
+            }
+            backlogResult = payload;
+            backlogResultKey = workflowKey(currentData);
+            renderBacklogViewer(payload);
+        } catch (_) {
+            setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown.");
+        } finally {
+            backlogGenerating = false;
+            updateBacklogGenerateButton();
+        }
+    }
+
+    function asList(value) {
+        return Array.isArray(value) ? value : [];
+    }
+
+    function backlogItems(payload) {
+        const backlog = payload && payload.backlog;
+        if (Array.isArray(backlog)) return backlog.filter(item => item && typeof item === "object");
+        if (backlog && typeof backlog === "object") {
+            return asList(backlog.items).filter(item => item && typeof item === "object");
+        }
+        return [];
+    }
+
+    function backlogFindings(payload) {
+        const findings = payload && payload.findings;
+        if (Array.isArray(findings)) {
+            return findings.filter(item => item && typeof item === "object");
+        }
+        if (findings && typeof findings === "object") {
+            return asList(findings.items).filter(item => item && typeof item === "object");
+        }
+        return [];
+    }
+
+    function formatBacklogType(type) {
+        return String(type || "item").replaceAll("_", " ");
+    }
+
+    function displayBacklogTitle(item) {
+        const title = String((item && item.title) || "").trim() || "Untitled item";
+        const first = title.split(/\r?\n/, 1)[0];
+        return first.length > 120 ? first.slice(0, 117) + "…" : first;
+    }
+
+    function buildBacklogIndex(payload) {
+        const items = backlogItems(payload);
+        const byId = new Map();
+        items.forEach(item => {
+            const id = String(item.canonical_id || "");
+            if (id) byId.set(id, item);
+        });
+        const placed = new Set();
+        const missingChildren = [];
+        const makeNode = (item, depth) => {
+            const id = String(item.canonical_id || "");
+            if (id) placed.add(id);
+            const children = [];
+            asList(item.child_ids).forEach(childId => {
+                const child = byId.get(String(childId));
+                if (!child) {
+                    missingChildren.push({ parentId: id, childId: String(childId) });
+                    return;
+                }
+                children.push(makeNode(child, depth + 1));
+            });
+            return { item, children, depth };
+        };
+        const roots = [];
+        const unplaced = [];
+        items.forEach(item => {
+            const parentId = item.parent_id ? String(item.parent_id) : "";
+            if (parentId && byId.has(parentId)) return;
+            const id = String(item.canonical_id || "");
+            if (id && placed.has(id)) return;
+            if (!id) {
+                unplaced.push({ item, children: [], depth: 0 });
+                return;
+            }
+            if (parentId && !byId.has(parentId)) {
+                unplaced.push(makeNode(item, 0));
+                return;
+            }
+            roots.push(makeNode(item, 0));
+        });
+        items.forEach(item => {
+            const id = String(item.canonical_id || "");
+            if (!id) {
+                if (!unplaced.some(node => node.item === item)) {
+                    unplaced.push({ item, children: [], depth: 0 });
+                }
+                return;
+            }
+            if (!placed.has(id)) unplaced.push(makeNode(item, 0));
+        });
+        const findingsByItem = new Map();
+        backlogFindings(payload).forEach(finding => {
+            asList(finding.canonical_ids).forEach(id => {
+                const key = String(id);
+                const list = findingsByItem.get(key) || [];
+                list.push(finding);
+                findingsByItem.set(key, list);
+            });
+        });
+        const dependents = new Map();
+        items.forEach(item => {
+            asList(item.dependencies).forEach(depId => {
+                const key = String(depId);
+                const list = dependents.get(key) || [];
+                list.push(String(item.canonical_id || ""));
+                dependents.set(key, list);
+            });
+        });
+        return { items, byId, roots, unplaced, missingChildren, findingsByItem, dependents };
+    }
+
+    function typeCounts(items) {
+        const counts = {};
+        BACKLOG_TYPE_ORDER.forEach(type => { counts[type] = 0; });
+        items.forEach(item => {
+            const type = String(item.type || "unknown");
+            counts[type] = (counts[type] || 0) + 1;
+        });
+        return counts;
+    }
+
+    function severityCounts(findings) {
+        const counts = { error: 0, warning: 0, info: 0 };
+        findings.forEach(finding => {
+            const severity = String(finding.severity || "").toLowerCase();
+            if (severity in counts) counts[severity] += 1;
+        });
+        return counts;
+    }
+
+    function renderBacklogTreeRows(nodes) {
+        return nodes.map(node => {
+            const item = node.item;
+            const id = String(item.canonical_id || "");
+            const hasChildren = node.children.length > 0;
+            const expanded = !id || backlogExpanded[id] !== false;
+            const active = id && id === backlogSelectedId;
+            const indent = 8 + node.depth * 14;
+            const toggle = hasChildren
+                ? `<button type="button" class="backlog-tree-toggle" data-backlog-toggle="${escapeHtml(id)}" aria-label="${expanded ? "Collapse" : "Expand"}">${expanded ? "▾" : "▸"}</button>`
+                : `<button type="button" class="backlog-tree-toggle" disabled>•</button>`;
+            const row = `<div class="backlog-tree-row${active ? " active" : ""}" style="padding-left:${indent}px" data-backlog-item="${escapeHtml(id)}" role="button">
+                ${toggle}
+                <span class="backlog-type">${escapeHtml(formatBacklogType(item.type))}</span>
+                <span>${escapeHtml(displayBacklogTitle(item))}</span>
+            </div>`;
+            const kids = hasChildren && expanded ? renderBacklogTreeRows(node.children) : "";
+            return row + kids;
+        }).join("");
+    }
+
+    function renderStringList(values) {
+        const items = asList(values).map(value => String(value)).filter(Boolean);
+        if (!items.length) return "";
+        return `<ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+    }
+
+    function renderProvenance(references) {
+        const items = asList(references).filter(item => item && typeof item === "object");
+        if (!items.length) return '<p class="empty">No source references provided.</p>';
+        return items.map(ref => {
+            const path = ref.json_path ? `<div class="backlog-id">${escapeHtml(String(ref.json_path))}</div>` : "";
+            const field = ref.field_name ? `<div>${escapeHtml(String(ref.field_name))}</div>` : "";
+            const excerpt = ref.excerpt ? `<p>${escapeHtml(String(ref.excerpt))}</p>` : "";
+            const contract = ref.contract_id ? `<div class="backlog-id">${escapeHtml(String(ref.contract_id))}</div>` : "";
+            return `<div class="backlog-field">${contract}${path}${field}${excerpt}</div>`;
+        }).join("");
+    }
+
+    function renderEffort(effort) {
+        if (!effort || typeof effort !== "object") return "";
+        const parts = [];
+        if (effort.story_points != null && effort.story_points !== "") {
+            parts.push(`Story points: ${escapeHtml(String(effort.story_points))}`);
+        }
+        if (effort.original_estimate_hours != null && effort.original_estimate_hours !== "") {
+            parts.push(`Original estimate (hours): ${escapeHtml(String(effort.original_estimate_hours))}`);
+        }
+        if (effort.remaining_hours != null && effort.remaining_hours !== "") {
+            parts.push(`Remaining hours: ${escapeHtml(String(effort.remaining_hours))}`);
+        }
+        if (effort.textual_estimate) {
+            parts.push(escapeHtml(String(effort.textual_estimate)));
+        }
+        if (!parts.length) return "";
+        return `<div class="backlog-field"><h4>Effort</h4><p>${parts.join("<br>")}</p></div>`;
+    }
+
+    function itemLink(id) {
+        const item = backlogIndex && backlogIndex.byId.get(String(id));
+        const label = item ? displayBacklogTitle(item) : String(id);
+        return `<button type="button" class="backlog-link" data-backlog-item="${escapeHtml(String(id))}">${escapeHtml(label)}</button>`;
+    }
+
+    function renderBacklogDetail(item) {
+        const detail = document.getElementById("backlogDetail");
+        if (!detail) return;
+        if (!item) {
+            detail.innerHTML = '<p class="empty">Select a work item to inspect its details.</p>';
+            return;
+        }
+        const parentId = item.parent_id ? String(item.parent_id) : "";
+        const parentHtml = parentId
+            ? (backlogIndex.byId.has(parentId) ? itemLink(parentId) : `<p class="empty">Broken parent reference: ${escapeHtml(parentId)}</p>`)
+            : '<p class="empty">No parent</p>';
+        const childrenHtml = asList(item.child_ids).length
+            ? asList(item.child_ids).map(id => itemLink(id)).join(" ")
+            : "";
+        const depsHtml = asList(item.dependencies).length
+            ? asList(item.dependencies).map(id => itemLink(id)).join(" ")
+            : "";
+        const criteria = renderStringList(item.acceptance_criteria);
+        const tests = renderStringList(item.test_requirements);
+        const findings = (backlogIndex.findingsByItem.get(String(item.canonical_id || "")) || [])
+            .map(finding => `<div class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
+                <strong>${escapeHtml(String(finding.severity || ""))}</strong>
+                ${finding.code ? ` · ${escapeHtml(String(finding.code))}` : ""}
+                <p>${escapeHtml(String(finding.message || ""))}</p>
+            </div>`).join("");
+        detail.innerHTML = `
+            <div class="backlog-detail-meta">
+                <span class="backlog-chip">${escapeHtml(formatBacklogType(item.type))}</span>
+                ${item.status ? `<span class="backlog-chip">${escapeHtml(String(item.status))}</span>` : ""}
+                ${item.priority ? `<span class="backlog-chip">${escapeHtml(String(item.priority))}</span>` : ""}
+                ${item.approval_state ? `<span class="backlog-chip">${escapeHtml(String(item.approval_state))}</span>` : ""}
+            </div>
+            <h3>${escapeHtml(displayBacklogTitle(item))}</h3>
+            <div class="backlog-id">${escapeHtml(String(item.canonical_id || ""))}</div>
+            <div class="backlog-field"><h4>Description</h4>${item.description ? `<p>${escapeHtml(String(item.description))}</p>` : '<p class="empty">No description provided.</p>'}</div>
+            <div class="backlog-field"><h4>Parent</h4>${parentHtml}</div>
+            ${childrenHtml ? `<div class="backlog-field"><h4>Children</h4>${childrenHtml}</div>` : ""}
+            ${criteria ? `<div class="backlog-field"><h4>Acceptance criteria</h4>${criteria}</div>` : ""}
+            ${tests ? `<div class="backlog-field"><h4>Test requirements</h4>${tests}</div>` : ""}
+            ${depsHtml ? `<div class="backlog-field"><h4>Dependencies</h4>${depsHtml}</div>` : ""}
+            ${renderEffort(item.effort)}
+            <div class="backlog-field"><h4>Source references</h4>${renderProvenance(item.provenance)}</div>
+            ${findings ? `<div class="backlog-field"><h4>Related findings</h4>${findings}</div>` : ""}
+        `;
+    }
+
+    function renderBacklogFindings(findings) {
+        const container = document.getElementById("backlogFindings");
+        if (!container) return;
+        if (!findings.length) {
+            container.innerHTML = "<h3>Findings</h3><p class=\"empty\">No findings returned.</p>";
+            return;
+        }
+        container.innerHTML = "<h3>Findings</h3>" + findings.map(finding => {
+            const refs = asList(finding.source_references)
+                .filter(item => item && typeof item === "object")
+                .map(ref => {
+                    const path = ref.json_path ? escapeHtml(String(ref.json_path)) : "";
+                    const excerpt = ref.excerpt ? escapeHtml(String(ref.excerpt)) : "";
+                    return `<div class="backlog-id">${path}</div>${excerpt ? `<p>${excerpt}</p>` : ""}`;
+                }).join("");
+            const items = asList(finding.canonical_ids).map(id => itemLink(id)).join(" ");
+            return `<article class="backlog-finding ${escapeHtml(String(finding.severity || ""))}">
+                <strong>${escapeHtml(String(finding.severity || "info"))}</strong>
+                ${finding.code ? ` · ${escapeHtml(String(finding.code))}` : ""}
+                <p>${escapeHtml(String(finding.message || ""))}</p>
+                ${items ? `<div>${items}</div>` : ""}
+                ${refs}
+            </article>`;
+        }).join("");
+    }
+
+    function renderBacklogViewer(payload) {
+        backlogIndex = buildBacklogIndex(payload);
+        const items = backlogIndex.items;
+        const findings = backlogFindings(payload);
+        if (!backlogSelectedId && items.length) {
+            const first = items.find(item => item && item.canonical_id);
+            backlogSelectedId = first ? String(first.canonical_id) : null;
+        }
+        items.forEach(item => {
+            const id = String(item.canonical_id || "");
+            if (id && backlogExpanded[id] === undefined) {
+                const type = String(item.type || "");
+                backlogExpanded[id] = type === "epic" || type === "feature";
+            }
+        });
+        const counts = typeCounts(items);
+        const severities = severityCounts(findings);
+        const summary = document.getElementById("backlogSummary");
+        if (summary) {
+            const chips = BACKLOG_TYPE_ORDER
+                .filter(type => counts[type])
+                .map(type => `<span class="backlog-chip">${escapeHtml(formatBacklogType(type))}: ${counts[type]}</span>`);
+            Object.keys(counts).forEach(type => {
+                if (BACKLOG_TYPE_ORDER.indexOf(type) === -1 && counts[type]) {
+                    chips.push(`<span class="backlog-chip">${escapeHtml(formatBacklogType(type))}: ${counts[type]}</span>`);
+                }
+            });
+            if (severities.error) chips.push(`<span class="backlog-chip error">errors: ${severities.error}</span>`);
+            if (severities.warning) chips.push(`<span class="backlog-chip warning">warnings: ${severities.warning}</span>`);
+            if (severities.info) chips.push(`<span class="backlog-chip">info: ${severities.info}</span>`);
+            chips.push(`<span class="backlog-chip">items: ${items.length}</span>`);
+            summary.innerHTML = chips.join("");
+        }
+        const tree = document.getElementById("backlogTree");
+        if (tree) {
+            const body = renderBacklogTreeRows(backlogIndex.roots);
+            tree.innerHTML = body || '<p class="empty">No work items were returned.</p>';
+        }
+        const unplaced = document.getElementById("backlogUnplaced");
+        if (unplaced) {
+            const missing = backlogIndex.missingChildren.map(entry =>
+                `<p>Broken child reference: ${escapeHtml(entry.parentId)} → ${escapeHtml(entry.childId)}</p>`
+            ).join("");
+            const extra = backlogIndex.unplaced.map(node =>
+                `<button type="button" class="backlog-link" data-backlog-item="${escapeHtml(String(node.item.canonical_id || ""))}">${escapeHtml(displayBacklogTitle(node.item))}</button>`
+            ).join(" ");
+            if (missing || extra) {
+                unplaced.innerHTML = "<h3>Items outside the expected hierarchy</h3>" + extra + missing;
+                unplaced.classList.remove("hidden");
+            } else {
+                unplaced.innerHTML = "";
+                unplaced.classList.add("hidden");
+            }
+        }
+        setHidden("backlogSummary", false);
+        setHidden("backlogViewer", false);
+        setHidden("backlogFindings", false);
+        setHidden("backlogRawDetails", false);
+        const raw = document.getElementById("backlogRawJson");
+        if (raw) raw.textContent = JSON.stringify(payload, null, 2);
+        const selected = backlogSelectedId ? backlogIndex.byId.get(backlogSelectedId) : null;
+        renderBacklogDetail(selected || null);
+        renderBacklogFindings(findings);
+    }
+
+    function selectBacklogItem(id) {
+        if (!id || !backlogIndex) return;
+        backlogSelectedId = String(id);
+        const tree = document.getElementById("backlogTree");
+        if (tree && backlogResult) {
+            tree.innerHTML = renderBacklogTreeRows(backlogIndex.roots) || tree.innerHTML;
+        }
+        renderBacklogDetail(backlogIndex.byId.get(backlogSelectedId) || null);
+    }
+
+    function toggleBacklogNode(id) {
+        if (!id) return;
+        backlogExpanded[id] = backlogExpanded[id] === false;
+        if (backlogResult) renderBacklogViewer(backlogResult);
+    }
+
     document.addEventListener("click", event => {
         const tabs = document.getElementById("artifactTabs");
         const button = event.target.closest(".artifact-tab");
         if (!button || !tabs || !tabs.contains(button)) return;
+        if (button.disabled || button.getAttribute("aria-disabled") === "true") {
+            event.preventDefault();
+            return;
+        }
         const name = button.getAttribute("data-tab");
         if (!name) return;
         event.preventDefault();
         selectTab(name);
     }, true);
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            stopBacklogStatusPolling();
+            return;
+        }
+        if (currentArtifactTab === "backlog") {
+            startBacklogStatusPolling();
+        }
+    });
+
+    const generateBacklogButton = document.getElementById("generateBacklogButton");
+    if (generateBacklogButton) {
+        generateBacklogButton.addEventListener("click", generateBacklog);
+    }
+    const backlogPanel = document.getElementById("panel-backlog");
+    if (backlogPanel) {
+        backlogPanel.addEventListener("click", event => {
+            const toggle = event.target.closest("[data-backlog-toggle]");
+            if (toggle) {
+                event.preventDefault();
+                toggleBacklogNode(toggle.getAttribute("data-backlog-toggle"));
+                return;
+            }
+            const item = event.target.closest("[data-backlog-item]");
+            if (item) {
+                event.preventDefault();
+                selectBacklogItem(item.getAttribute("data-backlog-item"));
+            }
+        });
+    }
 
     // Use an explicit event listener rather than an inline onclick handler.
     // This makes clarification submission reliable even when the page is

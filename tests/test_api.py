@@ -174,6 +174,7 @@ def test_home_page():
     assert 'data-tab="delivery_review"' in response.text
     assert 'data-tab="proposal"' in response.text
     assert 'data-tab="sow"' in response.text
+    assert 'data-tab="backlog"' in response.text
     assert 'id="questions"' in response.text
     assert 'id="verdictNext"' in response.text
     assert 'id="optimizeButtonPanel"' in response.text
@@ -182,12 +183,14 @@ def test_home_page():
     assert "Analysis" in sidebar
     assert "Evidence" in sidebar
     assert "Outputs" in sidebar
+    assert "Backlog" in sidebar
     result_html = response.text.split('id="result"', 1)[1].split("<script>", 1)[0]
     assert 'id="artifactTabs"' not in result_html
     assert ">Workspaces<" not in response.text
     for panel in (
         "assessment", "discovery", "requirements", "validation", "solution",
         "delivery_plan", "estimate", "delivery_review", "proposal", "sow",
+        "backlog",
     ):
         assert f'id="panel-{panel}"' in response.text
         assert f'data-tab="{panel}"' in sidebar

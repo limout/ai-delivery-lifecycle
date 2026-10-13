@@ -25,6 +25,15 @@ from app.providers import (
     MockProvider,
     llm_usage_record,
 )
+from app.backlog_client import (
+    BacklogConfigError,
+    BacklogDownstreamError,
+    BacklogGenerationUnconfirmedError,
+    BacklogNotReadyError,
+    BacklogUnavailableError,
+    backlog_status,
+    generate_backlog,
+)
 from app.resume import answers_require_upstream_regen
 from app.runs import artifacts_from_payload, get_run, new_run_id, save_run
 
@@ -844,6 +853,77 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+def _complete_envelope(payload: dict) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("status") == "COMPLETE"
+        and payload.get("workflow_status") == "COMPLETE"
+    )
+
+
+@router.get("/backlog/status")
+async def backlog_agent_status() -> dict:
+    return await backlog_status()
+
+
+@router.post("/backlog")
+async def create_backlog(payload: dict):
+    if not _complete_envelope(payload):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "INCOMPLETE_WORKFLOW",
+                "message": "Backlog generation requires status and workflow_status to equal COMPLETE.",
+            },
+        )
+    try:
+        return await generate_backlog(payload)
+    except BacklogConfigError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "BACKLOG_NOT_CONFIGURED",
+                "message": "Backlog Agent is not configured.",
+            },
+        )
+    except BacklogNotReadyError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "BACKLOG_STARTING",
+                "message": "Backlog Agent did not become ready in time.",
+            },
+        )
+    except BacklogUnavailableError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "BACKLOG_UNAVAILABLE",
+                "message": "Backlog Agent is unavailable.",
+            },
+        )
+    except BacklogGenerationUnconfirmedError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "BACKLOG_GENERATION_UNCONFIRMED",
+                "message": "Backlog generation did not return a confirmed result. The outcome is unknown.",
+            },
+        )
+    except BacklogDownstreamError as exc:
+        status_code = 422 if exc.status_code == 422 else 502
+        code = "BACKLOG_REJECTED" if exc.status_code == 422 else "BACKLOG_DOWNSTREAM_ERROR"
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": code,
+                "message": "Backlog Agent rejected the request."
+                if exc.status_code == 422
+                else "Backlog Agent returned an error.",
+            },
+        )
 
 
 def _config_build() -> str:
