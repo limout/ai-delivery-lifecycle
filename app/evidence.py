@@ -50,6 +50,71 @@ _ACTION_OBJECT = re.compile(
     re.I,
 )
 
+_STATED_ACTION_VERBS = (
+    "log in",
+    "sign in",
+    "authenticate",
+    "login",
+    "view",
+    "submit",
+    "track",
+    "manage",
+    "create",
+    "search",
+    "export",
+    "import",
+    "display",
+    "approve",
+    "onboard",
+    "update",
+    "edit",
+    "place",
+    "browse",
+    "upload",
+    "download",
+    "cancel",
+    "assign",
+    "notify",
+)
+_STATED_VERB_ALT = "|".join(
+    sorted((re.escape(verb) for verb in _STATED_ACTION_VERBS), key=len, reverse=True)
+)
+_NOUN = rf"(?!{_STATED_VERB_ALT}\b)[a-z][\w'-]*"
+_COORDINATED_ACTIONS = re.compile(
+    rf"\b((?:{_STATED_VERB_ALT})(?:\s*(?:,|/|\band\b)\s*(?:{_STATED_VERB_ALT}))+)\s+"
+    rf"(?:the\s+|a\s+|an\s+)?({_NOUN}(?:\s+{_NOUN}){{0,3}})",
+    re.I,
+)
+_SIMPLE_ACTION_OBJECT = re.compile(
+    rf"\b({_STATED_VERB_ALT})\s+(?:the\s+|a\s+|an\s+)?({_NOUN}(?:\s+{_NOUN}){{0,3}})",
+    re.I,
+)
+_STANDALONE_AUTH = re.compile(r"\b(log\s*in|sign\s*in|authenticate|login)\b", re.I)
+_SOURCE_OF_TRUTH = re.compile(r"\b(source of truth|system of record)\b", re.I)
+_OBJECT_TRIM = re.compile(
+    r"\s+(?:and|or|with|using|via|so|that|who|which|where|when|,|;|:|\.)\b",
+    re.I,
+)
+_AUTH_VERBS = frozenset({"log in", "login", "sign in", "signin", "authenticate", "authentication"})
+_VERB_FAMILIES = (
+    _AUTH_VERBS,
+    frozenset({"view", "display", "see", "read", "browse"}),
+    frozenset({"create", "submit", "file", "raise", "open", "place"}),
+    frozenset({"track", "tracking", "follow"}),
+    frozenset({"update", "edit"}),
+    frozenset({"manage", "maintain"}),
+    frozenset({"search", "find"}),
+    frozenset({"export"}),
+    frozenset({"import"}),
+    frozenset({"approve", "approval"}),
+    frozenset({"upload"}),
+    frozenset({"download"}),
+    frozenset({"cancel"}),
+    frozenset({"assign"}),
+    frozenset({"notify", "notification"}),
+    frozenset({"onboard", "onboarding"}),
+)
+
 _NAMED_SYSTEM = re.compile(
     r"\b(salesforce|sap|jira|servicenow|workday|dynamics|sharepoint|"
     r"entra|okta|auth0|aws|azure|gcp|snowflake|postgres|mysql|"
@@ -325,6 +390,125 @@ def is_material_question(text: str) -> bool:
     if is_non_blocking_topic(lower):
         return False
     return any(marker in lower for marker in _MATERIAL_QUESTION_MARKERS)
+
+
+def _normalize_action_verb(verb: str) -> str:
+    return re.sub(r"\s+", " ", str(verb or "").strip().lower())
+
+
+def _trim_action_object(raw: str) -> str:
+    text = str(raw or "").strip().lower()
+    cut = _OBJECT_TRIM.search(text)
+    if cut:
+        text = text[: cut.start()].strip()
+    tokens = [token for token in re.findall(r"[a-z0-9']+", text) if token not in _STOPWORDS]
+    return " ".join(tokens[:4]).strip()
+
+
+def _verb_family(verb: str) -> frozenset[str]:
+    normalized = _normalize_action_verb(verb)
+    for family in _VERB_FAMILIES:
+        if normalized in family:
+            return family
+    return frozenset({normalized})
+
+
+def _split_coordinated_verbs(blob: str) -> list[str]:
+    parts = re.split(r"\s*(?:,|/|\band\b)\s*", str(blob or ""), flags=re.I)
+    return [_normalize_action_verb(part) for part in parts if _normalize_action_verb(part)]
+
+
+def stated_request_outcomes(text: str) -> tuple[str, ...]:
+    """Independently testable action/outcome phrases stated by the customer."""
+    source = str(text or "")
+    found: list[tuple[str, str]] = []
+    used_spans: list[tuple[int, int]] = []
+
+    def already_used(start: int, end: int) -> bool:
+        return any(start < stop and end > begin for begin, stop in used_spans)
+
+    for match in _COORDINATED_ACTIONS.finditer(source):
+        verbs = _split_coordinated_verbs(match.group(1))
+        obj = _trim_action_object(match.group(2))
+        used_spans.append(match.span())
+        for verb in verbs:
+            if verb in _AUTH_VERBS:
+                found.append((verb, ""))
+            elif obj:
+                found.append((verb, obj))
+
+    for match in _SIMPLE_ACTION_OBJECT.finditer(source):
+        if already_used(*match.span()):
+            continue
+        verb = _normalize_action_verb(match.group(1))
+        obj = _trim_action_object(match.group(2))
+        if verb in _AUTH_VERBS:
+            found.append((verb, ""))
+            continue
+        if obj:
+            found.append((verb, obj))
+
+    if _STANDALONE_AUTH.search(source) and not any(verb in _AUTH_VERBS for verb, _obj in found):
+        found.append(("log in", ""))
+
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for verb, obj in found:
+        phrase = f"{verb} {obj}".strip()
+        key = phrase
+        if verb in _AUTH_VERBS:
+            key = "authenticate"
+            phrase = "authenticate"
+        if key in seen:
+            continue
+        seen.add(key)
+        phrases.append(phrase)
+    if _SOURCE_OF_TRUTH.search(source):
+        phrases.append("source of truth")
+    return tuple(phrases)
+
+
+def outcome_is_covered(outcome: str, requirements_text: str) -> bool:
+    """True when requirements preserve the stated action, not only a shared object."""
+    blob = str(requirements_text or "").lower()
+    phrase = str(outcome or "").strip().lower()
+    if not phrase or not blob:
+        return False
+    if phrase == "source of truth":
+        return bool(_SOURCE_OF_TRUTH.search(blob))
+    if phrase in blob:
+        return True
+    parts = phrase.split(None, 1)
+    verb = parts[0] if parts else ""
+    obj = parts[1] if len(parts) > 1 else ""
+    if phrase in _AUTH_VERBS or verb in _AUTH_VERBS:
+        return any(token in blob for token in _AUTH_VERBS)
+    family = _verb_family(verb)
+    if not any(re.search(rf"\b{re.escape(token)}\b", blob) for token in family if token):
+        return False
+    if not obj:
+        return True
+    tokens = [token for token in re.findall(r"[a-z0-9]{3,}", obj) if token not in _STOPWORDS]
+    if not tokens:
+        return True
+    return all(token in blob for token in tokens)
+
+
+def uncovered_request_outcomes(source: str, requirements: dict | None) -> tuple[str, ...]:
+    """Request-stated outcomes missing from functional requirements and acceptance criteria."""
+    requirements = requirements or {}
+    blob = " ".join(
+        [
+            " ".join(str(item) for item in requirements.get("functional_requirements") or []),
+            " ".join(str(item) for item in requirements.get("acceptance_criteria") or []),
+            " ".join(str(item) for item in requirements.get("non_functional_requirements") or []),
+        ]
+    )
+    return tuple(
+        outcome
+        for outcome in stated_request_outcomes(source)
+        if not outcome_is_covered(outcome, blob)
+    )
 
 
 def statement_is_explicit(statement: str, source: str) -> bool:

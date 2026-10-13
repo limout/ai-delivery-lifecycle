@@ -9,6 +9,7 @@ from app.evidence import (
     is_estimable,
     is_non_substantive_clarification_answer,
     material_evidence_gaps,
+    uncovered_request_outcomes,
 )
 from app.timeline import (
     WEEKS_PER_MONTH,
@@ -981,6 +982,8 @@ def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> di
     for key in ("functional_requirements", "non_functional_requirements", "acceptance_criteria"):
         for item in requirements.get(key, []) or []:
             text = str(item)
+            if key == "non_functional_requirements" and _is_delivery_planning_constraint(text):
+                continue
             if is_grounded(text):
                 grounded[key].append(text)
             else:
@@ -1117,18 +1120,50 @@ def _ground_requirements_to_discovery(discovery: dict, requirements: dict) -> di
     return grounded
 
 
+_PRODUCT_QUALITY = re.compile(
+    r"\b(security|performance|accessibility|compliance|encrypt|latency|"
+    r"availability|uptime|throughput|privacy|audit|p95|sla)\b",
+    re.I,
+)
+_DELIVERY_PLANNING = re.compile(
+    r"\b(internal target|planning target|planning horizon|planning date|"
+    r"not (?:a )?contractual|not binding|deadline|timeline|go-?live|"
+    r"launch within|delivered within|target delivery)\b",
+    re.I,
+)
+
+
+def _is_delivery_planning_constraint(text: str) -> bool:
+    """True for launch windows and internal dates, not product quality attributes."""
+    lower = str(text or "").lower()
+    if not _DELIVERY_PLANNING.search(lower):
+        return False
+    if _PRODUCT_QUALITY.search(lower):
+        return False
+    return True
+
+
 def requirements_agent(
     state: DeliveryState,
     provider: AIProvider,
 ) -> dict:
 
     discovery = state["discovery"]
+    request = state.get("user_request") or ""
+    clarification_context = _clarification_context(state)
+    source = customer_authored_text(state) or request
 
     prompt = f"""
 You are a senior Business Analyst and Software Requirements Engineer.
 
-Transform the structured discovery below into an initial
+Transform the customer request and structured discovery into an initial
 requirements definition.
+
+Original customer request:
+
+{request}
+
+{clarification_context}
 
 DISCOVERY:
 
@@ -1136,22 +1171,36 @@ DISCOVERY:
 
 IMPORTANT RULES:
 
-1. Only derive requirements supported by the discovery.
-2. Do not invent detailed features.
-3. Every concrete customer capability in discovery must be
-   represented by at least one functional requirement when it is
-   specific enough to state as system behavior.
-4. Functional requirements describe what the system should do.
-5. Non-functional requirements describe only justified qualities or
-   explicit constraints such as security, performance, accessibility,
-   or compliance.
-6. Acceptance criteria must be observable and testable.
-7. If information is insufficient, put the missing detail into
+1. Derive requirements from the original customer request and discovery.
+   Discovery is a summary and must not drop a customer-stated outcome.
+2. Do not invent detailed features, APIs, schemas, or unspecified behavior.
+3. Extract every materially distinct user-visible or operational outcome
+   stated in the request. Independently testable actions stay separate
+   (for example view versus update, or create versus track). Do not
+   collapse them into one vague capability, and do not replace an
+   explicit user-facing outcome with an infrastructure or integration
+   requirement.
+4. Preserve explicit verbs and action distinctions from the request.
+   Deduplicate genuine synonyms, but keep distinct behaviors.
+5. Keep integration constraints and source-of-truth statements in
+   addition to user-facing outcomes, never instead of them.
+6. Functional requirements describe what the system should do.
+7. Non-functional requirements describe only justified product qualities
+   or explicit product constraints such as security, performance,
+   accessibility, or compliance. An internal target date, planning
+   horizon, or desired launch window is a delivery constraint, not a
+   product non-functional requirement and not a contractual commitment
+   unless the customer stated it as binding.
+8. Acceptance criteria must be observable and testable and must cover
+   each material outcome, not merely reproduce the number of functional
+   requirements.
+9. If information is insufficient, put the missing detail into
    open_questions rather than inventing an answer.
-8. Identify contradictions between discovery facts and requirements.
-9. Do not treat assumptions as confirmed requirements.
-10. Do not return empty requirement lists when the discovery contains
-    concrete capabilities or constraints.
+10. Identify contradictions between request facts, discovery facts, and
+    requirements.
+11. Do not treat assumptions as confirmed requirements.
+12. Do not return empty requirement lists when the request or discovery
+    contains concrete capabilities or constraints.
 """
 
     requirements = provider.generate_json(
@@ -1163,6 +1212,11 @@ IMPORTANT RULES:
         retry_prompt = f"""
 Rebuild the requirements artifact using a strict provenance rule.
 
+Original customer request:
+{request}
+
+{clarification_context}
+
 DISCOVERY (customer-confirmed facts only):
 {discovery}
 
@@ -1170,18 +1224,62 @@ PREVIOUS REQUIREMENTS:
 {requirements}
 
 Rules:
-1. A confirmed requirement MUST be directly supported by customer-confirmed discovery facts or explicit customer constraints.
+1. A confirmed requirement MUST be directly supported by the original
+   customer request, customer-confirmed discovery facts, or explicit
+   customer constraints.
 2. NEVER convert discovery.unknowns into requirements.
 3. NEVER invent numeric commitments such as uptime, response time, user volume, performance targets, or compliance standards.
 4. If a detail is unknown, put the question in open_questions.
 5. Do not turn assumptions into confirmed requirements.
-6. Acceptance criteria may only test grounded requirements.
-7. Keep the customer's explicit launch deadline as a requirement/constraint.
+6. Acceptance criteria may only test grounded requirements and must cover
+   each material request-stated outcome.
+7. Do not record an internal target date or planning horizon as a product
+   non-functional requirement or contractual commitment.
+8. Do not drop independently testable request-stated outcomes.
 
 Return the complete requirements schema.
 """
         requirements = provider.generate_json(
             prompt=retry_prompt,
+            schema=REQUIREMENTS_SCHEMA,
+        )
+
+    missing_outcomes = uncovered_request_outcomes(source, requirements)
+    if missing_outcomes:
+        listed = "\n".join(f"- {item}" for item in missing_outcomes)
+        coverage_prompt = f"""
+Rebuild the requirements artifact so every listed customer-stated
+outcome remains a distinct functional requirement with covering
+acceptance criteria. Do not invent unspecified behavior.
+
+Original customer request:
+{request}
+
+{clarification_context}
+
+DISCOVERY:
+{discovery}
+
+PREVIOUS REQUIREMENTS:
+{requirements}
+
+Missing stated outcomes:
+{listed}
+
+Rules:
+1. Keep each listed outcome as its own independently testable behavior.
+   Do not collapse it into a sibling action or into an integration item.
+2. Preserve integration and source-of-truth constraints alongside those
+   outcomes, not instead of them.
+3. Put unknown implementation details in open_questions.
+4. Do not treat an internal target date as a product non-functional
+   requirement or contractual commitment.
+5. Do not invent APIs, schemas, or behavior the customer did not state.
+
+Return the complete requirements schema.
+"""
+        requirements = provider.generate_json(
+            prompt=coverage_prompt,
             schema=REQUIREMENTS_SCHEMA,
         )
 
@@ -1202,18 +1300,25 @@ Return the complete requirements schema.
         or discovery.get("business_goal")
         or discovery.get("users")
         or discovery.get("constraints")
+        or request.strip()
     ):
         retry_prompt = f"""
 The previous requirements response was empty. Re-do the requirements
-analysis using ONLY the discovery below.
+analysis using the original customer request and discovery below.
+
+Original customer request:
+{request}
+
+{clarification_context}
 
 DISCOVERY:
 {discovery}
 
 Return at least the concrete functional and/or non-functional
-requirements that are directly supported by the discovery. Do not
-invent features. Put unresolved details into open_questions.
-Acceptance criteria must be testable.
+requirements that are directly supported by the request or discovery.
+Do not invent features. Put unresolved details into open_questions.
+Acceptance criteria must be testable and must cover each material
+request-stated outcome.
 """
         requirements = provider.generate_json(
             prompt=retry_prompt,
