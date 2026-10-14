@@ -670,14 +670,15 @@ class ClarificationDecisions:
                     covered = True
         if not covered:
             return False
+        remainders = self.remainder_questions()
         if any(
-            statement.question.strip()
-            and normalize_question_text(text)
-            == normalize_question_text(statement.question)
-            for statement in self.pending
+            _same_question_text(text, remainder) or questions_equivalent(text, remainder)
+            for remainder in remainders
         ):
             return False
-        return not any(_overlaps(tokens, statement.own_tokens) for statement in self.pending)
+        # A PENDING decision item on the same original question is a separate
+        # remainder. It does not reopen the covered original question.
+        return True
 
     def pending_questions(self) -> list[str]:
         """Original clarification questions that still have a pending remainder."""
@@ -1047,12 +1048,60 @@ def _is_broader_question(broad: str, specific: str) -> bool:
     return shared >= min(2, len(b)) and shared / len(b) >= 0.5
 
 
+def _same_ledger_question(first: str, second: str) -> bool:
+    """True when two questions are the same ledger item, including repaired forms.
+
+    Semantic equivalence is intentionally not used: a narrower remainder must
+    not inherit RESOLVED status from its original question.
+    """
+    if _same_question_text(first, second):
+        return True
+    repaired_first = _repair_malformed_question(first) or first
+    repaired_second = _repair_malformed_question(second) or second
+    return _same_question_text(repaired_first, repaired_second)
+
+
+def clarification_question_status(text: str, state: dict | None) -> str:
+    """Ledger status for a question: RESOLVED, OPEN, or empty if unknown."""
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    for item in _canonical_clarification_state(state).get("questions") or []:
+        if not isinstance(item, dict):
+            continue
+        other = question_text(item)
+        if other and _same_ledger_question(text, other):
+            return str(item.get("status") or "").strip().upper()
+    return ""
+
+
+def _remainders_for_hits(text: str, pending_hits: list[ClarifiedStatement]) -> list[str]:
+    remainders: list[str] = []
+    seen: set[str] = set()
+    for statement in pending_hits:
+        source = statement.question.strip() or text
+        narrowed = _narrowed_from_pending(source, [statement])
+        key = normalize_question_text(narrowed)
+        if not narrowed or not key or key in seen:
+            continue
+        if any(questions_equivalent(narrowed, existing) for existing in remainders):
+            continue
+        remainders.append(narrowed)
+        seen.add(key)
+    if not remainders and pending_hits:
+        source = pending_hits[0].question.strip() or text
+        remainders = [_narrowed_from_pending(source, pending_hits)]
+    return [item for item in remainders if item]
+
+
 def reconcile_open_questions(questions: list, state: dict | None) -> list:
     """Close, replace, or keep questions against all clarification answers.
 
     Resolved questions are dropped. A pending remainder replaces the original
     broad question. Equivalent paraphrases collapse to one canonical item.
     Distinct remaining decisions on the same topic stay separate.
+    The canonical ledger is authoritative: a RESOLVED question is not kept
+    even when a PENDING decision item still exists for a narrower remainder.
     """
     decisions = ClarificationDecisions(state)
     rewritten = []
@@ -1065,26 +1114,42 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
             for statement in decisions.pending
             if _pending_matches_question(statement, text)
         ]
+        repaired = _repair_malformed_question(text)
+        if repaired and repaired != text:
+            text = repaired
+            item = _with_question_text(item, text)
+        ledger_status = clarification_question_status(text, state)
+        remainders = [
+            narrowed
+            for narrowed in _remainders_for_hits(text, pending_hits)
+            if narrowed
+            and not _MALFORMED_ASK.search(narrowed)
+            and clarification_question_status(narrowed, state) != "RESOLVED"
+            and not _same_ledger_question(narrowed, text)
+        ]
+        is_known_remainder = any(
+            _same_ledger_question(text, remainder)
+            for remainder in decisions.remainder_questions()
+        )
+        # A remainder question is its own open item. Sibling pending
+        # statements from the same original must not replace it.
+        if is_known_remainder and ledger_status != "RESOLVED":
+            rewritten.append(item)
+            continue
+        # Canonical RESOLVED status, or covered original wording, drops the
+        # question. Distinct PENDING remainders stay as separate open items.
+        if ledger_status == "RESOLVED" or _MALFORMED_ASK.search(text):
+            for narrowed in remainders:
+                rewritten.append(_with_question_text(item, narrowed))
+            continue
         if decisions.resolves(text) and not pending_hits:
             continue
         if pending_hits:
-            remainders: list[str] = []
-            seen_remainders: set[str] = set()
-            for statement in pending_hits:
-                source = statement.question.strip() or text
-                narrowed = _narrowed_from_pending(source, [statement])
-                key = normalize_question_text(narrowed)
-                if not narrowed or not key or key in seen_remainders:
-                    continue
-                if any(questions_equivalent(narrowed, existing) for existing in remainders):
-                    continue
-                remainders.append(narrowed)
-                seen_remainders.add(key)
-            if not remainders:
-                source = pending_hits[0].question.strip() or text
-                remainders = [_narrowed_from_pending(source, pending_hits)]
-            for narrowed in remainders:
-                rewritten.append(_with_question_text(item, narrowed))
+            if remainders:
+                for narrowed in remainders:
+                    rewritten.append(_with_question_text(item, narrowed))
+            elif not decisions.resolves(text):
+                rewritten.append(item)
             continue
         rewritten.append(item)
 
@@ -1264,16 +1329,45 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
     return requirements
 
 
+_LEADING_CONJUNCTION = re.compile(r"^(?:but|and|or|,)\s+(?:the\s+)?", re.I)
+_MALFORMED_ASK = re.compile(
+    r"\bthe (?:but|and|or) the\b|"
+    r"^(?:what (?:are|is) the) (?:but|and|or)\b",
+    re.I,
+)
+
+
 def _as_open_question(subject: str) -> str:
     text = re.sub(r"\b(?:also|still)\s*$", "", str(subject or "").strip().rstrip(". "), flags=re.I).strip()
+    text = _LEADING_CONJUNCTION.sub("", text).strip()
     if not text:
         return ""
     if text.endswith("?"):
-        return text
-    if re.match(r"^(which|what|who|how|when|where|whether)\b", text, re.I):
-        return text + "?"
-    text = re.sub(r"^(?:the|a|an)\s+", "", text, flags=re.I)
-    return f"What are the {text}?"
+        candidate = text
+    elif re.match(r"^(which|what|who|how|when|where|whether)\b", text, re.I):
+        candidate = text + "?"
+    else:
+        text = re.sub(r"^(?:the|a|an)\s+", "", text, flags=re.I)
+        candidate = f"What are the {text}?"
+    candidate = _repair_malformed_question(candidate)
+    if not candidate or _MALFORMED_ASK.search(candidate):
+        return ""
+    return candidate
+
+
+def _repair_malformed_question(text: str) -> str:
+    """Drop contrast-clause leftovers such as 'What are the but the …?'."""
+    repaired = str(text or "").strip()
+    if not repaired:
+        return ""
+    repaired = re.sub(
+        r"\b((?:what|which)\s+(?:are|is)\s+the)\s+(?:but|and|or)\s+(?:the\s+)?",
+        r"\1 ",
+        repaired,
+        flags=re.I,
+    )
+    repaired = re.sub(r"\bthe\s+(?:but|and|or)\s+the\b", "the", repaired, flags=re.I)
+    return re.sub(r"\s+", " ", repaired).strip()
 
 
 def _subject_already_in_dialogue(subject: str, decisions: ClarificationDecisions) -> bool:
@@ -1319,6 +1413,9 @@ def unanswered_request_items(state: dict | None) -> list[str]:
             continue
         head = sentence[: match.start()].strip()
         tail = sentence[match.end():].strip()
+        contrast = re.split(r"\b(?:but|however)\b", head, maxsplit=1, flags=re.I)
+        if len(contrast) == 2 and contrast[1].strip():
+            head = contrast[1].strip()
         subjects = [part.strip() for part in re.split(r",|\band\b", head) if part.strip()]
         whether = re.match(r"whether\s+(.+)", tail, re.I)
         if whether:

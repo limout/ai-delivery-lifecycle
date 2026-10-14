@@ -18,6 +18,7 @@ from app.decisions import (
     ClarificationDecisions,
     apply_reconciled_project_state,
     build_clarification_state,
+    clarification_question_status,
     question_text,
 )
 from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
@@ -922,7 +923,9 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         text = question_text(item)
         if not text or text.lower() in blocking_text:
             continue
-        if decisions.resolves(text) and not decisions.is_pending(text):
+        if clarification_question_status(text, result) == "RESOLVED":
+            continue
+        if decisions.resolves(text):
             continue
         reconciled_optional.append(text)
     result["requirements"]["open_questions"] = reconciled_optional
