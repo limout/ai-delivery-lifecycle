@@ -114,6 +114,21 @@ _CAPACITY = re.compile(
     r"peak concurrency|usage volume)\b",
     re.I,
 )
+# Usage/load estimates for sizing, not disk/DR/staffing "capacity" in general.
+_USAGE_ESTIMATE = re.compile(
+    r"\b(?:user volumes?|usage volume|concurrent(?: load| users?|cy)?|"
+    r"user counts?|number of users|peak (?:load|concurrency|concurrent)|"
+    r"active installations?|inspection volumes?|photo uploads?)\b",
+    re.I,
+)
+_ESTABLISHED_ASK = re.compile(
+    r"\b(?:have|has)\b.+\bbeen\s+(?:established|defined|specified)\b",
+    re.I,
+)
+_DIRECT_REQUEST = re.compile(
+    r"^(?:what|which|how many|how much)\b",
+    re.I,
+)
 _PLANNING_FACT = re.compile(
     r"\b(?:obtain|collect|gather)\b.+\b(?:estimates?|volume|counts?|capacity)\b|"
     r"\b(?:estimates?|volume|counts?)\s+(?:must|should|need to)\s+be\s+"
@@ -151,7 +166,8 @@ _USES_PRODUCT = re.compile(
     re.I,
 )
 CAPACITY_COLLECTION_QUESTION = (
-    "What are the expected user counts, usage volume, and peak concurrency?"
+    "What are the expected user counts, active installations, inspection "
+    "volume, photo uploads, and peak concurrency?"
 )
 
 
@@ -434,6 +450,10 @@ def questions_equivalent(first: str, second: str) -> bool:
         return True
     if _matching_bigrams(first, second) and shared >= 2:
         return True
+    # "Have these usage figures been established?" asks for the same
+    # capacity inputs as "What is the expected user volume and load?"
+    if _is_usage_estimate_question(first) and _is_usage_estimate_question(second):
+        return True
     return False
 
 
@@ -447,6 +467,21 @@ def _has_proposal(text: str) -> bool:
 
 def _is_capacity_text(text: str) -> bool:
     return bool(_CAPACITY.search(str(text or "")))
+
+
+def _is_usage_estimate_question(text: str) -> bool:
+    """True for questions that collect the same usage/load sizing inputs."""
+    return bool(_USAGE_ESTIMATE.search(str(text or "")))
+
+
+def _is_established_question(text: str) -> bool:
+    """True for 'Has/Have … been established/defined?' information checks."""
+    return bool(_ESTABLISHED_ASK.search(str(text or "")))
+
+
+def _is_direct_request_question(text: str) -> bool:
+    """True for a direct request for the missing information."""
+    return bool(_DIRECT_REQUEST.match(str(text or "").strip()))
 
 
 def _statement_covers(statement: ClarifiedStatement, text: str) -> bool:
@@ -626,6 +661,19 @@ def _prefer_remaining(current: str, candidate: str, decisions: ClarificationDeci
             return current
         if _is_approval_question(current) and not _is_approval_question(candidate):
             return candidate
+    if _is_usage_estimate_question(current) and _is_usage_estimate_question(candidate):
+        current_direct = _is_direct_request_question(current) and not _is_established_question(
+            current
+        )
+        candidate_direct = _is_direct_request_question(candidate) and not _is_established_question(
+            candidate
+        )
+        if current_direct and not candidate_direct:
+            return current
+        if candidate_direct and not current_direct:
+            return candidate
+        if not current_direct and not candidate_direct:
+            return CAPACITY_COLLECTION_QUESTION
     if len(content_tokens(candidate)) > len(content_tokens(current)):
         return candidate
     return current
@@ -695,6 +743,15 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
         if _prefer_remaining(kept_text[match], text, decisions) == text:
             kept[match] = item
             kept_text[match] = text
+
+    for index, text in enumerate(kept_text):
+        if (
+            _is_usage_estimate_question(text)
+            and _is_established_question(text)
+            and not _is_direct_request_question(text)
+        ):
+            kept_text[index] = CAPACITY_COLLECTION_QUESTION
+            kept[index] = _with_question_text(kept[index], CAPACITY_COLLECTION_QUESTION)
 
     final = []
     for item, text in zip(kept, kept_text):
