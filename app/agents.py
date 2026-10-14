@@ -4,10 +4,13 @@ from app.providers import AIProvider
 from app.state import DeliveryState
 from app.decisions import (
     ClarificationDecisions,
+    active_open_questions,
     apply_decisions_to_requirements,
+    apply_reconciled_project_state,
     dedupe_equivalent_questions,
     drop_resolved,
     question_text,
+    reconcile_discovery_actors,
     reconcile_open_questions,
 )
 from app.evidence import (
@@ -488,7 +491,6 @@ def _answered_clarification_topics(state: DeliveryState) -> set[str]:
         "concurrent users",
         "expected volume",
         "expected user volume",
-        "users will",
     )):
         topics.add("user_volume")
 
@@ -732,21 +734,14 @@ def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
     """Remove stale discovery unknowns/questions after customer answers."""
     answered = _answered_clarification_topics(state)
     decisions = ClarificationDecisions(state)
-    if not answered and not decisions.resolved:
-        return discovery
-
     cleaned = dict(discovery)
-    cleaned["unknowns"] = [
-        question_text(item)
-        for item in reconcile_open_questions(
-            [
-                item for item in discovery.get("unknowns", []) or []
-                if decisions.is_pending(str(item))
-                or not (_question_topic(str(item)) in answered)
-            ],
-            state,
-        )
+    prefiltered = [
+        item for item in discovery.get("unknowns", []) or []
+        if decisions.is_pending(str(item))
+        or not (_question_topic(str(item)) in answered)
     ]
+    merged = {**state, "discovery": cleaned}
+    cleaned["unknowns"] = active_open_questions(merged, prefiltered)
     cleaned["clarification_questions"] = [
         question_text(item)
         for item in _filter_answered_questions(
@@ -754,7 +749,7 @@ def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
             keep_pending=True,
         )
     ]
-    return cleaned
+    return reconcile_discovery_actors(cleaned, merged)
 
 
 def _filter_answered_requirement_questions(requirements: dict, state: DeliveryState) -> dict:
@@ -785,7 +780,11 @@ def _filter_answered_requirement_questions(requirements: dict, state: DeliverySt
         cleaned["contradictions"] = drop_resolved(
             requirements.get("contradictions", []) or [], decisions
         )
-    return apply_decisions_to_requirements(cleaned, state)
+    cleaned = apply_decisions_to_requirements(cleaned, state)
+    extras = list(cleaned.get("open_questions") or [])
+    extras.extend((state.get("discovery") or {}).get("unknowns") or [])
+    cleaned["open_questions"] = active_open_questions({**state, "requirements": cleaned}, extras)
+    return cleaned
 
 
 def _clean_downstream_items(items: list, state: DeliveryState) -> list:
@@ -798,7 +797,7 @@ def _clean_downstream_items(items: list, state: DeliveryState) -> list:
     cleaned = []
     stale_markers = (
         "clarify", "clarification", "confirm", "confirmation",
-        "determine", "unknown", "uncertainty", "must be confirmed",
+        "determine", "unknown", "uncertainty", "undefined", "must be confirmed",
         "needs to be confirmed", "needs confirmation",
         "decide", "decision", "undecided", "tbd", "to be agreed",
     )
@@ -1684,9 +1683,11 @@ REQUIREMENTS:
     answered_texts = _answered_question_texts(state)
     answered_topics = _answered_clarification_topics(state)
     gap_questions = {gap.question.lower() for gap in evidence_gaps}
+    decisions = ClarificationDecisions(state)
     blocking_questions = [
         q for q in blocking_questions
         if _normalize_question_text(q) not in answered_texts
+        and not decisions.resolves(q)
         and (
             q.lower() in gap_questions
             or not (_question_topic(q) and _question_topic(q) in answered_topics)
@@ -1751,9 +1752,18 @@ REQUIREMENTS:
     requirements = dict(requirements)
     requirements["open_questions"] = list(validation["non_blocking_questions"])
 
+    synced = apply_reconciled_project_state(
+        {
+            **state,
+            "discovery": dict(discovery),
+            "requirements": requirements,
+            "validation": validation,
+        }
+    )
     return {
-        "validation": validation,
-        "requirements": requirements,
+        "discovery": synced.get("discovery") or discovery,
+        "validation": synced["validation"],
+        "requirements": synced["requirements"],
     }
 
 

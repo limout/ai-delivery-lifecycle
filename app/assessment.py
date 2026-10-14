@@ -37,6 +37,11 @@ ASSESSMENT_DISCLAIMER = (
 
 STANDARD_DEADLINE_FIT_VALUES = ("FITS", "EXCEEDS", "NOT_DEMONSTRATED")
 
+# ask_next is a prioritized subset of the same reconciled remaining questions:
+# blocking questions first, then the canonical non-blocking list, capped for
+# the one-page view. It must never be drawn from a stale pre-reconciliation copy.
+ASK_NEXT_LIMIT = 5
+
 _DURATION_ANY = re.compile(
     r"(?P<low>\d+(?:\.\d+)?)"
     r"(?:\s*(?:-|–|—|to)\s*(?P<high>\d+(?:\.\d+)?))?"
@@ -449,15 +454,19 @@ def build_assessment(result: dict) -> dict:
 
     known, inferred = _explicit_known_facts(result)
 
-    uncertain = _unique_texts(
+    canonical = _unique_texts(
         [
-            *inferred,
-            *_as_list(validation.get("missing_evidence")),
-            *_as_list(discovery.get("unknowns")),
             *_as_list(requirements.get("open_questions")),
             *_as_list(validation.get("non_blocking_questions")),
-        ],
-        limit=6,
+            *_as_list(result.get("non_blocking_questions")),
+        ]
+    )
+    uncertain = _unique_texts(
+        [
+            *canonical,
+            *inferred,
+            *_as_list(validation.get("missing_evidence")),
+        ]
     )
 
     independent = str(
@@ -533,12 +542,10 @@ def build_assessment(result: dict) -> dict:
     ]
 
     blocking = result.get("blocking_questions") or validation.get("blocking_questions") or []
-    recommended = (
-        result.get("non_blocking_questions")
-        or validation.get("non_blocking_questions")
-        or []
+    ask_next = _unique_texts(
+        [*_as_list(blocking), *canonical],
+        limit=ASK_NEXT_LIMIT,
     )
-    ask_next = _unique_texts([*_as_list(blocking), *_as_list(recommended)], limit=5)
     next_steps = _recommended_next_steps(result, verdict, blocking, deadline)
 
     why = [

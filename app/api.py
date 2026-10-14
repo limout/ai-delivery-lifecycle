@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
-from app.decisions import question_text, reconcile_open_questions
+from app.decisions import apply_reconciled_project_state, question_text
 from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
@@ -809,27 +809,29 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
     if not clarification_questions:
         clarification_questions = list(blocking_questions)
 
-    non_blocking_questions = _normalize_questions(
-        result.get("non_blocking_questions") or validation.get("non_blocking_questions"),
-        required=False,
-    )
     blocking_text = {item["question"].lower() for item in blocking_questions}
-    requirements = dict(result.get("requirements") or {})
-    combined_optional = [
-        *[question_text(item) for item in (requirements.get("open_questions") or [])],
-        *[item["question"] for item in non_blocking_questions if item["question"].lower() not in blocking_text],
-    ]
+    if isinstance(result.get("discovery"), dict):
+        result["discovery"] = dict(result["discovery"])
+    if isinstance(result.get("requirements"), dict):
+        result["requirements"] = dict(result["requirements"])
+    if isinstance(result.get("validation"), dict):
+        result["validation"] = dict(result["validation"])
+    synced = apply_reconciled_project_state(result)
+    if "discovery" in synced:
+        result["discovery"] = synced["discovery"]
+    result["requirements"] = synced["requirements"]
+    validation = dict(result.get("validation") or {})
+    validation.update(synced["validation"])
     reconciled_optional = [
         question_text(item)
-        for item in reconcile_open_questions(combined_optional, result)
+        for item in (validation.get("non_blocking_questions") or [])
+        if question_text(item) and question_text(item).lower() not in blocking_text
     ]
-    requirements["open_questions"] = reconciled_optional
-    validation = dict(validation)
+    result["requirements"]["open_questions"] = reconciled_optional
     validation["non_blocking_questions"] = reconciled_optional
-    if isinstance(result.get("requirements"), dict):
-        result["requirements"] = requirements
-    if isinstance(result.get("validation"), dict):
-        result["validation"] = validation
+    if isinstance(result.get("discovery"), dict):
+        result["discovery"]["unknowns"] = list(reconciled_optional)
+    result["validation"] = validation
     non_blocking_questions = _normalize_questions(reconciled_optional, required=False)
 
     resolved_run_id = run_id or result.get("run_id") or new_run_id()
