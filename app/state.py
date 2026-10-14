@@ -6,6 +6,7 @@ class DeliveryState(TypedDict, total=False):
     clarification_answers: list[str]
     clarification_questions: list[str]
     clarification_history: list[dict]
+    clarification_state: dict
     discovery: dict
     requirements: dict
     validation: dict

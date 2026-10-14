@@ -294,6 +294,42 @@ class ClarifiedStatement:
     own_tokens: frozenset[str]
 
 
+def _canonical_clarification_state(state: dict | None) -> dict:
+    value = (state or {}).get("clarification_state")
+    return value if isinstance(value, dict) else {}
+
+
+def _canonical_decision_statements(state: dict | None) -> list[ClarifiedStatement]:
+    canonical = _canonical_clarification_state(state)
+    statements: list[ClarifiedStatement] = []
+    seen: set[tuple[str, str, bool]] = set()
+    for item in canonical.get("decisions") or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        text = str(item.get("decision") or item.get("text") or "").strip()
+        if not text:
+            continue
+        status = str(item.get("status") or "").strip().upper()
+        resolved = status != "PENDING"
+        key = (normalize_question_text(question), normalize_question_text(text), resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        question_tokens = content_tokens(question)
+        own = content_tokens(text)
+        statements.append(
+            ClarifiedStatement(
+                question=question,
+                text=text,
+                resolved=resolved,
+                tokens=own | question_tokens,
+                own_tokens=own,
+            )
+        )
+    return statements
+
+
 def _sentences(answer: str) -> list[str]:
     units = []
     for raw in _SENTENCE_SPLIT.split(str(answer or "")):
@@ -303,8 +339,7 @@ def _sentences(answer: str) -> list[str]:
     return units
 
 
-def clarified_statements(state: dict | None) -> list[ClarifiedStatement]:
-    """Sentence-level statements from every substantive clarification record."""
+def _statements_from_legacy_sources(state: dict | None) -> list[ClarifiedStatement]:
     statements: list[ClarifiedStatement] = []
     seen_records: set[tuple[str, str]] = set()
     for question, answer in _clarification_pairs(state):
@@ -338,6 +373,252 @@ def clarified_statements(state: dict | None) -> list[ClarifiedStatement]:
                 )
             )
     return statements
+
+
+def _statement_key(statement: ClarifiedStatement) -> tuple[str, str, bool]:
+    return (
+        normalize_question_text(statement.question),
+        normalize_question_text(statement.text),
+        statement.resolved,
+    )
+
+
+def _merged_clarification_statements(state: dict | None) -> list[ClarifiedStatement]:
+    """Union freshly parsed answers with previously persisted ledger decisions.
+
+    New history, ``new_clarification_records``, and ``clarification_answers``
+    are parsed first so a later turn can add facts. Canonical decisions fill
+    any accepted sentences that a partial client history omitted.
+    """
+    merged: list[ClarifiedStatement] = []
+    seen: set[tuple[str, str, bool]] = set()
+    for statement in (
+        *_statements_from_legacy_sources(state),
+        *_canonical_decision_statements(state),
+    ):
+        key = _statement_key(statement)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(statement)
+    return merged
+
+
+def clarified_statements(state: dict | None) -> list[ClarifiedStatement]:
+    """Sentence-level statements from canonical state and legacy records.
+
+    ``clarification_state`` is the authoritative, serialized ledger once a
+    workflow response has carried it forward. Legacy clarification records are
+    still parsed so new answers merge into an existing ledger instead of being
+    ignored, and so old payloads without a ledger keep working.
+    """
+    return _merged_clarification_statements(state)
+
+
+def _accepted_answer_records(state: dict | None) -> list[dict]:
+    records: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for question, answer in _clarification_pairs(state):
+        real_question, body = unpack_clarification_record(question, answer)
+        if not str(body or "").strip():
+            continue
+        key = (normalize_question_text(real_question), normalize_question_text(body))
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(
+            {
+                "question": real_question,
+                "answer": body,
+                "status": (
+                    "NON_SUBSTANTIVE"
+                    if is_non_substantive_clarification_answer(body)
+                    else "ACCEPTED"
+                ),
+                "source": SOURCE_LABEL,
+            }
+        )
+    for item in _canonical_clarification_state(state).get("answers") or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if not answer:
+            continue
+        key = (normalize_question_text(question), normalize_question_text(answer))
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(
+            {
+                "question": question,
+                "answer": answer,
+                "status": str(item.get("status") or "ACCEPTED").upper(),
+                "source": str(item.get("source") or SOURCE_LABEL),
+            }
+        )
+    return records
+
+
+def _question_status_record(
+    question: str,
+    status: str,
+    priority: str,
+    blocks_workflow: bool,
+    reason: str = "",
+) -> dict:
+    return {
+        "question": str(question or "").strip(),
+        "status": str(status or "OPEN").upper(),
+        "priority": str(priority or "RECOMMENDED").upper(),
+        "blocks_workflow": bool(blocks_workflow),
+        "reason": str(reason or ""),
+    }
+
+
+def _iter_question_records(items, required: bool):
+    for item in items or []:
+        text = question_text(item)
+        if not text:
+            continue
+        if isinstance(item, dict):
+            blocks = bool(item.get("blocks_workflow", required))
+            priority = str(
+                item.get("priority")
+                or ("REQUIRED" if blocks or required else "RECOMMENDED")
+            ).upper()
+            reason = str(item.get("reason") or "")
+        else:
+            blocks = required
+            priority = "REQUIRED" if required else "RECOMMENDED"
+            reason = ""
+        yield _question_status_record(text, "OPEN", priority, blocks or required, reason)
+
+
+def build_clarification_state(
+    state: dict | None,
+    blocking_questions: list | None = None,
+    non_blocking_questions: list | None = None,
+) -> dict:
+    """Build the canonical clarification ledger carried between workflow runs.
+
+    The ledger intentionally stores machine-readable facts, not display-only
+    phrasing patches:
+
+    * ``answers`` are customer-authored answer records with acceptance status.
+    * ``decisions`` are sentence-level resolved/pending decisions consumed by
+      ``ClarificationDecisions`` on the next run.
+    * ``questions`` is the reconciled UI-facing question state, including
+      priority and blocking semantics.
+    """
+    state = dict(state or {})
+    previous = _canonical_clarification_state(state)
+    answers = _accepted_answer_records(state)
+    source_statements = _merged_clarification_statements(state)
+
+    decisions = [
+        {
+            "question": statement.question,
+            "decision": statement.text,
+            "status": "RESOLVED" if statement.resolved else "PENDING",
+            "source": SOURCE_LABEL,
+        }
+        for statement in source_statements
+    ]
+
+    previous_questions: dict[str, dict] = {}
+    for item in previous.get("questions") or []:
+        if not isinstance(item, dict):
+            continue
+        text = question_text(item)
+        if text:
+            previous_questions[normalize_question_text(text)] = dict(item)
+
+    question_records: list[dict] = []
+    seen_questions: set[str] = set()
+
+    def add_question(record: dict) -> None:
+        text = question_text(record)
+        key = normalize_question_text(text)
+        if not key or key in seen_questions:
+            return
+        inherited = previous_questions.get(key, {})
+        merged = {
+            **inherited,
+            **record,
+            "question": text,
+            "status": str(record.get("status") or inherited.get("status") or "OPEN").upper(),
+            "priority": str(
+                record.get("priority")
+                or inherited.get("priority")
+                or "RECOMMENDED"
+            ).upper(),
+            "blocks_workflow": bool(
+                record.get(
+                    "blocks_workflow",
+                    inherited.get("blocks_workflow", False),
+                )
+            ),
+            "reason": str(record.get("reason") or inherited.get("reason") or ""),
+        }
+        question_records.append(merged)
+        seen_questions.add(key)
+
+    resolved_questions = {
+        normalize_question_text(statement.question)
+        for statement in source_statements
+        if statement.resolved and str(statement.question or "").strip()
+    }
+    for answer in answers:
+        if str(answer.get("status") or "").upper() != "ACCEPTED":
+            continue
+        text = question_text(answer.get("question"))
+        if not text:
+            continue
+        if normalize_question_text(text) not in resolved_questions:
+            continue
+        inherited = previous_questions.get(normalize_question_text(text), {})
+        add_question(
+            _question_status_record(
+                text,
+                "RESOLVED",
+                str(inherited.get("priority") or "REQUIRED"),
+                bool(inherited.get("blocks_workflow", True)),
+                str(inherited.get("reason") or ""),
+            )
+        )
+
+    pending_state = {"clarification_state": {"decisions": decisions}}
+    for text in ClarificationDecisions(pending_state).remainder_questions():
+        add_question(_question_status_record(text, "OPEN", "RECOMMENDED", False))
+
+    if blocking_questions is None:
+        blocking_questions = (
+            state.get("blocking_questions")
+            or (state.get("validation") or {}).get("blocking_questions")
+            or state.get("clarification_questions")
+            or []
+        )
+    if non_blocking_questions is None:
+        non_blocking_questions = (
+            state.get("non_blocking_questions")
+            or (state.get("validation") or {}).get("non_blocking_questions")
+            or (state.get("requirements") or {}).get("open_questions")
+            or (state.get("discovery") or {}).get("unknowns")
+            or []
+        )
+
+    for record in _iter_question_records(blocking_questions, required=True):
+        add_question(record)
+    for record in _iter_question_records(non_blocking_questions, required=False):
+        add_question(record)
+
+    return {
+        "version": 1,
+        "answers": answers,
+        "decisions": decisions,
+        "questions": question_records,
+    }
 
 
 def _overlaps(item_tokens: frozenset[str], other_tokens: frozenset[str]) -> bool:
@@ -408,7 +689,12 @@ class ClarificationDecisions:
         return questions
 
     def remainder_questions(self) -> list[str]:
-        """Narrow remaining questions for pending statements, not the original broads."""
+        """Narrow remaining questions for pending statements, not the original broads.
+
+        Distinct pending refinements from one original answer stay separate.
+        A pending unit that only restates the original question is kept when
+        that question has no more specific remainder.
+        """
         grouped: dict[str, list[ClarifiedStatement]] = {}
         for statement in self.pending:
             key = normalize_question_text(statement.question) or normalize_question_text(
@@ -416,9 +702,37 @@ class ClarificationDecisions:
             )
             grouped.setdefault(key, []).append(statement)
         remainders: list[str] = []
+        seen: set[str] = set()
+
+        def add(text: str) -> None:
+            text = str(text or "").strip()
+            key = normalize_question_text(text)
+            if not text or not key or key in seen:
+                return
+            if any(questions_equivalent(text, existing) for existing in remainders):
+                return
+            remainders.append(text)
+            seen.add(key)
+
         for statements in grouped.values():
             original = statements[0].question.strip()
-            remainders.append(_narrowed_from_pending(original, statements))
+            specific: list[str] = []
+            fallback: list[str] = []
+            for statement in statements:
+                text = _narrowed_from_pending(original, [statement])
+                if not text:
+                    continue
+                if original and not _same_question_text(text, original):
+                    specific.append(text)
+                else:
+                    fallback.append(text)
+            if specific:
+                for text in specific:
+                    add(text)
+            elif fallback:
+                add(fallback[0])
+            elif original:
+                add(_narrowed_from_pending(original, statements) or original)
         return remainders
 
 
@@ -754,9 +1068,24 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
         if decisions.resolves(text) and not pending_hits:
             continue
         if pending_hits:
-            source = pending_hits[0].question.strip() or text
-            text = _narrowed_from_pending(source, pending_hits)
-            item = _with_question_text(item, text)
+            remainders: list[str] = []
+            seen_remainders: set[str] = set()
+            for statement in pending_hits:
+                source = statement.question.strip() or text
+                narrowed = _narrowed_from_pending(source, [statement])
+                key = normalize_question_text(narrowed)
+                if not narrowed or not key or key in seen_remainders:
+                    continue
+                if any(questions_equivalent(narrowed, existing) for existing in remainders):
+                    continue
+                remainders.append(narrowed)
+                seen_remainders.add(key)
+            if not remainders:
+                source = pending_hits[0].question.strip() or text
+                remainders = [_narrowed_from_pending(source, pending_hits)]
+            for narrowed in remainders:
+                rewritten.append(_with_question_text(item, narrowed))
+            continue
         rewritten.append(item)
 
     kept: list = []

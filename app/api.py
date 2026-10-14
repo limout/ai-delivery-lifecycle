@@ -14,7 +14,12 @@ from pydantic import BaseModel, Field
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
-from app.decisions import apply_reconciled_project_state, question_text
+from app.decisions import (
+    ClarificationDecisions,
+    apply_reconciled_project_state,
+    build_clarification_state,
+    question_text,
+)
 from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
@@ -215,6 +220,7 @@ def _initial_workflow_state(
     request: str,
     clarification_answers: list[str] | None,
     clarification_history: list[dict] | None,
+    clarification_state: dict | None,
     iteration: int,
     resume_after_clarification: bool = False,
     prior_state: dict | None = None,
@@ -232,7 +238,9 @@ def _initial_workflow_state(
     if clarification_answers:
         state["clarification_answers"] = clarification_answers
     if clarification_history:
-        state["clarification_history"] = clarification_history
+        state["clarification_history"] = list(clarification_history)
+    if clarification_state:
+        state["clarification_state"] = clarification_state
     if new_clarification_records:
         state["new_clarification_records"] = new_clarification_records
 
@@ -240,8 +248,27 @@ def _initial_workflow_state(
         for key in ("discovery", "requirements"):
             if prior_state.get(key):
                 state[key] = prior_state[key]
-        if prior_state.get("clarification_history") and not clarification_history:
-            state["clarification_history"] = prior_state["clarification_history"]
+        saved_history = prior_state.get("clarification_history") or []
+        if saved_history:
+            state["clarification_history"] = _merge_history_records(
+                saved_history,
+                state.get("clarification_history") or [],
+            )
+        if prior_state.get("clarification_state") and not clarification_state:
+            state["clarification_state"] = prior_state["clarification_state"]
+        elif prior_state.get("clarification_state") and clarification_state:
+            state["clarification_state"] = _merge_clarification_ledgers(
+                prior_state.get("clarification_state"),
+                clarification_state,
+            )
+
+        if (
+            state.get("clarification_state")
+            or state.get("clarification_history")
+            or state.get("new_clarification_records")
+            or state.get("clarification_answers")
+        ):
+            state["clarification_state"] = build_clarification_state(state)
 
         regen = answers_require_upstream_regen(state)
         state["regenerate_upstream"] = regen
@@ -299,6 +326,7 @@ def _stream_workflow(
     request: str,
     clarification_answers: list[str] | None,
     clarification_history: list[dict] | None,
+    clarification_state: dict | None,
     iteration: int,
     provider: AIProvider,
     resume_after_clarification: bool = False,
@@ -333,12 +361,16 @@ def _stream_workflow(
                 request=request,
                 clarification_answers=clarification_answers,
                 clarification_history=clarification_history,
+                clarification_state=clarification_state,
                 iteration=iteration,
                 resume_after_clarification=resume_after_clarification,
                 prior_state=prior_state,
                 new_clarification_records=new_clarification_records,
             )
             result = graph.invoke(state)
+            if clarification_history:
+                result["clarification_history"] = clarification_history
+            result["clarification_state"] = build_clarification_state({**state, **result})
             result["execution"] = _execution_payload(
                 state,
                 nodes_executed,
@@ -605,6 +637,7 @@ class ClarifyRequest(BaseModel):
     # Cumulative history is sent back by the UI so clarification is a true
     # multi-iteration loop rather than a sequence of stateless re-runs.
     clarification_history: list[dict] = Field(default_factory=list)
+    clarification_state: dict = Field(default_factory=dict)
     iteration: int = Field(default=1, ge=1)
     run_id: str | None = None
     prior_state: dict = Field(default_factory=dict)
@@ -646,6 +679,38 @@ def _answer_strings(request: ClarifyRequest) -> list[str]:
         answer for answer in request.clarification_answers if answer.strip()
     )
     return answers
+
+
+def _merge_history_records(prior: list, incoming: list) -> list[dict]:
+    """Keep saved history answers even when the client sends a partial list."""
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for source in (prior or [], incoming or []):
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if not answer:
+                continue
+            key = (normalize_question_text(question), normalize_question_text(answer))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"question": question, "answer": answer})
+    return merged
+
+
+def _merge_clarification_ledgers(prior, incoming) -> dict:
+    """Union two ledgers so a newer payload cannot drop accepted answers."""
+    prior = prior if isinstance(prior, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    return {
+        "version": incoming.get("version") or prior.get("version") or 1,
+        "answers": list(prior.get("answers") or []) + list(incoming.get("answers") or []),
+        "decisions": list(prior.get("decisions") or []) + list(incoming.get("decisions") or []),
+        "questions": list(prior.get("questions") or []) + list(incoming.get("questions") or []),
+    }
 
 
 def _merge_clarification_history(
@@ -696,6 +761,7 @@ def run_workflow(
     request: str,
     clarification_answers: list[str] | None = None,
     clarification_history: list[dict] | None = None,
+    clarification_state: dict | None = None,
     iteration: int | None = None,
     provider: AIProvider | None = None,
     resume_after_clarification: bool = False,
@@ -722,12 +788,23 @@ def run_workflow(
         request=request,
         clarification_answers=clarification_answers,
         clarification_history=clarification_history,
+        clarification_state=clarification_state,
         iteration=iteration or 1,
         resume_after_clarification=resume_after_clarification,
         prior_state=prior_state,
         new_clarification_records=new_clarification_records,
     )
     result = graph.invoke(state)
+    if clarification_history:
+        result["clarification_history"] = clarification_history
+    if (
+        state.get("clarification_state")
+        or result.get("clarification_state")
+        or state.get("clarification_history")
+        or state.get("new_clarification_records")
+        or state.get("clarification_answers")
+    ):
+        result["clarification_state"] = build_clarification_state({**state, **result})
     llm_calls = instrumented.llm_calls if instrumented is not None else 0
     result["execution"] = _execution_payload(
         state,
@@ -751,6 +828,7 @@ def _normalize_questions(items, required: bool = False) -> list[dict]:
             blocks = bool(item.get("blocks_workflow", required))
             normalized.append({
                 "question": question,
+                "status": str(item.get("status") or "OPEN").upper(),
                 "priority": str(item.get("priority") or ("REQUIRED" if blocks or required else "RECOMMENDED")).upper(),
                 "reason": str(item.get("reason") or ""),
                 "blocks_workflow": blocks or required,
@@ -762,6 +840,7 @@ def _normalize_questions(items, required: bool = False) -> list[dict]:
                 continue
             normalized.append({
                 "question": question,
+                "status": "OPEN",
                 "priority": "REQUIRED" if required else "RECOMMENDED",
                 "reason": "",
                 "blocks_workflow": required,
@@ -810,6 +889,21 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         clarification_questions = list(blocking_questions)
 
     blocking_text = {item["question"].lower() for item in blocking_questions}
+    if (
+        result.get("clarification_state")
+        or result.get("clarification_history")
+        or result.get("new_clarification_records")
+        or result.get("clarification_answers")
+    ):
+        result["clarification_state"] = build_clarification_state(
+            result,
+            blocking_questions=blocking_questions,
+            non_blocking_questions=result.get("non_blocking_questions")
+            or validation.get("non_blocking_questions")
+            or (result.get("requirements") or {}).get("open_questions")
+            or (result.get("discovery") or {}).get("unknowns")
+            or [],
+        )
     if isinstance(result.get("discovery"), dict):
         result["discovery"] = dict(result["discovery"])
     if isinstance(result.get("requirements"), dict):
@@ -822,17 +916,38 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
     result["requirements"] = synced["requirements"]
     validation = dict(result.get("validation") or {})
     validation.update(synced["validation"])
-    reconciled_optional = [
-        question_text(item)
-        for item in (validation.get("non_blocking_questions") or [])
-        if question_text(item) and question_text(item).lower() not in blocking_text
-    ]
+    decisions = ClarificationDecisions(result)
+    reconciled_optional = []
+    for item in validation.get("non_blocking_questions") or []:
+        text = question_text(item)
+        if not text or text.lower() in blocking_text:
+            continue
+        if decisions.resolves(text) and not decisions.is_pending(text):
+            continue
+        reconciled_optional.append(text)
     result["requirements"]["open_questions"] = reconciled_optional
     validation["non_blocking_questions"] = reconciled_optional
     if isinstance(result.get("discovery"), dict):
         result["discovery"]["unknowns"] = list(reconciled_optional)
     result["validation"] = validation
     non_blocking_questions = _normalize_questions(reconciled_optional, required=False)
+    for item in blocking_questions:
+        item["status"] = str(item.get("status") or "OPEN").upper()
+    for item in non_blocking_questions:
+        item["status"] = "OPEN"
+        item["blocks_workflow"] = False
+        if item.get("priority") not in {"RECOMMENDED", "OPTIONAL"}:
+            item["priority"] = "RECOMMENDED"
+    result["clarification_state"] = build_clarification_state(
+        {
+            **result,
+            "validation": validation,
+            "blocking_questions": blocking_questions,
+            "non_blocking_questions": non_blocking_questions,
+        },
+        blocking_questions=blocking_questions,
+        non_blocking_questions=non_blocking_questions,
+    )
 
     resolved_run_id = run_id or result.get("run_id") or new_run_id()
     save_run(resolved_run_id, result)
@@ -851,6 +966,7 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         "blocking_questions": blocking_questions,
         "non_blocking_questions": non_blocking_questions,
         "clarification_history": result.get("clarification_history", []),
+        "clarification_state": result.get("clarification_state", {}),
         "iteration": result.get("iteration", 1),
         "solution": result.get("solution"),
         "delivery_plan": result.get("delivery_plan"),
@@ -1045,6 +1161,7 @@ def analyze_stream(
             request=request.user_request,
             clarification_answers=None,
             clarification_history=None,
+            clarification_state=None,
             iteration=1,
             provider=provider,
             run_id=run_id,
@@ -1179,11 +1296,12 @@ def clarify_stream(
             },
         )
 
-    history = _merge_clarification_history(
-        request.clarification_history,
-        request,
-    )
     prior = _resolve_prior_state(request)
+    history = _merge_history_records(
+        prior.get("clarification_history") or [],
+        _merge_clarification_history(request.clarification_history, request),
+    )
+    clarification_state = request.clarification_state or prior.get("clarification_state")
     run_id = request.run_id or new_run_id()
 
     return StreamingResponse(
@@ -1191,6 +1309,7 @@ def clarify_stream(
             request=request.user_request,
             clarification_answers=answers,
             clarification_history=history,
+            clarification_state=clarification_state,
             iteration=request.iteration + 1,
             provider=provider,
             resume_after_clarification=True,
@@ -1225,17 +1344,20 @@ def clarify(
     try:
         # Preserve the complete conversation of customer facts across every
         # clarification iteration. The next graph run receives both the new
-        # answers and the cumulative history.
-        history = _merge_clarification_history(
-            request.clarification_history,
-            request,
-        )
+        # answers and the cumulative history. Saved history is merged in so a
+        # partial client list cannot drop previously accepted answers.
         prior = _resolve_prior_state(request)
+        history = _merge_history_records(
+            prior.get("clarification_history") or [],
+            _merge_clarification_history(request.clarification_history, request),
+        )
+        clarification_state = request.clarification_state or prior.get("clarification_state")
 
         result = run_workflow(
             request=request.user_request,
             clarification_answers=answers,
             clarification_history=history,
+            clarification_state=clarification_state,
             iteration=request.iteration + 1,
             provider=provider,
             resume_after_clarification=True,

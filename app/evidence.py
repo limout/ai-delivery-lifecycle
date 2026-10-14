@@ -228,16 +228,35 @@ def customer_authored_text(state: dict | None) -> str:
     """Only customer-authored sources: request plus clarification answers."""
     state = state or {}
     parts = [str(state.get("user_request") or "")]
+    seen_answers: set[str] = set()
     for item in state.get("clarification_history") or []:
         if isinstance(item, dict):
-            parts.append(str(item.get("answer") or ""))
+            answer = str(item.get("answer") or "")
         else:
-            parts.append(str(item))
+            answer = str(item)
+        if answer.strip():
+            parts.append(answer)
+            seen_answers.add(answer.strip())
     for item in state.get("clarification_answers") or []:
-        parts.append(str(item))
+        answer = str(item)
+        if answer.strip() and answer.strip() not in seen_answers:
+            parts.append(answer)
+            seen_answers.add(answer.strip())
     for item in state.get("new_clarification_records") or []:
         if isinstance(item, dict):
-            parts.append(str(item.get("answer") or ""))
+            answer = str(item.get("answer") or "")
+            if answer.strip() and answer.strip() not in seen_answers:
+                parts.append(answer)
+                seen_answers.add(answer.strip())
+    canonical = state.get("clarification_state") if isinstance(state, dict) else {}
+    if isinstance(canonical, dict):
+        for item in canonical.get("answers") or []:
+            if not isinstance(item, dict):
+                continue
+            answer = str(item.get("answer") or "")
+            if answer.strip() and answer.strip() not in seen_answers:
+                parts.append(answer)
+                seen_answers.add(answer.strip())
     return "\n".join(part for part in parts if str(part).strip())
 
 
@@ -402,7 +421,28 @@ def _clarification_pairs(state: dict | None) -> list[tuple[str, str]]:
             )
     for item in state.get("clarification_answers") or []:
         pairs.append(("", str(item)))
-    return [(q.strip(), a.strip()) for q, a in pairs if str(a).strip()]
+    canonical = state.get("clarification_state")
+    if isinstance(canonical, dict):
+        for item in canonical.get("answers") or []:
+            if not isinstance(item, dict):
+                continue
+            pairs.append(
+                (str(item.get("question") or ""), str(item.get("answer") or ""))
+            )
+
+    deduped: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for question, answer in pairs:
+        question = question.strip()
+        answer = answer.strip()
+        if not answer:
+            continue
+        key = (normalize_question_text(question), normalize_question_text(answer))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((question, answer))
+    return deduped
 
 
 def substantive_answered_questions(state: dict | None) -> set[str]:

@@ -29,6 +29,7 @@ ARTIFACT_KEYS = (
     "proposal",
     "sow",
     "clarification_history",
+    "clarification_state",
     "clarification_questions",
     "blocking_questions",
     "non_blocking_questions",

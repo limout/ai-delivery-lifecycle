@@ -409,27 +409,38 @@ DELIVERY_REVIEW_SCHEMA = {
 def _clarification_records(state: DeliveryState) -> list[dict]:
     """Return all customer clarification facts available to this run."""
     records: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_record(question: str, answer: str) -> None:
+        question = str(question or "").strip()
+        answer = str(answer or "").strip()
+        if not answer:
+            return
+        key = (question.lower(), answer.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        records.append({"question": question, "answer": answer})
 
     for item in state.get("clarification_history", []) or []:
         if not isinstance(item, dict):
             continue
-        question = str(item.get("question") or "").strip()
-        answer = str(item.get("answer") or "").strip()
-        if answer:
-            records.append({"question": question, "answer": answer})
+        add_record(item.get("question") or "", item.get("answer") or "")
 
     for item in state.get("new_clarification_records", []) or []:
         if not isinstance(item, dict):
             continue
-        question = str(item.get("question") or "").strip()
-        answer = str(item.get("answer") or "").strip()
-        if answer:
-            records.append({"question": question, "answer": answer})
+        add_record(item.get("question") or "", item.get("answer") or "")
 
     for item in state.get("clarification_answers", []) or []:
-        text = str(item).strip()
-        if text:
-            records.append({"question": "", "answer": text})
+        add_record("", str(item))
+
+    canonical = state.get("clarification_state")
+    if isinstance(canonical, dict):
+        for item in canonical.get("answers") or []:
+            if not isinstance(item, dict):
+                continue
+            add_record(item.get("question") or "", item.get("answer") or "")
 
     return records
 

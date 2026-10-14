@@ -2893,7 +2893,10 @@ function updateRunningStatus(message) {
                     prior_state: currentData || {},
                     clarification_history: currentData && Array.isArray(currentData.clarification_history)
                         ? currentData.clarification_history
-                        : []
+                        : [],
+                    clarification_state: currentData && currentData.clarification_state
+                        ? currentData.clarification_state
+                        : {}
                 },
                 renderResult
             );

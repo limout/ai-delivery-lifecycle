@@ -6,6 +6,10 @@ facts promoted to requirements, and dropped unanswered request flags.
 No live model call and no in-memory production run ID.
 """
 
+import json
+
+from fastapi.testclient import TestClient
+
 from app.agents import (
     DISCOVERY_SCHEMA,
     REQUIREMENTS_SCHEMA,
@@ -15,9 +19,12 @@ from app.agents import (
     requirements_agent,
     validation_agent,
 )
-from app.api import workflow_response
+from app.api import get_provider, workflow_response
 from app.assessment import ASK_NEXT_LIMIT
 from app.decisions import questions_equivalent
+from app.evidence import normalize_question_text
+from app.main import app
+from app.providers import MockProvider
 from app.resume import apply_clarification_facts
 
 REQUEST = (
@@ -112,6 +119,44 @@ STALE_UNKNOWN = [
     "What photo retention and deletion policy should apply?",
 ]
 
+MANDATORY_USERS_QUESTION = "Who will use the first release, and what will they do in it?"
+MANDATORY_INTEGRATION_QUESTION = (
+    "Which systems must the first release integrate with, and what "
+    "is the source of truth?"
+)
+PENDING_INTERFACE_QUESTION = (
+    "Has the Operations Manager dedicated first-release interface been decided?"
+)
+PENDING_PERMISSION_QUESTION = (
+    "Have the exact permission matrix and report-correction workflow been defined?"
+)
+
+PRODUCTION_SHAPED_REQUEST = (
+    "Build a mobile inspection first release to view assigned sites and jobs, "
+    "complete inspections, capture photos, submit reports, and integrate with "
+    "existing systems."
+)
+
+MANDATORY_ANSWERS = [
+    (
+        f"{MANDATORY_USERS_QUESTION}: "
+        "Field technicians are the primary users of the mobile app. They will "
+        "view assigned sites and jobs, complete inspection and maintenance "
+        "workflows, capture photos, and submit reports. Operations managers "
+        "participate in weekly reviews of inspection results. Whether the "
+        "Operations Manager needs a dedicated first-release interface has not "
+        "been decided. Field Technician and Operations Manager roles are "
+        "identified, but the exact permission matrix and report-correction "
+        "workflow are not yet defined."
+    ),
+    (
+        f"{MANDATORY_INTEGRATION_QUESTION}: "
+        "The Salesforce Asset Registry API is the source of truth for installed "
+        "assets. API access and technical documentation are available and have "
+        "been verified."
+    ),
+]
+
 POLLUTED_FRS = [
     "Technicians can complete assigned inspections on a mobile device.",
     "Obtain estimates from the customer for user counts and peak concurrency.",
@@ -137,6 +182,64 @@ class ScriptedProvider:
 
     def generate_json(self, prompt, schema):
         return dict(self.responses[id(schema)])
+
+
+class StaleRegenerationProvider(MockProvider):
+    def generate_json(self, prompt, schema):
+        required = tuple((schema or {}).get("required") or [])
+        if required == tuple(DISCOVERY_SCHEMA["required"]):
+            return {
+                "problem": "Mobile inspection app",
+                "business_goal": "Improve field inspection execution",
+                "users": ["Field technicians", "Operations Manager"],
+                "stakeholders": [],
+                "existing_systems": ["Salesforce Asset Registry API"],
+                "constraints": [],
+                "assumptions": [],
+                "unknowns": [
+                    MANDATORY_USERS_QUESTION,
+                    MANDATORY_INTEGRATION_QUESTION,
+                    PENDING_INTERFACE_QUESTION,
+                    PENDING_PERMISSION_QUESTION,
+                    "What are the hosting arrangements and infrastructure preferences?",
+                    "What photo retention and deletion policy should apply?",
+                    "What is the expected user volume and concurrent load?",
+                ],
+                "clarification_questions": [
+                    MANDATORY_USERS_QUESTION,
+                    MANDATORY_INTEGRATION_QUESTION,
+                ],
+            }
+        if required == tuple(REQUIREMENTS_SCHEMA["required"]):
+            return {
+                "functional_requirements": [
+                    "The system should support field inspections on mobile devices."
+                ],
+                "non_functional_requirements": [],
+                "acceptance_criteria": [
+                    "An authorized user can complete and submit an inspection."
+                ],
+                "open_questions": [
+                    MANDATORY_USERS_QUESTION,
+                    MANDATORY_INTEGRATION_QUESTION,
+                    PENDING_INTERFACE_QUESTION,
+                    PENDING_PERMISSION_QUESTION,
+                ],
+                "contradictions": [],
+            }
+        if required == tuple(VALIDATION_SCHEMA["required"]):
+            return {
+                "status": "READY",
+                "reasons": ["The scripted provider intentionally repeats stale questions."],
+                "questions": [],
+                "non_blocking_questions": [
+                    MANDATORY_USERS_QUESTION,
+                    MANDATORY_INTEGRATION_QUESTION,
+                    PENDING_INTERFACE_QUESTION,
+                    PENDING_PERMISSION_QUESTION,
+                ],
+            }
+        return super().generate_json(prompt, schema)
 
 
 def _state(**extra):
@@ -428,3 +531,299 @@ def test_field_inspection_assessment_views_share_reconciled_state():
     assert validated["validation"]["non_blocking_questions"] == validated["requirements"]["open_questions"]
     assert snapshot["history_len"] == len(HISTORY)
     assert ASK_NEXT_LIMIT == 5
+
+
+def _question_items(items) -> list[str]:
+    result = []
+    for item in items or []:
+        if isinstance(item, dict):
+            text = str(item.get("question") or item.get("text") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _all_ui_open_questions(payload: dict) -> list[str]:
+    assessment = payload.get("assessment") or {}
+    return (
+        _question_items((payload.get("discovery") or {}).get("unknowns"))
+        + _question_items((payload.get("requirements") or {}).get("open_questions"))
+        + _question_items((payload.get("validation") or {}).get("non_blocking_questions"))
+        + _question_items(payload.get("blocking_questions"))
+        + _question_items(payload.get("non_blocking_questions"))
+        + _question_items(payload.get("clarification_questions"))
+        + _question_items(assessment.get("what_is_uncertain"))
+        + _question_items(assessment.get("ask_next"))
+    )
+
+
+def _assert_authoritative_clarification_state(payload: dict):
+    open_blob = _lower(_all_ui_open_questions(payload))
+    assert "who will use the first release" not in open_blob
+    assert "source of truth" not in open_blob
+    assert "operations manager" in open_blob
+    assert "permission matrix" in open_blob
+
+    root_optional = _question_items(payload.get("non_blocking_questions"))
+    _assert_closed(root_optional, "who will use the first release", "source of truth")
+    for item in payload.get("non_blocking_questions") or []:
+        assert isinstance(item, dict)
+        assert item.get("status") == "OPEN", item
+        assert item.get("priority") in {"RECOMMENDED", "OPTIONAL"}, item
+        assert item.get("blocks_workflow") is False, item
+
+    canonical = payload.get("clarification_state") or {}
+    assert canonical.get("version") == 1
+    answers_blob = _lower(item.get("answer") for item in canonical.get("answers") or [])
+    assert "field technicians are the primary users" in answers_blob
+    assert "salesforce asset registry api" in answers_blob
+
+    decisions = canonical.get("decisions") or []
+    resolved = _lower(
+        item.get("decision")
+        for item in decisions
+        if item.get("status") == "RESOLVED"
+    )
+    pending = _lower(
+        item.get("decision")
+        for item in decisions
+        if item.get("status") == "PENDING"
+    )
+    assert "field technicians are the primary users" in resolved
+    assert "salesforce asset registry api" in resolved
+    assert "operations manager" in pending
+    assert "permission matrix" in pending
+
+    question_state = {
+        normalize_question_text(item.get("question")): item
+        for item in canonical.get("questions") or []
+        if isinstance(item, dict)
+    }
+    for question in (MANDATORY_USERS_QUESTION, MANDATORY_INTEGRATION_QUESTION):
+        item = question_state[normalize_question_text(question)]
+        assert item["status"] == "RESOLVED"
+        assert item["priority"] == "REQUIRED"
+        assert item["blocks_workflow"] is True
+    for question in (PENDING_INTERFACE_QUESTION, PENDING_PERMISSION_QUESTION):
+        matching = [
+            item for text, item in question_state.items()
+            if questions_equivalent(text, normalize_question_text(question))
+            or normalize_question_text(question) in text
+        ]
+        assert matching, (question, question_state)
+        assert all(item["status"] == "OPEN" for item in matching)
+        assert all(item["blocks_workflow"] is False for item in matching)
+
+    discovery_unknowns = _question_items((payload.get("discovery") or {}).get("unknowns"))
+    requirement_open = _question_items((payload.get("requirements") or {}).get("open_questions"))
+    validation_open = _question_items((payload.get("validation") or {}).get("non_blocking_questions"))
+    assert discovery_unknowns == requirement_open == validation_open
+
+
+def _fresh_clarify(client: TestClient, payload: dict, answer: str) -> dict:
+    serialized = json.loads(json.dumps(payload))
+    response = client.post(
+        "/clarify",
+        json={
+            "user_request": PRODUCTION_SHAPED_REQUEST,
+            "clarification_answers": [answer],
+            "clarification_history": serialized.get("clarification_history") or [],
+            "clarification_state": serialized.get("clarification_state") or {},
+            "prior_state": serialized,
+            "iteration": serialized.get("iteration") or 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_canonical_clarification_state_survives_serialized_regeneration_path(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("RAG_ENABLED", "false")
+    provider = StaleRegenerationProvider()
+    previous_overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_provider] = lambda: provider
+    client = TestClient(app)
+    try:
+        first = client.post(
+            "/analyze",
+            json={"user_request": PRODUCTION_SHAPED_REQUEST},
+        ).json()
+        assert first["status"] == "NEEDS_INFO"
+        blocking = _lower(_question_items(first.get("blocking_questions")))
+        assert "who will use the first release" in blocking
+        assert "source of truth" in blocking
+
+        second = client.post(
+            "/clarify",
+            json={
+                "user_request": PRODUCTION_SHAPED_REQUEST,
+                "clarification_answers": list(MANDATORY_ANSWERS),
+                "clarification_history": first.get("clarification_history") or [],
+                "clarification_state": first.get("clarification_state") or {},
+                "prior_state": json.loads(json.dumps(first)),
+                "iteration": first.get("iteration") or 1,
+            },
+        ).json()
+        assert second["execution"]["regenerate_upstream"] is True
+        _assert_authoritative_clarification_state(second)
+
+        third = _fresh_clarify(
+            client,
+            second,
+            (
+                f"{PENDING_INTERFACE_QUESTION}: The Operations Manager dedicated "
+                "interface has not yet been decided."
+            ),
+        )
+        _assert_authoritative_clarification_state(third)
+
+        fourth = _fresh_clarify(
+            client,
+            third,
+            (
+                f"{PENDING_PERMISSION_QUESTION}: The exact permission matrix and "
+                "report-correction workflow are not yet defined."
+            ),
+        )
+        _assert_authoritative_clarification_state(fourth)
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
+
+
+def _ledger_stale_artifacts() -> dict:
+    return {
+        "discovery": {
+            "problem": "Mobile inspection app",
+            "business_goal": "Improve field inspection execution",
+            "users": ["Field technicians", "Operations Manager"],
+            "stakeholders": [],
+            "existing_systems": ["Salesforce Asset Registry API"],
+            "constraints": [],
+            "assumptions": [],
+            "unknowns": [
+                MANDATORY_USERS_QUESTION,
+                MANDATORY_INTEGRATION_QUESTION,
+                PENDING_INTERFACE_QUESTION,
+                PENDING_PERMISSION_QUESTION,
+            ],
+            "clarification_questions": [
+                MANDATORY_USERS_QUESTION,
+                MANDATORY_INTEGRATION_QUESTION,
+            ],
+        },
+        "requirements": {
+            "functional_requirements": [
+                "The system should support field inspections on mobile devices."
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "An authorized user can complete and submit an inspection."
+            ],
+            "open_questions": [
+                MANDATORY_USERS_QUESTION,
+                MANDATORY_INTEGRATION_QUESTION,
+                PENDING_INTERFACE_QUESTION,
+                PENDING_PERMISSION_QUESTION,
+            ],
+            "contradictions": [],
+        },
+        "validation": {
+            "status": "READY",
+            "reasons": ["Scripted stale payload"],
+            "questions": [],
+            "non_blocking_questions": [
+                MANDATORY_USERS_QUESTION,
+                MANDATORY_INTEGRATION_QUESTION,
+                PENDING_INTERFACE_QUESTION,
+                PENDING_PERMISSION_QUESTION,
+            ],
+        },
+    }
+
+
+def test_legacy_history_without_canonical_ledger_is_reconstructed():
+    artifacts = _ledger_stale_artifacts()
+    state = {
+        "user_request": PRODUCTION_SHAPED_REQUEST,
+        "clarification_history": [
+            {
+                "question": MANDATORY_USERS_QUESTION,
+                "answer": MANDATORY_ANSWERS[0].split(": ", 1)[1],
+            },
+            {
+                "question": MANDATORY_INTEGRATION_QUESTION,
+                "answer": MANDATORY_ANSWERS[1].split(": ", 1)[1],
+            },
+        ],
+        "discovery": artifacts["discovery"],
+        "requirements": artifacts["requirements"],
+        "validation": artifacts["validation"],
+        "workflow_status": "COMPLETE",
+    }
+    payload = workflow_response(state, run_id="legacy-history-canonical-rebuild")
+    _assert_authoritative_clarification_state(payload)
+
+
+def test_partial_client_history_does_not_reopen_canonical_answers(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("RAG_ENABLED", "false")
+    provider = StaleRegenerationProvider()
+    previous_overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_provider] = lambda: provider
+    client = TestClient(app)
+    try:
+        first = client.post(
+            "/analyze",
+            json={"user_request": PRODUCTION_SHAPED_REQUEST},
+        ).json()
+        second = client.post(
+            "/clarify",
+            json={
+                "user_request": PRODUCTION_SHAPED_REQUEST,
+                "clarification_answers": list(MANDATORY_ANSWERS),
+                "clarification_history": first.get("clarification_history") or [],
+                "clarification_state": first.get("clarification_state") or {},
+                "prior_state": json.loads(json.dumps(first)),
+                "iteration": first.get("iteration") or 1,
+            },
+        ).json()
+        _assert_authoritative_clarification_state(second)
+        serialized = json.loads(json.dumps(second))
+        history = list(serialized.get("clarification_history") or [])
+        partial_history = history[-1:] if history else []
+        third = client.post(
+            "/clarify",
+            json={
+                "user_request": PRODUCTION_SHAPED_REQUEST,
+                "clarification_answers": [
+                    (
+                        f"{PENDING_INTERFACE_QUESTION}: The Operations Manager "
+                        "dedicated interface has not yet been decided."
+                    )
+                ],
+                "clarification_history": partial_history,
+                "clarification_state": serialized.get("clarification_state") or {},
+                "prior_state": serialized,
+                "iteration": serialized.get("iteration") or 1,
+            },
+        ).json()
+        _assert_authoritative_clarification_state(third)
+        answers_blob = _lower(
+            item.get("answer")
+            for item in (third.get("clarification_state") or {}).get("answers") or []
+        )
+        assert "field technicians are the primary users" in answers_blob
+        assert "salesforce asset registry api" in answers_blob
+        restored_history = " ".join(
+            str(item.get("answer") or "")
+            for item in third.get("clarification_history") or []
+        ).lower()
+        assert "field technicians are the primary users" in restored_history
+        assert "salesforce asset registry api" in restored_history
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
