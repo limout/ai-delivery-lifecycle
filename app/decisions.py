@@ -370,6 +370,19 @@ class ClarificationDecisions:
         tokens = content_tokens(text)
         covered = any(_statement_covers(statement, text) for statement in self.resolved)
         if not covered:
+            related = set()
+            for statement in self.resolved:
+                if (
+                    (statement.question.strip() and questions_equivalent(text, statement.question))
+                    or (tokens & statement.own_tokens)
+                ):
+                    related |= statement.own_tokens
+            subject = tokens - _FRAME_STEMS
+            if subject and _overlaps(subject, related):
+                refinement = _refinement_tokens(text) - _FRAME_STEMS
+                if not refinement or (refinement & related):
+                    covered = True
+        if not covered:
             return False
         if any(
             statement.question.strip()
@@ -580,7 +593,8 @@ def _narrowed_from_pending(original: str, pending: list[ClarifiedStatement]) -> 
     if original.endswith("?") and not _has_proposal(blob) and not re.search(
         r"signed off|sign-off|"
         r"not(?:\s+yet)?(?:\s+been)?\s+(?:defined|specified|established|decided)|"
-        r"has not been decided",
+        r"not(?:\s+yet)?\s+been\s+approved|"
+        r"has not been (?:decided|approved)",
         blob,
         re.I,
     ):
@@ -690,6 +704,27 @@ def _is_generalization_of(general: str, specific: str) -> bool:
     return shared >= min(2, len(g)) and shared / len(g) >= 0.8
 
 
+def _is_broader_question(broad: str, specific: str) -> bool:
+    """True when ``broad`` restates a topic already narrowed in ``specific``.
+
+    The specific question must add a remaining-decision refinement (workflow,
+    resolution, policy, matrix) that the broad question does not ask. Shared
+    topic words alone, such as hosting or photo, do not collapse distinct
+    decisions.
+    """
+    if _same_question_text(broad, specific):
+        return False
+    b = content_tokens(broad) - _FRAME_STEMS
+    s = content_tokens(specific) - _FRAME_STEMS
+    if not b or not s or b == s:
+        return False
+    extra = s - b
+    if not (extra & _REFINEMENT_STEMS):
+        return False
+    shared = _shared_stem_count(b, s)
+    return shared >= min(2, len(b)) and shared / len(b) >= 0.5
+
+
 def reconcile_open_questions(questions: list, state: dict | None) -> list:
     """Close, replace, or keep questions against all clarification answers.
 
@@ -708,12 +743,7 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
             for statement in decisions.pending
             if _pending_matches_question(statement, text)
         ]
-        resolved_hits = [
-            statement
-            for statement in decisions.resolved
-            if _statement_covers(statement, text)
-        ]
-        if resolved_hits and not pending_hits:
+        if decisions.resolves(text) and not pending_hits:
             continue
         if pending_hits:
             source = pending_hits[0].question.strip() or text
@@ -756,6 +786,12 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
     final = []
     for item, text in zip(kept, kept_text):
         if any(_is_generalization_of(text, other) for other in kept_text):
+            continue
+        if any(
+            _is_broader_question(text, other)
+            for other in kept_text
+            if not _same_question_text(text, other)
+        ):
             continue
         final.append(item)
     return final
