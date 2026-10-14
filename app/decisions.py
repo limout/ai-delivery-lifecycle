@@ -395,6 +395,16 @@ def question_text(item) -> str:
     return str(item or "").strip()
 
 
+def _same_question_text(first: str, second: str) -> bool:
+    """True when two questions are the same string after trivial formatting.
+
+    Collapses leading/trailing whitespace and internal run-on spaces. Does not
+    treat differently worded questions as the same.
+    """
+    left = normalize_question_text(first)
+    return bool(left) and left == normalize_question_text(second)
+
+
 def _with_question_text(item, text: str):
     if isinstance(item, dict):
         updated = dict(item)
@@ -565,7 +575,10 @@ def dedupe_equivalent_questions(items: list) -> list:
         text = str(item.get("question") if isinstance(item, dict) else item or "")
         if not text.strip():
             continue
-        if any(questions_equivalent(text, existing) for existing in kept_text):
+        if any(
+            _same_question_text(text, existing) or questions_equivalent(text, existing)
+            for existing in kept_text
+        ):
             continue
         kept.append(item)
         kept_text.append(text)
@@ -665,12 +678,19 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
     for item in rewritten:
         text = question_text(item)
         match = next(
-            (index for index, existing in enumerate(kept_text) if questions_equivalent(text, existing)),
+            (
+                index
+                for index, existing in enumerate(kept_text)
+                if _same_question_text(text, existing)
+                or questions_equivalent(text, existing)
+            ),
             None,
         )
         if match is None:
             kept.append(item)
             kept_text.append(text)
+            continue
+        if _same_question_text(text, kept_text[match]):
             continue
         if _prefer_remaining(kept_text[match], text, decisions) == text:
             kept[match] = item
