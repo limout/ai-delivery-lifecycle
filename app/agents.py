@@ -7,6 +7,8 @@ from app.decisions import (
     apply_decisions_to_requirements,
     dedupe_equivalent_questions,
     drop_resolved,
+    question_text,
+    reconcile_open_questions,
 )
 from app.evidence import (
     clarification_answer_body,
@@ -713,17 +715,17 @@ def _filter_answered_questions(
     filtered = []
     for item in questions or []:
         text = item.get("question") if isinstance(item, dict) else str(item)
-        if keep_pending and decisions.is_pending(str(text or "")):
-            filtered.append(item)
-            continue
-        if _normalize_question_text(text) in answered_texts:
+        pending = decisions.is_pending(str(text or ""))
+        if _normalize_question_text(text) in answered_texts and not pending:
             continue
         topic = _question_topic(text)
-        if topic and topic in answered_topics:
+        if topic and topic in answered_topics and not pending:
             continue
         if decisions.resolves(str(text or "")):
             continue
         filtered.append(item)
+    if semantic:
+        return reconcile_open_questions(filtered, state)
     return filtered
 
 def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
@@ -734,20 +736,24 @@ def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
         return discovery
 
     cleaned = dict(discovery)
-    cleaned["unknowns"] = dedupe_equivalent_questions(drop_resolved(
-        [
-            item for item in discovery.get("unknowns", []) or []
-            if decisions.is_pending(str(item))
-            or not (_question_topic(str(item)) in answered)
-        ],
-        decisions,
-    ))
-    cleaned["clarification_questions"] = dedupe_equivalent_questions(
-        _filter_answered_questions(
+    cleaned["unknowns"] = [
+        question_text(item)
+        for item in reconcile_open_questions(
+            [
+                item for item in discovery.get("unknowns", []) or []
+                if decisions.is_pending(str(item))
+                or not (_question_topic(str(item)) in answered)
+            ],
+            state,
+        )
+    ]
+    cleaned["clarification_questions"] = [
+        question_text(item)
+        for item in _filter_answered_questions(
             discovery.get("clarification_questions", []) or [], state,
             keep_pending=True,
         )
-    )
+    ]
     return cleaned
 
 
@@ -764,14 +770,17 @@ def _filter_answered_requirement_questions(requirements: dict, state: DeliverySt
         return requirements
 
     cleaned = dict(requirements)
-    cleaned["open_questions"] = dedupe_equivalent_questions(drop_resolved(
-        [
-            item for item in requirements.get("open_questions", []) or []
-            if decisions.is_pending(str(item))
-            or not (_question_topic(str(item)) in answered)
-        ],
-        decisions,
-    ))
+    cleaned["open_questions"] = [
+        question_text(item)
+        for item in reconcile_open_questions(
+            [
+                item for item in requirements.get("open_questions", []) or []
+                if decisions.is_pending(str(item))
+                or not (_question_topic(str(item)) in answered)
+            ],
+            state,
+        )
+    ]
     if "contradictions" in requirements:
         cleaned["contradictions"] = drop_resolved(
             requirements.get("contradictions", []) or [], decisions
@@ -1718,23 +1727,33 @@ REQUIREMENTS:
         "reasons": reasons,
         "questions": blocking_questions,
         "blocking_questions": blocking_questions,
-        "non_blocking_questions": _filter_answered_questions(
-            _coalesce_optional_questions(
-                [
-                    q for q in non_blocking_questions
-                    if q.lower() not in {b.lower() for b in blocking_questions}
-                ],
+        "non_blocking_questions": [
+            question_text(item)
+            for item in reconcile_open_questions(
+                _filter_answered_questions(
+                    _coalesce_optional_questions(
+                        [
+                            q for q in non_blocking_questions
+                            if q.lower() not in {b.lower() for b in blocking_questions}
+                        ],
+                        state,
+                    ),
+                    state,
+                    keep_pending=True,
+                ),
                 state,
-            ),
-            state,
-            keep_pending=True,
-        ),
+            )
+        ],
         "estimable": not blocking_questions,
         "missing_evidence": [gap.reason for gap in evidence_gaps],
     }
 
+    requirements = dict(requirements)
+    requirements["open_questions"] = list(validation["non_blocking_questions"])
+
     return {
         "validation": validation,
+        "requirements": requirements,
     }
 
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
-from app.decisions import dedupe_equivalent_questions
+from app.decisions import question_text, reconcile_open_questions
 from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
@@ -814,10 +814,23 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         required=False,
     )
     blocking_text = {item["question"].lower() for item in blocking_questions}
-    non_blocking_questions = dedupe_equivalent_questions([
-        item for item in non_blocking_questions
-        if item["question"].lower() not in blocking_text
-    ])
+    requirements = dict(result.get("requirements") or {})
+    combined_optional = [
+        *[question_text(item) for item in (requirements.get("open_questions") or [])],
+        *[item["question"] for item in non_blocking_questions if item["question"].lower() not in blocking_text],
+    ]
+    reconciled_optional = [
+        question_text(item)
+        for item in reconcile_open_questions(combined_optional, result)
+    ]
+    requirements["open_questions"] = reconciled_optional
+    validation = dict(validation)
+    validation["non_blocking_questions"] = reconciled_optional
+    if isinstance(result.get("requirements"), dict):
+        result["requirements"] = requirements
+    if isinstance(result.get("validation"), dict):
+        result["validation"] = validation
+    non_blocking_questions = _normalize_questions(reconciled_optional, required=False)
 
     resolved_run_id = run_id or result.get("run_id") or new_run_id()
     save_run(resolved_run_id, result)

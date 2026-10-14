@@ -23,6 +23,8 @@ from app.decisions import (
     ClarificationDecisions,
     apply_decisions_to_requirements,
     dedupe_equivalent_questions,
+    questions_equivalent,
+    reconcile_open_questions,
 )
 from app.resume import apply_clarification_facts
 
@@ -283,8 +285,15 @@ def test_resume_path_reconciles_discovery_and_requirements(scenario):
         scenario.resolved_detail in item
         for item in merged["requirements"]["functional_requirements"]
     )
+    remaining = list(merged["discovery"]["unknowns"]) + list(
+        merged["requirements"]["open_questions"]
+    )
     for variants in scenario.pending_variants:
-        assert variants[0] in merged["discovery"]["unknowns"]
+        assert any(
+            questions_equivalent(variant, item)
+            for variant in variants
+            for item in remaining
+        ), remaining
 
 
 @SCENARIOS
@@ -382,7 +391,8 @@ def test_pending_answer_does_not_close_its_own_question(scenario):
             }
         ),
     )["validation"]
-    assert pending_question in validation["non_blocking_questions"]
+    remaining = validation["non_blocking_questions"]
+    assert any(questions_equivalent(pending_question, item) for item in remaining), remaining
 
 
 @SCENARIOS
@@ -443,3 +453,351 @@ def test_dedupe_keeps_distinct_questions_and_first_variant():
 def test_without_clarifications_requirements_are_untouched():
     requirements = {"functional_requirements": ["a b c"], "open_questions": ["Q one?"]}
     assert apply_decisions_to_requirements(requirements, {"user_request": "x"}) == requirements
+
+
+def _round_two_state(history, previous_questions, extra_questions, request):
+    return {
+        "user_request": request,
+        "clarification_history": history,
+        "discovery": {
+            "problem": "Operational app",
+            "business_goal": "Faster operations",
+            "users": ["Operators"],
+            "stakeholders": [],
+            "existing_systems": [],
+            "constraints": [],
+            "assumptions": [],
+            "unknowns": list(previous_questions),
+            "clarification_questions": [],
+        },
+        "requirements": {
+            "functional_requirements": ["Operators complete their core task."],
+            "non_functional_requirements": [],
+            "acceptance_criteria": ["The core task can be completed."],
+            "open_questions": list(previous_questions),
+            "contradictions": [],
+        },
+        "iteration": 3,
+    }, list(previous_questions) + list(extra_questions)
+
+
+WAREHOUSE_REQUEST = WAREHOUSE.request
+CLINIC_REQUEST = CLINIC.request
+
+
+def test_later_round_closes_broad_offline_and_replaces_hosting():
+    history = _history(WAREHOUSE)
+    previous = [
+        "Which tablet platforms should the first release support?",
+        "How should the app behave without network coverage?",
+        "Which hosting provider and region should be used?",
+        "What retention period applies to pick photos?",
+        "Is the supervisor dashboard part of the first release?",
+    ]
+    follow_ups = [
+        "What conflict-resolution policy applies when two pickers confirm the same item offline?",
+        "How should conflicts be resolved when concurrent offline confirmations update the same pick?",
+        "Has the proposed three-year pick photo retention period been approved?",
+    ]
+    state, candidates = _round_two_state(history, previous, follow_ups, WAREHOUSE_REQUEST)
+    original_history = [dict(item) for item in history]
+    validation = validation_agent(
+        state,
+        ScriptedProvider(
+            validation={
+                "status": "READY",
+                "reasons": ["Ready for preliminary shaping."],
+                "questions": [],
+                "non_blocking_questions": candidates,
+            }
+        ),
+    )
+    questions = validation["validation"]["non_blocking_questions"]
+    open_questions = validation["requirements"]["open_questions"]
+    blob = _lower_all(questions)
+
+    assert questions == open_questions
+    assert "network coverage" not in blob
+    assert "tablet platforms" not in blob
+    assert "which hosting provider and region should be used?" not in blob
+    assert "what retention period applies to pick photos?" not in blob
+    conflict = [q for q in questions if "conflict" in q.lower()]
+    assert len(conflict) == 1, questions
+    assert any("approved" in q.lower() and "host" in q.lower() for q in questions), questions
+    assert any("supervisor dashboard" in q.lower() for q in questions)
+    assert state["user_request"] == WAREHOUSE_REQUEST
+    assert state["clarification_history"] == original_history
+
+
+def test_clinic_domain_partial_answer_leaves_unresolved_remainder():
+    history = _history(CLINIC)
+    previous = [
+        "Which languages must the portal support?",
+        "When should appointment reminders be sent?",
+        "Which payment gateway will be used?",
+        "What are the expected user roles and permissions?",
+    ]
+    follow_ups = [
+        "What is the exact permission matrix for the proposed clinic-staff and patient roles?",
+        "Has finance approved the payment gateway?",
+    ]
+    history = list(history) + [
+        {
+            "question": "What are the expected user roles and permissions?",
+            "answer": (
+                "We propose clinic staff and patients as the user roles; "
+                "the permission matrix is not yet defined."
+            ),
+        }
+    ]
+    state, candidates = _round_two_state(history, previous, follow_ups, CLINIC_REQUEST)
+    result = validation_agent(
+        state,
+        ScriptedProvider(
+            validation={
+                "status": "READY",
+                "reasons": ["Ready for preliminary shaping."],
+                "questions": [],
+                "non_blocking_questions": candidates,
+            }
+        ),
+    )
+    questions = result["validation"]["non_blocking_questions"]
+    blob = _lower_all(questions)
+    assert "which languages" not in blob
+    assert "appointment reminders" not in blob
+    assert questions == result["requirements"]["open_questions"]
+    assert any("permission" in q.lower() for q in questions), questions
+    assert any("gateway" in q.lower() for q in questions), questions
+    assert not any(
+        q.lower() == "what are the expected user roles and permissions?"
+        for q in questions
+    )
+    permission = [q for q in questions if "permission" in q.lower()]
+    assert permission
+    assert state["user_request"] == CLINIC_REQUEST
+
+
+def test_equivalent_conflict_questions_are_deduplicated_without_answers():
+    questions = [
+        "What conflict-resolution policy applies when two technicians edit the same offline record?",
+        "How should conflicts be resolved when concurrent offline submissions update the same inspection?",
+        "What is the expected user volume and concurrent load for the web application?",
+    ]
+    assert len(dedupe_equivalent_questions(questions)) == 2
+    reconciled = reconcile_open_questions(questions, {"user_request": "Build an inspection app."})
+    texts = [q if isinstance(q, str) else q["question"] for q in reconciled]
+    assert len([q for q in texts if "conflict" in q.lower()]) == 1
+    assert any("user volume" in q.lower() for q in texts)
+
+
+def test_distinct_same_topic_questions_remain_separate():
+    questions = [
+        "Which hosting provider should be used?",
+        "Which region should hosting use?",
+        "Has the proposed hosting provider been approved?",
+    ]
+    state = {
+        "user_request": "Build a warehouse tablet app.",
+        "clarification_history": [
+            {
+                "question": "Which hosting provider should be used?",
+                "answer": "We propose Provider A, but the hosting provider has not been approved yet.",
+            }
+        ],
+    }
+    reconciled = [str(q) for q in reconcile_open_questions(questions, state)]
+    blob = _lower_all(reconciled)
+    assert "which region should hosting use?" in blob
+    assert "which hosting provider should be used?" not in blob
+    assert any("approved" in q.lower() and "provider" in q.lower() for q in reconciled)
+
+
+def test_resolved_question_does_not_reappear_in_later_validation():
+    state = _state(
+        WAREHOUSE,
+        discovery={**_discovery(WAREHOUSE), "unknowns": []},
+        requirements={
+            "functional_requirements": ["Operators complete their core task."],
+            "open_questions": [],
+            "contradictions": [],
+        },
+    )
+    first = validation_agent(
+        state,
+        ScriptedProvider(
+            validation={
+                "status": "READY",
+                "reasons": ["Ready for preliminary shaping."],
+                "questions": [],
+                "non_blocking_questions": [
+                    "How should the app behave without network coverage?",
+                    "Which hosting provider and region should be used?",
+                ],
+            }
+        ),
+    )
+    later_state = {
+        **state,
+        "requirements": first["requirements"],
+        "validation": first["validation"],
+    }
+    second = validation_agent(
+        later_state,
+        ScriptedProvider(
+            validation={
+                "status": "READY",
+                "reasons": ["Ready for preliminary shaping."],
+                "questions": [],
+                    "non_blocking_questions": [
+                        "How should the app behave without network coverage?",
+                        "What should the app do when there is no network coverage?",
+                        "Which hosting provider and region should be used?",
+                    ],
+            }
+        ),
+    )
+    blob = _lower_all(second["validation"]["non_blocking_questions"])
+    assert "network coverage" not in blob
+    assert "offline behavior" not in blob
+    payload = workflow_response(
+        {
+            "user_request": WAREHOUSE.request,
+            "clarification_history": _history(WAREHOUSE),
+            "requirements": second["requirements"],
+            "validation": second["validation"],
+            "workflow_status": "COMPLETE",
+            "sow": {
+                "in_scope": ["Core picking"],
+                "out_of_scope": ["Analytics"],
+                "deliverables": ["Tablet app"],
+            },
+            "solution": {"key_capabilities": ["Confirm picks"]},
+            "delivery_plan": {
+                "delivery_phases": ["Build"],
+                "workstreams": ["App"],
+                "milestones": ["Release"],
+            },
+        },
+        run_id="question-lifecycle",
+    )
+    assert payload["user_request"] == WAREHOUSE.request
+    assert payload["clarification_history"] == _history(WAREHOUSE)
+    assert payload["requirements"]["open_questions"] == [
+        item["question"] for item in payload["non_blocking_questions"]
+    ]
+    assert "network coverage" not in _lower_all(payload["requirements"]["open_questions"])
+
+
+def test_thirteen_question_accumulation_is_reconciled():
+    """Focused stand-in for the UI 13-question accumulation case. No LLM."""
+    request = (
+        "Build a mobile inspection app for technicians. The mobile platform "
+        "and offline rules are undecided. Hosting, retention, checklists, "
+        "and manager oversight still need confirmation."
+    )
+    history = [
+        {
+            "question": "Should the first release support iOS, Android, or both platforms?",
+            "answer": "Both iOS and Android must be supported.",
+        },
+        {
+            "question": (
+                "What are the specific requirements for offline behavior and data "
+                "synchronization when technicians work at remote sites with unreliable connectivity?"
+            ),
+            "answer": (
+                "Technicians can view jobs, complete checklists, and attach photos "
+                "with no connection. Completed work is queued and synchronized "
+                "automatically when connectivity returns."
+            ),
+        },
+        {
+            "question": (
+                "What are the hosting arrangements and infrastructure preferences "
+                "for backend services or data storage?"
+            ),
+            "answer": (
+                "We propose a regional cloud provider in the EU, but the hosting "
+                "provider and region have not been approved yet."
+            ),
+        },
+        {
+            "question": (
+                "What are the specific photo retention policies and storage limits "
+                "required for inspection photographs?"
+            ),
+            "answer": (
+                "We suggest retaining inspection photographs for three years; that "
+                "retention period is pending approval."
+            ),
+        },
+        {
+            "question": (
+                "What are the detailed inspection checklist requirements and defect "
+                "categories for the first release?"
+            ),
+            "answer": (
+                "The detailed inspection checklist and defect categories have not "
+                "been signed off yet."
+            ),
+        },
+        {
+            "question": "Is the manager oversight interface in scope for the first release?",
+            "answer": (
+                "Whether the manager oversight interface belongs in the first-release "
+                "scope has not been decided yet."
+            ),
+        },
+        {
+            "question": "What are the expected user roles and permissions?",
+            "answer": (
+                "We propose field technicians and operations managers as the user "
+                "roles; the permission matrix is not yet defined."
+            ),
+        },
+    ]
+    thirteen = [
+        "Should the first release support iOS, Android, or both platforms?",
+        "What are the specific requirements for offline behavior and data synchronization when technicians work at remote sites with unreliable connectivity?",
+        "What are the hosting arrangements and infrastructure preferences for backend services or data storage?",
+        "What are the specific photo retention policies and storage limits required for inspection photographs?",
+        "What are the detailed inspection checklist requirements and defect categories for the first release?",
+        "Is the manager oversight interface in scope for the first release?",
+        "What is the expected user volume and concurrent load for the web application?",
+        "What are the expected user roles and permissions?",
+        "Which cloud provider, region, data residency, and recovery arrangement should be confirmed?",
+        "Has the proposed three-year photo retention period been approved?",
+        "What conflict-resolution policy applies when two technicians edit the same offline record?",
+        "How should conflicts be resolved when concurrent offline submissions update the same inspection?",
+        "What is the exact permission matrix for the proposed field-technician and operations-manager roles?",
+    ]
+    assert len(thirteen) == 13
+    state, candidates = _round_two_state(history, thirteen[:8], thirteen[8:], request)
+    original_history = [dict(item) for item in history]
+    result = validation_agent(
+        state,
+        ScriptedProvider(
+            validation={
+                "status": "READY",
+                "reasons": ["Ready for preliminary shaping."],
+                "questions": [],
+                "non_blocking_questions": candidates,
+            }
+        ),
+    )
+    questions = result["validation"]["non_blocking_questions"]
+    blob = _lower_all(questions)
+    assert questions == result["requirements"]["open_questions"]
+    assert "ios" not in blob and "android" not in blob
+    assert "specific requirements for offline behavior" not in blob
+    assert "hosting arrangements and infrastructure preferences" not in blob
+    assert "specific photo retention policies" not in blob
+    assert len([q for q in questions if "conflict" in q.lower()]) == 1
+    assert any("manager oversight" in q.lower() for q in questions)
+    assert any("permission" in q.lower() for q in questions)
+    assert any("volume" in q.lower() for q in questions)
+    assert "what are the expected user roles and permissions?" not in blob
+    assert state["user_request"] == request
+    assert state["clarification_history"] == original_history
+    assert len(questions) < 13

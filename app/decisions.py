@@ -43,8 +43,7 @@ _STOPWORDS = frozenset(
     preference preferred option options approach there here one two get gets got make makes
     undecided unknown unknowns unclear open remain remains remaining outstanding original
     request requests stated states leave leaves contradict contradicts contradiction
-    conflict conflicts conflicting later earlier answer answers answered clarification
-    clarifications
+    later earlier answer answers answered clarification clarifications
     """.split()
 )
 
@@ -53,7 +52,8 @@ _PENDING_PATTERNS = tuple(
     re.compile(pattern, re.I)
     for pattern in (
         r"\bnot\s+(?:yet\s+)?(?:been\s+)?(?:approved|confirmed|decided|agreed|signed|"
-        r"finali[sz]ed|determined|chosen|selected|settled|known|sure|certain)\b",
+        r"finali[sz]ed|determined|chosen|selected|settled|known|sure|certain|"
+        r"defined|specified)\b",
         r"\b(?:has|have|had|is|are|was|were)(?:\s+not|n['’]t)\s+(?:yet\s+)?(?:been\s+)?"
         r"(?:approved|confirmed|decided|agreed|signed|finali[sz]ed|determined|chosen|"
         r"selected|settled)\b",
@@ -85,6 +85,22 @@ _DELIVERY_ADMIN = re.compile(
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+_PROPOSAL = re.compile(
+    r"\b(?:propos(?:e|ed|es|al|als)|suggest(?:s|ed)?|tentative(?:ly)?|"
+    r"provisional(?:ly)?|draft)\b",
+    re.I,
+)
+_APPROVAL_ASK = re.compile(
+    r"\b(approv|sign-?off|signed off|confirm|confirmed|confirmation)\b",
+    re.I,
+)
+_PENDING_REMAINDER = re.compile(
+    r"(.+?)\s+(?:has|have|is|are)\s+"
+    r"(?:not(?:\s+yet)?\s+(?:been\s+)?(approved|confirmed|decided|agreed|"
+    r"signed off|finali[sz]ed|defined|specified)|pending\s+(?:approval|"
+    r"sign-?off|confirmation|decision))",
+    re.I,
+)
 
 
 def _stem(word: str) -> str:
@@ -111,6 +127,56 @@ def content_tokens(text: str) -> frozenset[str]:
             continue
         tokens.add(stem)
     return frozenset(tokens)
+
+
+def _ordered_content_stems(text: str) -> list[str]:
+    stems = []
+    for word in re.findall(r"[a-z0-9]+", str(text or "").lower()):
+        if len(word) < 3 or word in _STOPWORDS:
+            continue
+        stem = _stem(word)
+        if stem in _STOP_STEMS:
+            continue
+        stems.append(stem)
+    return stems
+
+
+def _stems_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return (
+        len(left) >= 5
+        and len(right) >= 5
+        and (left.startswith(right[:5]) or right.startswith(left[:5]))
+    )
+
+
+def _shared_stem_count(left: frozenset[str], right: frozenset[str]) -> int:
+    used = set()
+    shared = 0
+    for item in left:
+        for other in right:
+            if other in used:
+                continue
+            if _stems_match(item, other):
+                used.add(other)
+                shared += 1
+                break
+    return shared
+
+
+def content_bigrams(text: str) -> frozenset[tuple[str, str]]:
+    stems = _ordered_content_stems(text)
+    return frozenset(zip(stems, stems[1:]))
+
+
+def _matching_bigrams(first: str, second: str) -> bool:
+    left, right = content_bigrams(first), content_bigrams(second)
+    for a1, a2 in left:
+        for b1, b2 in right:
+            if _stems_match(a1, b1) and _stems_match(a2, b2):
+                return True
+    return False
 
 
 def is_pending_text(text: str) -> bool:
@@ -200,11 +266,21 @@ class ClarificationDecisions:
     def resolves(self, text: str) -> bool:
         """True when a resolved answer covers ``text`` and no pending one does."""
         tokens = content_tokens(text)
-        if not tokens or not any(_overlaps(tokens, s.tokens) for s in self.resolved):
+        covered = False
+        if tokens and any(_overlaps(tokens, statement.tokens) for statement in self.resolved):
+            covered = True
+        elif any(
+            statement.question.strip()
+            and questions_equivalent(text, statement.question)
+            for statement in self.resolved
+        ):
+            covered = True
+        if not covered:
             return False
-        return not any(_overlaps(tokens, s.tokens) for s in self.pending)
+        return not any(_overlaps(tokens, statement.tokens) for statement in self.pending)
 
     def pending_questions(self) -> list[str]:
+        """Original clarification questions that still have a pending remainder."""
         questions: list[str] = []
         for statement in self.pending:
             question = statement.question.strip()
@@ -212,16 +288,115 @@ class ClarificationDecisions:
                 questions.append(question)
         return questions
 
+    def remainder_questions(self) -> list[str]:
+        """Narrow remaining questions for pending statements, not the original broads."""
+        grouped: dict[str, list[ClarifiedStatement]] = {}
+        for statement in self.pending:
+            key = normalize_question_text(statement.question) or normalize_question_text(
+                statement.text
+            )
+            grouped.setdefault(key, []).append(statement)
+        remainders: list[str] = []
+        for statements in grouped.values():
+            original = statements[0].question.strip()
+            remainders.append(_narrowed_from_pending(original, statements))
+        return remainders
+
+
+def question_text(item) -> str:
+    """Question string from a free-text or structured question item."""
+    if isinstance(item, dict):
+        return str(item.get("question") or item.get("text") or "").strip()
+    return str(item or "").strip()
+
+
+def _with_question_text(item, text: str):
+    if isinstance(item, dict):
+        updated = dict(item)
+        updated["question"] = text
+        return updated
+    return text
+
 
 def questions_equivalent(first: str, second: str) -> bool:
-    """True when two questions ask about the same subject."""
+    """True when two questions ask about the same remaining decision."""
     a, b = content_tokens(first), content_tokens(second)
     if not a or not b:
         return False
-    shared = len(a & b)
+    shared = _shared_stem_count(a, b)
     if shared < min(2, len(a), len(b)):
-        return False
-    return shared / min(len(a), len(b)) >= 0.8 and shared / max(len(a), len(b)) >= 0.5
+        # A two-word label such as "Hosting arrangements" still matches its
+        # long form when every content word is covered.
+        if shared >= 1 and (shared / min(len(a), len(b)) >= 1.0 and min(len(a), len(b)) <= 2):
+            return True
+        return _matching_bigrams(first, second)
+    smaller = min(len(a), len(b))
+    larger = max(len(a), len(b))
+    if shared / smaller >= 0.8 and (shared / larger >= 0.5 or smaller <= 3):
+        return True
+    if shared >= 3 and shared / smaller >= 0.5:
+        return True
+    if _matching_bigrams(first, second) and shared >= 2:
+        return True
+    return False
+
+
+def _is_approval_question(text: str) -> bool:
+    return bool(_APPROVAL_ASK.search(str(text or "")))
+
+
+def _has_proposal(text: str) -> bool:
+    return bool(_PROPOSAL.search(str(text or "")))
+
+
+def _question_from_pending_text(text: str) -> str:
+    blob = str(text or "").strip()
+    if blob.endswith("?"):
+        return blob
+    remainder = blob
+    for separator in (r"\bbut\b", r";"):
+        match = re.search(separator, remainder)
+        if match:
+            remainder = remainder[match.end():].strip()
+            break
+    remainder = remainder.strip(" ;.")
+    parsed = _PENDING_REMAINDER.search(remainder)
+    if not parsed:
+        parsed = _PENDING_REMAINDER.search(blob)
+    if not parsed:
+        return ""
+    subject = re.sub(r"^(that|the|whether)\s+", "", parsed.group(1).strip(), flags=re.I)
+    verb = (parsed.group(2) or "approved").lower().replace("signed off", "signed off")
+    if not subject:
+        return ""
+    aux = "Have" if (" and " in subject.lower() or subject.lower().endswith("s")) else "Has"
+    if "sign" in verb:
+        return f"{aux} {subject} been signed off?"
+    if verb in {"decided", "agreed"}:
+        return f"Has {subject} been {verb}?"
+    return f"{aux} {subject} been {verb}?"
+
+
+def _narrowed_from_pending(original: str, pending: list[ClarifiedStatement]) -> str:
+    original = str(original or "").strip()
+    blob = " ".join(statement.text for statement in pending)
+    if original.endswith("?") and not _has_proposal(blob) and not re.search(
+        r"signed off|sign-off|not yet (?:defined|specified)", blob, re.I
+    ):
+        return original
+    candidate = _question_from_pending_text(blob)
+    if candidate:
+        return candidate
+    if _has_proposal(blob) and original.endswith("?"):
+        stem = re.sub(
+            r"^(what are the|what is the|what are|what is|which|who|how|when|where)\s+",
+            "",
+            original.rstrip("?").strip(),
+            flags=re.I,
+        )
+        if stem:
+            return f"Has the proposed {stem} been approved?"
+    return original or next((s.text for s in pending if s.text), "")
 
 
 def dedupe_equivalent_questions(items: list) -> list:
@@ -245,11 +420,90 @@ def drop_resolved(items: list, decisions: ClarificationDecisions) -> list:
         return list(items or [])
     kept = []
     for item in items or []:
-        text = item.get("question") if isinstance(item, dict) else str(item)
-        if decisions.resolves(str(text or "")):
+        text = question_text(item)
+        if decisions.resolves(text):
             continue
         kept.append(item)
     return kept
+
+
+def _prefer_remaining(current: str, candidate: str, decisions: ClarificationDecisions) -> str:
+    """Pick the remaining-decision wording when two questions are equivalent."""
+    pending_context = decisions.is_pending(current) or decisions.is_pending(candidate)
+    if pending_context:
+        if _is_approval_question(candidate) and not _is_approval_question(current):
+            return candidate
+        if _is_approval_question(current) and not _is_approval_question(candidate):
+            return current
+    if len(content_tokens(candidate)) > len(content_tokens(current)):
+        return candidate
+    return current
+
+
+def _is_generalization_of(general: str, specific: str) -> bool:
+    """True when ``general`` is a shorter restatement of ``specific``."""
+    if normalize_question_text(general) == normalize_question_text(specific):
+        return False
+    g, s = content_tokens(general), content_tokens(specific)
+    if not g or not s or len(g) >= len(s):
+        return False
+    shared = _shared_stem_count(g, s)
+    return shared >= min(2, len(g)) and shared / len(g) >= 0.8
+
+
+def reconcile_open_questions(questions: list, state: dict | None) -> list:
+    """Close, replace, or keep questions against all clarification answers.
+
+    Resolved questions are dropped. A pending remainder replaces the original
+    broad question. Equivalent paraphrases collapse to one canonical item.
+    Distinct remaining decisions on the same topic stay separate.
+    """
+    decisions = ClarificationDecisions(state)
+    rewritten = []
+    for item in questions or []:
+        text = question_text(item)
+        if not text:
+            continue
+        pending_hits = [
+            statement
+            for statement in decisions.pending
+            if _overlaps(content_tokens(text), statement.tokens)
+        ]
+        resolved_hits = [
+            statement
+            for statement in decisions.resolved
+            if _overlaps(content_tokens(text), statement.tokens)
+        ]
+        if resolved_hits and not pending_hits:
+            continue
+        if pending_hits:
+            source = pending_hits[0].question.strip() or text
+            text = _narrowed_from_pending(source, pending_hits)
+            item = _with_question_text(item, text)
+        rewritten.append(item)
+
+    kept: list = []
+    kept_text: list[str] = []
+    for item in rewritten:
+        text = question_text(item)
+        match = next(
+            (index for index, existing in enumerate(kept_text) if questions_equivalent(text, existing)),
+            None,
+        )
+        if match is None:
+            kept.append(item)
+            kept_text.append(text)
+            continue
+        if _prefer_remaining(kept_text[match], text, decisions) == text:
+            kept[match] = item
+            kept_text[match] = text
+
+    final = []
+    for item, text in zip(kept, kept_text):
+        if any(_is_generalization_of(text, other) for other in kept_text):
+            continue
+        final.append(item)
+    return final
 
 
 def _covered(statement_tokens: frozenset[str], texts: list[str]) -> bool:
@@ -309,17 +563,16 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
                 f"{_sentence_case(statement.text)} (Source: {SOURCE_LABEL})"
             )
 
-    open_questions = [str(i) for i in requirements.get("open_questions") or []]
-    for question in decisions.pending_questions():
-        if not any(questions_equivalent(question, existing) for existing in open_questions):
-            open_questions.append(question)
+    open_questions = reconcile_open_questions(
+        [str(i) for i in requirements.get("open_questions") or []]
+        + decisions.remainder_questions(),
+        state,
+    )
 
     requirements["functional_requirements"] = functional
     requirements["non_functional_requirements"] = non_functional
     requirements["acceptance_criteria"] = acceptance
-    requirements["open_questions"] = dedupe_equivalent_questions(
-        drop_resolved(open_questions, decisions)
-    )
+    requirements["open_questions"] = [question_text(item) for item in open_questions]
     requirements["clarified_decisions"] = [
         {
             "question": statement.question,
