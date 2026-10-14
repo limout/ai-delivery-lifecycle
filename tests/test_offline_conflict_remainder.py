@@ -2,8 +2,14 @@
 
 The unresolved remainder is the conflict-resolution workflow, kept once.
 Last-write-wins is not inferred. Distinct storage and load questions stay.
+
+The realistic workflow path is ``workflow_response``: it writes the canonical
+list into discovery.unknowns, requirements.open_questions,
+validation.non_blocking_questions, the root non_blocking_questions, and
+assessment.what_is_uncertain.
 """
 
+from app.api import workflow_response
 from app.decisions import apply_reconciled_project_state, question_text, reconcile_open_questions
 
 REQUEST = (
@@ -162,3 +168,188 @@ def test_original_request_and_history_are_unchanged():
     assert state["clarification_history"] == HISTORY
     assert OFFLINE_ANSWER in state["clarification_history"][0]["answer"]
     assert state["clarification_history"][0]["question"] == OFFLINE_HISTORY_QUESTION
+
+
+# ---------------------------------------------------------------------------
+# Realistic workflow_response path (production remainder wording)
+# ---------------------------------------------------------------------------
+
+WORKFLOW_BROAD = (
+    "What are the exact offline behavior and synchronization rules when "
+    "mobile connectivity is unreliable?"
+)
+WORKFLOW_PENDING = (
+    "The exact user workflow for resolving conflicts, including the handling "
+    "of changes made to the same record by multiple users, still needs to be "
+    "defined."
+)
+WORKFLOW_RESOLVED = (
+    "Technicians can access previously synchronized jobs and installation "
+    "details offline.",
+    "They can complete inspection checklists, capture defects, attach photos "
+    "and notes, submit reports, and create follow-up actions while offline.",
+    "Changes are persisted locally and queued for synchronization.",
+    "Synchronization states must be visible.",
+    "Retries must not silently lose or duplicate data.",
+    "Conflicts must be detected rather than silently overwriting changes.",
+)
+WORKFLOW_ANSWER = " ".join(WORKFLOW_RESOLVED) + " " + WORKFLOW_PENDING
+WORKFLOW_REQUEST = (
+    "Technicians work at remote sites where mobile connectivity may be "
+    "unreliable. The exact offline behavior and synchronization rules have "
+    "not yet been defined."
+)
+WORKFLOW_HISTORY = [
+    {
+        "question": WORKFLOW_BROAD,
+        "answer": WORKFLOW_ANSWER,
+    }
+]
+WORKFLOW_PRESERVED = [
+    "Should the first release support iOS, Android, or both platforms?",
+    "What are the expected user roles and permissions?",
+    PHOTO_RETENTION,
+    VOLUME_QUESTION,
+]
+
+
+def _workflow_state() -> dict:
+    return {
+        "user_request": WORKFLOW_REQUEST,
+        "clarification_history": [dict(item) for item in WORKFLOW_HISTORY],
+        "discovery": {
+            "problem": "Field inspection mobile app",
+            "users": ["Field technicians"],
+            "stakeholders": [],
+            "unknowns": [WORKFLOW_BROAD, *WORKFLOW_PRESERVED],
+            "clarification_questions": [],
+        },
+        "requirements": {
+            "functional_requirements": list(WORKFLOW_RESOLVED),
+            "open_questions": [WORKFLOW_BROAD, *WORKFLOW_PRESERVED],
+            "clarified_decisions": [
+                *[
+                    {
+                        "question": WORKFLOW_BROAD,
+                        "decision": text,
+                        "status": "RESOLVED",
+                        "source": "customer clarification",
+                    }
+                    for text in WORKFLOW_RESOLVED
+                ],
+                {
+                    "question": WORKFLOW_BROAD,
+                    "decision": WORKFLOW_PENDING,
+                    "status": "PENDING",
+                    "source": "customer clarification",
+                },
+            ],
+        },
+        "validation": {
+            "status": "READY",
+            "reasons": ["Ready for preliminary shaping."],
+            "questions": [],
+            "non_blocking_questions": [WORKFLOW_BROAD, *WORKFLOW_PRESERVED],
+        },
+        "workflow_status": "COMPLETE",
+        "delivery_review": {"status": "READY", "blocking_issues": []},
+    }
+
+
+def _question_lists(payload: dict) -> dict[str, list[str]]:
+    root = [
+        item["question"] if isinstance(item, dict) else str(item)
+        for item in payload.get("non_blocking_questions") or []
+    ]
+    return {
+        "unknowns": list((payload.get("discovery") or {}).get("unknowns") or []),
+        "open_questions": list((payload.get("requirements") or {}).get("open_questions") or []),
+        "validation": list(
+            (payload.get("validation") or {}).get("non_blocking_questions") or []
+        ),
+        "root": root,
+        "uncertain": [
+            item
+            for item in (payload.get("assessment") or {}).get("what_is_uncertain") or []
+            if item in ((payload.get("requirements") or {}).get("open_questions") or [])
+        ],
+    }
+
+
+def _assert_offline_narrowed(questions: list[str]) -> None:
+    blob = _blob(questions)
+    assert WORKFLOW_BROAD not in questions, questions
+    assert "exact offline behavior" not in blob
+    assert "synchronization rules" not in blob
+    conflict = _conflict_items(questions)
+    assert len(conflict) == 1, questions
+    assert "workflow" in conflict[0].lower() or "resolv" in conflict[0].lower()
+    assert "last-write" not in blob
+    assert "wins" not in blob
+    for preserved in WORKFLOW_PRESERVED:
+        assert preserved in questions, (preserved, questions)
+
+
+def test_workflow_response_narrows_broad_offline_to_conflict_remainder():
+    original_history = [dict(item) for item in WORKFLOW_HISTORY]
+    incoming = _workflow_state()
+    payload = workflow_response(incoming, run_id="offline-conflict-workflow")
+    lists = _question_lists(payload)
+    assert lists["unknowns"] == lists["open_questions"] == lists["validation"] == lists["root"]
+    _assert_offline_narrowed(lists["open_questions"])
+    assert lists["uncertain"] == [
+        item for item in lists["open_questions"] if item in lists["uncertain"]
+    ]
+    for item in lists["uncertain"]:
+        assert "exact offline behavior" not in item.lower()
+    functional = " ".join(
+        (payload.get("requirements") or {}).get("functional_requirements") or []
+    ).lower()
+    for fragment in (
+        "previously synchronized jobs",
+        "queued for synchronization",
+        "detected rather than silently overwriting",
+    ):
+        assert fragment in functional
+    assert "last-write-wins" not in functional
+    pending = [
+        item
+        for item in (payload.get("requirements") or {}).get("clarified_decisions") or []
+        if str(item.get("status") or "").upper() == "PENDING"
+    ]
+    assert any("conflict" in str(item.get("decision") or "").lower() for item in pending)
+    assert not any(
+        "approved" in str(item.get("decision") or "").lower()
+        and "conflict" in str(item.get("decision") or "").lower()
+        and "status" in str(item).lower()
+        and str(item.get("status")).upper() == "RESOLVED"
+        for item in (payload.get("requirements") or {}).get("clarified_decisions") or []
+    )
+    assert payload["user_request"] == WORKFLOW_REQUEST
+    assert payload["clarification_history"] == original_history
+    assert incoming["user_request"] == WORKFLOW_REQUEST
+    assert incoming["clarification_history"] == original_history
+
+
+def test_workflow_response_second_pass_does_not_restore_broad_offline():
+    original_history = [dict(item) for item in WORKFLOW_HISTORY]
+    first = workflow_response(_workflow_state(), run_id="offline-conflict-pass-1")
+    second = workflow_response(
+        {
+            "user_request": WORKFLOW_REQUEST,
+            "clarification_history": original_history,
+            "discovery": first["discovery"],
+            "requirements": first["requirements"],
+            "validation": first["validation"],
+            "workflow_status": "COMPLETE",
+            "delivery_review": {"status": "READY", "blocking_issues": []},
+        },
+        run_id="offline-conflict-pass-2",
+    )
+    first_lists = _question_lists(first)
+    second_lists = _question_lists(second)
+    assert first_lists["open_questions"] == second_lists["open_questions"]
+    assert second_lists["unknowns"] == second_lists["open_questions"] == second_lists["validation"] == second_lists["root"]
+    _assert_offline_narrowed(second_lists["open_questions"])
+    assert second["user_request"] == WORKFLOW_REQUEST
+    assert second["clarification_history"] == original_history

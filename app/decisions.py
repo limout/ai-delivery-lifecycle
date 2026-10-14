@@ -103,10 +103,15 @@ _APPROVAL_ASK = re.compile(
     re.I,
 )
 _PENDING_REMAINDER = re.compile(
-    r"(.+?)\s+(?:has|have|is|are)\s+"
+    r"(.+?)\s+(?:"
+    r"(?:has|have|is|are)\s+"
     r"(?:not(?:\s+yet)?\s+(?:been\s+)?(approved|confirmed|decided|agreed|"
     r"signed off|finali[sz]ed|defined|specified|established)|pending\s+(?:approval|"
-    r"sign-?off|confirmation|decision))",
+    r"sign-?off|confirmation|decision))"
+    r"|"
+    r"(?:still\s+)?needs?\s+to\s+be\s+(approved|confirmed|decided|agreed|"
+    r"defined|specified|established)"
+    r")",
     re.I,
 )
 _CAPACITY = re.compile(
@@ -572,7 +577,9 @@ def _question_from_pending_text(text: str) -> str:
     if not parsed:
         return ""
     subject = re.sub(r"^(that|the|whether)\s+", "", parsed.group(1).strip(), flags=re.I)
-    verb = (parsed.group(2) or "approved").lower().replace("signed off", "signed off")
+    subject = subject.rstrip(" ,")
+    verb = next((group for group in parsed.groups()[1:] if group), "approved")
+    verb = verb.lower().replace("signed off", "signed off")
     if not subject:
         return ""
     aux = "Have" if (" and " in subject.lower() or subject.lower().endswith("s")) else "Has"
@@ -594,7 +601,8 @@ def _narrowed_from_pending(original: str, pending: list[ClarifiedStatement]) -> 
         r"signed off|sign-off|"
         r"not(?:\s+yet)?(?:\s+been)?\s+(?:defined|specified|established|decided)|"
         r"not(?:\s+yet)?\s+been\s+approved|"
-        r"has not been (?:decided|approved)",
+        r"has not been (?:decided|approved)|"
+        r"(?:still\s+)?needs?\s+to\s+be\s+(?:defined|specified|established|decided|approved|confirmed)",
         blob,
         re.I,
     ):
