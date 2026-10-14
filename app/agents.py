@@ -14,6 +14,7 @@ from app.decisions import (
     reconcile_open_questions,
 )
 from app.evidence import (
+    answer_retracts_scope,
     clarification_answer_body,
     customer_authored_text,
     has_substantive_first_release_scope_answer,
@@ -467,7 +468,12 @@ CUMULATIVE CUSTOMER CLARIFICATION FACTS:
 
 These are authoritative customer-provided facts from previous
 clarification iterations. They remain valid unless a later customer
-answer explicitly contradicts them.
+answer explicitly contradicts them. Clarification answers supplement
+the original customer request. They do not replace originally
+requested users, capabilities, integrations, constraints, or systems
+of record unless a later answer explicitly and unambiguously
+withdraws or replaces that scope. An ambiguous answer must not
+silently drop original requirements.
 
 Do not ask the customer again for information already answered here.
 Do not convert an answered question back into an unknown or blocker.
@@ -852,6 +858,137 @@ def _ground_downstream_artifact(artifact: dict, state: DeliveryState) -> dict:
     return cleaned
 
 
+_DISCOVERY_SCOPE_LISTS = ("users", "existing_systems")
+_REQUIREMENT_SCOPE_LISTS = (
+    "functional_requirements",
+    "non_functional_requirements",
+    "acceptance_criteria",
+)
+_SOLUTION_SCOPE_LISTS = ("key_capabilities", "integration_approach")
+_PROPOSAL_SCOPE_LISTS = ("scope",)
+_SOW_SCOPE_LISTS = ("objectives", "in_scope", "acceptance")
+_SCOPE_SUPPLEMENT_RULE = (
+    "Clarification answers supplement the original customer request. "
+    "They do not replace originally requested users, capabilities, "
+    "integrations, constraints, or systems of record unless a later "
+    "answer explicitly and unambiguously withdraws or replaces that scope. "
+    "An ambiguous answer must not silently drop original requirements."
+)
+
+
+def _union_scope_items(prior_items, new_items, state: dict | None) -> list:
+    """Keep prior structured items unless a later answer explicitly withdraws them."""
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def add(item) -> None:
+        text = str(item or "").strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        if answer_retracts_scope(text, state):
+            return
+        seen.add(key)
+        merged.append(text)
+
+    for item in prior_items or []:
+        add(item)
+    for item in new_items or []:
+        add(item)
+    return merged
+
+
+def _merge_prior_scope_lists(
+    prior: dict | None,
+    current: dict | None,
+    keys: tuple[str, ...],
+    state: dict | None,
+) -> dict:
+    """Union selected list fields from a previous artifact into the new one."""
+    current = dict(current or {})
+    if not isinstance(prior, dict):
+        return current
+    for key in keys:
+        prior_items = prior.get(key)
+        if not prior_items:
+            continue
+        current[key] = _union_scope_items(prior_items, current.get(key) or [], state)
+    return current
+
+
+_PRODUCT_SCOPE_SOURCES = (
+    ("discovery", "users"),
+    ("requirements", "functional_requirements"),
+    ("requirements", "non_functional_requirements"),
+    ("requirements", "acceptance_criteria"),
+    ("solution", "key_capabilities"),
+    ("proposal", "scope"),
+    ("sow", "in_scope"),
+    ("sow", "objectives"),
+    ("sow", "acceptance"),
+)
+_SYSTEM_SCOPE_SOURCES = (
+    ("discovery", "existing_systems"),
+    ("solution", "integration_approach"),
+)
+
+
+def _collect_structured_list_items(state: dict | None, sources: tuple) -> list:
+    items: list = []
+    state = state or {}
+    for artifact_key, field in sources:
+        artifact = state.get(artifact_key)
+        if not isinstance(artifact, dict):
+            continue
+        for item in artifact.get(field) or []:
+            items.append(item)
+    return items
+
+
+def apply_established_scope_carry(state: dict | None) -> dict:
+    """Copy still-active structured scope into regenerated downstream lists.
+
+    Downstream regeneration only sees a prior copy of the same artifact. After
+    clarification, that copy is often empty, so in-force discovery/requirements
+    lists must be unioned in. Withdrawals are still honored by ``_union_scope_items``.
+    """
+    state = dict(state or {})
+    updates: dict = {}
+    product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
+    system_items = _collect_structured_list_items(state, _SYSTEM_SCOPE_SOURCES)
+
+    if state.get("solution") is not None:
+        solution = dict(state.get("solution") or {})
+        solution["key_capabilities"] = _union_scope_items(
+            product_items, solution.get("key_capabilities") or [], state
+        )
+        solution["integration_approach"] = _union_scope_items(
+            system_items, solution.get("integration_approach") or [], state
+        )
+        updates["solution"] = solution
+        state["solution"] = solution
+        product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
+        system_items = _collect_structured_list_items(state, _SYSTEM_SCOPE_SOURCES)
+
+    if state.get("proposal") is not None:
+        proposal = dict(state.get("proposal") or {})
+        proposal["scope"] = _union_scope_items(
+            product_items, proposal.get("scope") or [], state
+        )
+        updates["proposal"] = proposal
+        state["proposal"] = proposal
+        product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
+
+    if state.get("sow") is not None:
+        sow = dict(state.get("sow") or {})
+        for key in _SOW_SCOPE_LISTS:
+            sow[key] = _union_scope_items(product_items, sow.get(key) or [], state)
+        updates["sow"] = sow
+    return updates
+
+
 def _discovery_reference_section(query: str) -> str:
     """Append knowledge-base excerpts only when RAG is enabled and results exist.
 
@@ -919,6 +1056,7 @@ IMPORTANT RULES:
     An explicitly internal, planning, or non-binding target is not a
     contractual or mandatory deadline. Do not reclassify it, and do not
     treat that already-stated status as an unknown or contradiction.
+11. {_SCOPE_SUPPLEMENT_RULE}
 
 Original customer request:
 
@@ -972,6 +1110,12 @@ Original customer request:
             normalized_assumptions.append(text)
     discovery["assumptions"] = normalized_assumptions
     discovery = _filter_answered_discovery(discovery, state)
+    discovery = _merge_prior_scope_lists(
+        state.get("discovery"),
+        discovery,
+        _DISCOVERY_SCOPE_LISTS,
+        state,
+    )
 
     # The original request defines enterprise customers as the portal audience.
     # Clarification about internal roles must not replace that customer audience.
@@ -1414,6 +1558,12 @@ Return the complete requirements schema.
         discovery, requirements, source_text=source,
     )
     requirements = _filter_answered_requirement_questions(requirements, state)
+    requirements = _merge_prior_scope_lists(
+        state.get("requirements"),
+        requirements,
+        _REQUIREMENT_SCOPE_LISTS,
+        state,
+    )
 
     has_any_requirements = any(
         requirements.get(key)
@@ -1457,6 +1607,12 @@ request-stated outcome.
             discovery, requirements, source_text=source,
         )
         requirements = _filter_answered_requirement_questions(requirements, state)
+        requirements = _merge_prior_scope_lists(
+            state.get("requirements"),
+            requirements,
+            _REQUIREMENT_SCOPE_LISTS,
+            state,
+        )
 
     return {
         "requirements": requirements,
@@ -1473,6 +1629,11 @@ def validation_agent(
     prompt = f"""
 You are a senior Delivery Lead reviewing a project before
 solution shaping and preliminary estimation.
+
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
+{_SCOPE_SUPPLEMENT_RULE}
 
 Review the Discovery and Requirements below.
 
@@ -1860,6 +2021,9 @@ You are a senior Solution Architect and Delivery Lead.
 Create an initial solution shaping assessment from the
 confirmed Discovery and Requirements.
 
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
 DISCOVERY:
 
 {discovery}
@@ -1880,6 +2044,7 @@ Rules:
 6. Identify integration and technical considerations.
 7. Identify delivery risks and dependencies.
 8. Produce a practical solution direction suitable for preliminary planning.
+9. {_SCOPE_SUPPLEMENT_RULE}
 """
 
     solution = provider.generate_json(
@@ -1887,6 +2052,15 @@ Rules:
         schema=SOLUTION_SCHEMA,
     )
     solution = _ground_downstream_artifact(solution, state)
+    solution = _merge_prior_scope_lists(
+        state.get("solution"),
+        solution,
+        _SOLUTION_SCOPE_LISTS,
+        state,
+    )
+    carried = apply_established_scope_carry({**state, "solution": solution})
+    if carried.get("solution"):
+        solution = carried["solution"]
 
     # Prevent unsupported current-state claims from leaking into downstream artifacts.
     if isinstance(solution.get("assumptions"), list):
@@ -2096,6 +2270,11 @@ You are a senior Delivery Manager.
 Create an initial delivery plan based on the Discovery,
 Requirements and Solution Shaping.
 
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
+{_SCOPE_SUPPLEMENT_RULE}
+
 DISCOVERY:
 
 {discovery}
@@ -2252,6 +2431,11 @@ This estimate is the independent expert baseline for a traditional human-led
  delivery approach. Do NOT optimize it with AI. Do NOT make it fit a customer
 deadline. Do NOT use AI acceleration, automation, reduced handoffs, or special
 parallelism as hidden assumptions.
+
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
+{_SCOPE_SUPPLEMENT_RULE}
 
 CUSTOMER DISCOVERY:
 {discovery}
@@ -2691,6 +2875,9 @@ You are a senior Delivery Manager preparing a customer proposal.
 
 Create a concise proposal based only on the information below.
 
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
 DISCOVERY:
 
 {discovery}
@@ -2720,6 +2907,7 @@ Rules:
 3. Use the estimate as indicative.
 4. Include assumptions and risks.
 5. Include practical next steps.
+5a. {_SCOPE_SUPPLEMENT_RULE}
 6. Use estimate.standard_deadline_fit as the only deadline verdict for the
    independent estimate. Values are FITS, EXCEEDS, or NOT_DEMONSTRATED.
    If the fit is EXCEEDS or NOT_DEMONSTRATED, do NOT describe the customer
@@ -2736,6 +2924,15 @@ Rules:
         schema=PROPOSAL_SCHEMA,
     )
     proposal = _ground_downstream_artifact(proposal, state)
+    proposal = _merge_prior_scope_lists(
+        state.get("proposal"),
+        proposal,
+        _PROPOSAL_SCOPE_LISTS,
+        state,
+    )
+    carried = apply_established_scope_carry({**state, "proposal": proposal})
+    if carried.get("proposal"):
+        proposal = carried["proposal"]
     if isinstance(proposal, dict):
         proposal = _apply_deadline_honesty(
             proposal,
@@ -2766,6 +2963,9 @@ You are a senior Delivery Manager preparing a Statement of Work.
 Create a structured SOW draft from the confirmed project
 information.
 
+ORIGINAL CUSTOMER REQUEST:
+{state.get("user_request") or ""}
+
 DISCOVERY:
 
 {discovery}
@@ -2792,7 +2992,10 @@ Rules:
 
 1. Objectives must reflect the business goal.
 2. Deliverables must be derived from requirements and solution.
-3. Separate in-scope and out-of-scope items.
+3. Separate in-scope and out-of-scope items. Originally requested
+   capabilities are in scope unless a later customer answer explicitly
+   retracts them. Additive clarification answers do not move original
+   workflows to out of scope.
 4. Include dependencies and acceptance criteria.
 5. Treat timeline and estimate as indicative unless explicitly
    confirmed by the customer.
@@ -2804,6 +3007,15 @@ Rules:
         schema=SOW_SCHEMA,
     )
     sow = _ground_downstream_artifact(sow, state)
+    sow = _merge_prior_scope_lists(
+        state.get("sow"),
+        sow,
+        _SOW_SCOPE_LISTS,
+        state,
+    )
+    carried = apply_established_scope_carry({**state, "sow": sow})
+    if carried.get("sow"):
+        sow = carried["sow"]
     if isinstance(sow, dict):
         sow = _apply_deadline_honesty(
             sow,

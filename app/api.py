@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.agents import apply_established_scope_carry
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
@@ -21,7 +22,12 @@ from app.decisions import (
     clarification_question_status,
     question_text,
 )
-from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
+from app.evidence import (
+    apply_original_scope_consistency,
+    is_numeric_duration,
+    normalize_question_text,
+    substantive_answered_questions,
+)
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
 from app.providers import (
@@ -246,7 +252,15 @@ def _initial_workflow_state(
         state["new_clarification_records"] = new_clarification_records
 
     if resume_after_clarification and prior_state:
-        for key in ("discovery", "requirements"):
+        for key in (
+            "discovery",
+            "requirements",
+            "solution",
+            "delivery_plan",
+            "estimate",
+            "proposal",
+            "sow",
+        ):
             if prior_state.get(key):
                 state[key] = prior_state[key]
         saved_history = prior_state.get("clarification_history") or []
@@ -915,6 +929,14 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
     if "discovery" in synced:
         result["discovery"] = synced["discovery"]
     result["requirements"] = synced["requirements"]
+    carried = apply_established_scope_carry(result)
+    for key, value in carried.items():
+        if value is not None:
+            result[key] = value
+    scoped = apply_original_scope_consistency(result)
+    for key, value in scoped.items():
+        if value is not None:
+            result[key] = value
     validation = dict(result.get("validation") or {})
     validation.update(synced["validation"])
     decisions = ClarificationDecisions(result)

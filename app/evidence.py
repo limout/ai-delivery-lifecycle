@@ -613,6 +613,100 @@ def uncovered_request_outcomes(source: str, requirements: dict | None) -> tuple[
     )
 
 
+_SCOPE_RETRACTION = re.compile(
+    r"\b(?:instead(?:\s+of)?|no longer|not (?:in|part of)(?:\s+the)?\s+scope|"
+    r"out of scope|replace(?:s|d)?|do not include|removed? from scope|"
+    r"exclude(?:d)?|drop(?:ped)?(?:\s+from)?|cancel(?:led)?|"
+    r"different product)\b",
+    re.I,
+)
+_ADDITIVE_SCOPE = re.compile(
+    r"\b(?:in addition|also|as well|additionally)\b",
+    re.I,
+)
+_PROHIBITION_MARKERS = (
+    "must not",
+    "shall not",
+    "do not ",
+    "don't ",
+    "do not include",
+    "must never",
+)
+_REPLACE_WITH = re.compile(
+    r"\breplace(?:s|d)?\s+(?:the\s+|an?\s+)?(.+?)\s+with\b",
+    re.I,
+)
+_NO_LONGER_ITEM = re.compile(
+    r"\b(?:the\s+|an?\s+)?(.+?)\s+(?:is|are)\s+no longer(?:\s+in scope)?\b",
+    re.I,
+)
+
+
+def _normalize_scope_phrase(text: str) -> str:
+    value = re.sub(r"\bapplications?\b", "app", str(text or "").lower())
+    return re.sub(r"\s+", " ", value).strip(" .;:,")
+
+
+def withdrawn_scope_phrases(state: dict | None) -> tuple[str, ...]:
+    """Product phrases a later answer explicitly replaces or marks out of scope."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for _question, answer in _clarification_pairs(state):
+        body = str(answer or "").strip()
+        if not body or not _SCOPE_RETRACTION.search(body):
+            continue
+        if _ADDITIVE_SCOPE.search(body) and not re.search(r"\binstead\b", body, re.I):
+            continue
+        for clause in re.split(r"[.;]\s*", body):
+            clause = clause.strip()
+            if not clause:
+                continue
+            for match in (_REPLACE_WITH.search(clause), _NO_LONGER_ITEM.search(clause)):
+                if not match:
+                    continue
+                phrase = _normalize_scope_phrase(match.group(1))
+                if len(phrase) < 4 or phrase in seen:
+                    continue
+                seen.add(phrase)
+                found.append(phrase)
+    return tuple(found)
+
+
+def _item_matches_withdrawn_phrase(item: str, phrase: str) -> bool:
+    item_n = _normalize_scope_phrase(item)
+    phrase_n = _normalize_scope_phrase(phrase)
+    if not item_n or not phrase_n:
+        return False
+    if phrase_n in item_n:
+        return True
+    return statement_is_explicit(phrase, item)
+
+
+def answer_retracts_scope(item: str, state: dict | None) -> bool:
+    """True when a clarification answer explicitly removes ``item`` from scope."""
+    item = str(item or "").strip()
+    if not item:
+        return False
+    for phrase in withdrawn_scope_phrases(state):
+        if _item_matches_withdrawn_phrase(item, phrase):
+            return True
+    for _question, answer in _clarification_pairs(state):
+        body = str(answer or "").strip()
+        if not body or not _SCOPE_RETRACTION.search(body):
+            continue
+        if _ADDITIVE_SCOPE.search(body) and not re.search(r"\binstead\b", body, re.I):
+            continue
+        if statement_is_explicit(item, body):
+            return True
+        tokens = [
+            token for token in re.findall(r"[a-z0-9]{4,}", item.lower())
+            if token not in _STOPWORDS and not _GENERIC_PRODUCT.fullmatch(token)
+        ]
+        if tokens and all(token in body.lower() for token in tokens[:3]):
+            return True
+    return False
+
+
 def statement_is_explicit(statement: str, source: str) -> bool:
     """True when a statement is a substring or shares enough customer tokens."""
     text = str(statement or "").strip()
@@ -647,6 +741,204 @@ def _iter_text_items(value):
     if isinstance(value, (list, tuple, set)):
         for item in value:
             yield from _iter_text_items(item)
+
+
+def original_scope_item_still_in_force(item: str, state: dict | None) -> bool:
+    """True when ``item`` restates original-request scope that was not withdrawn."""
+    text = str(item or "").strip()
+    request = str((state or {}).get("user_request") or "").strip()
+    if not text or not request:
+        return False
+    if not statement_is_explicit(text, request):
+        return False
+    return not answer_retracts_scope(text, state)
+
+
+def original_prohibition_statements(text: str) -> tuple[str, ...]:
+    """Customer sentences that forbid a behavior, kept as original wording."""
+    found: list[str] = []
+    for raw in re.split(r"(?<=[.!?])\s+|\n+", str(text or "")):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        lower = f" {sentence.lower()} "
+        if any(marker in lower for marker in _PROHIBITION_MARKERS):
+            found.append(sentence)
+    return tuple(found)
+
+
+def in_force_scope_blob(state: dict | None) -> str:
+    """Artifact text that claims current in-scope work. Excludes out-of-scope."""
+    state = state or {}
+    parts: list[str] = []
+    discovery = state.get("discovery") or {}
+    for key in ("problem", "business_goal", "users", "existing_systems", "constraints"):
+        parts.extend(_iter_text_items(discovery.get(key)))
+    requirements = state.get("requirements") or {}
+    for key in (
+        "functional_requirements",
+        "non_functional_requirements",
+        "acceptance_criteria",
+    ):
+        parts.extend(_iter_text_items(requirements.get(key)))
+    solution = state.get("solution") or {}
+    for key in ("solution_summary", "key_capabilities", "integration_approach"):
+        parts.extend(_iter_text_items(solution.get(key)))
+    parts.extend(_iter_text_items(state.get("delivery_plan")))
+    parts.extend(_iter_text_items(state.get("estimate")))
+    proposal = state.get("proposal") or {}
+    for key in ("executive_summary", "scope"):
+        parts.extend(_iter_text_items(proposal.get(key)))
+    sow = state.get("sow") or {}
+    for key in ("objectives", "deliverables", "in_scope", "acceptance"):
+        parts.extend(_iter_text_items(sow.get(key)))
+    return " ".join(parts)
+
+
+def _prohibition_restated_as_capability(prohibition: str, blob: str) -> bool:
+    lower = str(prohibition or "").lower()
+    remainder = lower
+    for marker in _PROHIBITION_MARKERS:
+        remainder = remainder.replace(marker, " ")
+    remainder = re.sub(r"\s+", " ", remainder).strip(" .")
+    tokens = [
+        token for token in re.findall(r"[a-z0-9]{4,}", remainder)
+        if token not in _STOPWORDS and not _GENERIC_PRODUCT.fullmatch(token)
+    ]
+    if len(tokens) < 2:
+        return False
+    for item in re.split(r"[.\n]", str(blob or "")):
+        item_lower = item.lower()
+        if not item_lower.strip():
+            continue
+        if any(marker in f" {item_lower} " for marker in _PROHIBITION_MARKERS):
+            continue
+        hits = sum(1 for token in tokens if token in item_lower)
+        if hits >= min(2, len(tokens)) and hits / len(tokens) >= 0.5:
+            return True
+    return False
+
+
+def original_scope_contradictions(state: dict | None) -> list[str]:
+    """Detect original requirements that artifacts dropped or inverted.
+
+    Records contradictions. Does not reconstruct or append original sentences.
+    """
+    state = state or {}
+    request = str(state.get("user_request") or "").strip()
+    if not request:
+        return []
+    blob = in_force_scope_blob(state)
+    findings: list[str] = []
+    for outcome in stated_request_outcomes(request):
+        if answer_retracts_scope(outcome, state):
+            continue
+        if outcome_is_covered(outcome, blob):
+            continue
+        findings.append(
+            "Original request still in force but not reflected in delivery "
+            f"artifacts: {outcome}."
+        )
+    for prohibition in original_prohibition_statements(request):
+        if answer_retracts_scope(prohibition, state):
+            continue
+        if _prohibition_restated_as_capability(prohibition, blob):
+            findings.append(
+                "Original prohibition was restated as a positive capability: "
+                f"{prohibition}"
+            )
+    return findings
+
+
+def _item_is_forbidden_capability(item: str, request: str) -> bool:
+    text = str(item or "").strip()
+    if not text:
+        return False
+    return any(
+        _prohibition_restated_as_capability(prohibition, text)
+        for prohibition in original_prohibition_statements(request)
+    )
+
+
+def _keep_active_scope_item(item: str, state: dict | None, request: str) -> bool:
+    text = str(item or "").strip()
+    if not text:
+        return False
+    if answer_retracts_scope(text, state):
+        return False
+    if _item_is_forbidden_capability(text, request):
+        return False
+    return True
+
+
+def _filter_active_scope_items(items, state: dict | None, request: str) -> list[str]:
+    return [
+        str(item).strip()
+        for item in items or []
+        if _keep_active_scope_item(item, state, request)
+    ]
+
+
+def apply_original_scope_consistency(state: dict | None) -> dict:
+    """Keep original work out of out-of-scope and surface silent loss.
+
+    Drops withdrawn or forbidden in-scope bullets. Does not rewrite estimates
+    or inject reconstructed capabilities.
+    """
+    state = dict(state or {})
+    request = str(state.get("user_request") or "").strip()
+    if not request:
+        return {}
+    updates: dict = {}
+
+    if state.get("requirements") is not None:
+        requirements = dict(state.get("requirements") or {})
+        for key in ("functional_requirements", "acceptance_criteria"):
+            requirements[key] = _filter_active_scope_items(
+                requirements.get(key), state, request
+            )
+        updates["requirements"] = requirements
+        state["requirements"] = requirements
+
+    if state.get("solution") is not None:
+        solution = dict(state.get("solution") or {})
+        for key in ("key_capabilities", "integration_approach"):
+            solution[key] = _filter_active_scope_items(
+                solution.get(key), state, request
+            )
+        updates["solution"] = solution
+        state["solution"] = solution
+
+    if state.get("proposal") is not None:
+        proposal = dict(state.get("proposal") or {})
+        proposal["scope"] = _filter_active_scope_items(
+            proposal.get("scope"), state, request
+        )
+        updates["proposal"] = proposal
+        state["proposal"] = proposal
+
+    if state.get("sow") is not None:
+        sow = dict(state.get("sow") or {})
+        for key in ("objectives", "in_scope", "acceptance"):
+            sow[key] = _filter_active_scope_items(sow.get(key), state, request)
+        sow["out_of_scope"] = [
+            str(item).strip()
+            for item in sow.get("out_of_scope") or []
+            if str(item).strip() and not original_scope_item_still_in_force(item, state)
+        ]
+        updates["sow"] = sow
+        state["sow"] = sow
+
+    findings = original_scope_contradictions(state)
+    if findings:
+        requirements = dict(state.get("requirements") or updates.get("requirements") or {})
+        existing = [str(item) for item in requirements.get("contradictions") or []]
+        for item in findings:
+            if item not in existing:
+                existing.append(item)
+        requirements["contradictions"] = existing
+        updates["requirements"] = requirements
+    return updates
 
 
 def grounded_customer_evidence_text(state: dict | None) -> str:
