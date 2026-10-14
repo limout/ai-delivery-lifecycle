@@ -2,6 +2,12 @@ import logging
 import re
 from app.providers import AIProvider
 from app.state import DeliveryState
+from app.decisions import (
+    ClarificationDecisions,
+    apply_decisions_to_requirements,
+    dedupe_equivalent_questions,
+    drop_resolved,
+)
 from app.evidence import (
     clarification_answer_body,
     customer_authored_text,
@@ -660,7 +666,7 @@ def _coalesce_optional_questions(questions: list, state: DeliveryState) -> list:
             seen_stems.add(stem)
         if topic in _SINGLETON_OPTIONAL_TOPICS:
             seen_singleton.add(topic)
-    return result
+    return dedupe_equivalent_questions(result)
 
 
 def _split_legacy_clarification_blob(blob: str) -> tuple[str, str]:
@@ -683,20 +689,39 @@ def _answered_question_texts(state: DeliveryState) -> set[str]:
     return substantive_answered_questions(state)
 
 
-def _filter_answered_questions(questions: list, state: DeliveryState) -> list:
-    """Remove questions already answered by topic or exact question text."""
+def _filter_answered_questions(
+    questions: list,
+    state: DeliveryState,
+    keep_pending: bool = False,
+    semantic: bool = True,
+) -> list:
+    """Remove questions already answered by topic, exact text, or content overlap.
+
+    A clarification that defers or awaits approval does not answer its
+    question. With ``keep_pending`` such questions stay open even when the
+    customer replied to them (used for non-blocking carry-forward lists; a
+    blocking question the customer replied to must still not re-block).
+    ``semantic=False`` limits matching to exact text and topic, for the
+    deterministic blocking gate whose evidence-gap questions are fixed.
+    """
     answered_topics = _answered_clarification_topics(state)
     answered_texts = _answered_question_texts(state)
-    if not answered_topics and not answered_texts:
+    decisions = ClarificationDecisions(state if semantic else None)
+    if not answered_topics and not answered_texts and not decisions.resolved:
         return list(questions or [])
 
     filtered = []
     for item in questions or []:
         text = item.get("question") if isinstance(item, dict) else str(item)
+        if keep_pending and decisions.is_pending(str(text or "")):
+            filtered.append(item)
+            continue
         if _normalize_question_text(text) in answered_texts:
             continue
         topic = _question_topic(text)
         if topic and topic in answered_topics:
+            continue
+        if decisions.resolves(str(text or "")):
             continue
         filtered.append(item)
     return filtered
@@ -704,38 +729,61 @@ def _filter_answered_questions(questions: list, state: DeliveryState) -> list:
 def _filter_answered_discovery(discovery: dict, state: DeliveryState) -> dict:
     """Remove stale discovery unknowns/questions after customer answers."""
     answered = _answered_clarification_topics(state)
-    if not answered:
+    decisions = ClarificationDecisions(state)
+    if not answered and not decisions.resolved:
         return discovery
 
     cleaned = dict(discovery)
-    cleaned["unknowns"] = [
-        item for item in discovery.get("unknowns", []) or []
-        if not (_question_topic(str(item)) in answered)
-    ]
-    cleaned["clarification_questions"] = _filter_answered_questions(
-        discovery.get("clarification_questions", []) or [], state
+    cleaned["unknowns"] = dedupe_equivalent_questions(drop_resolved(
+        [
+            item for item in discovery.get("unknowns", []) or []
+            if decisions.is_pending(str(item))
+            or not (_question_topic(str(item)) in answered)
+        ],
+        decisions,
+    ))
+    cleaned["clarification_questions"] = dedupe_equivalent_questions(
+        _filter_answered_questions(
+            discovery.get("clarification_questions", []) or [], state,
+            keep_pending=True,
+        )
     )
     return cleaned
 
 
 def _filter_answered_requirement_questions(requirements: dict, state: DeliveryState) -> dict:
-    """Remove answered topics from the requirements open-question list."""
+    """Reconcile requirements with clarification answers.
+
+    Drops open questions and contradictions that a resolved answer covers,
+    keeps pending approvals open, deduplicates equivalent questions, and
+    writes resolved decisions into the structured requirement lists.
+    """
     answered = _answered_clarification_topics(state)
-    if not answered:
+    decisions = ClarificationDecisions(state)
+    if not answered and not decisions.statements:
         return requirements
 
     cleaned = dict(requirements)
-    cleaned["open_questions"] = [
-        item for item in requirements.get("open_questions", []) or []
-        if not (_question_topic(str(item)) in answered)
-    ]
-    return cleaned
+    cleaned["open_questions"] = dedupe_equivalent_questions(drop_resolved(
+        [
+            item for item in requirements.get("open_questions", []) or []
+            if decisions.is_pending(str(item))
+            or not (_question_topic(str(item)) in answered)
+        ],
+        decisions,
+    ))
+    if "contradictions" in requirements:
+        cleaned["contradictions"] = drop_resolved(
+            requirements.get("contradictions", []) or [], decisions
+        )
+    return apply_decisions_to_requirements(cleaned, state)
 
 
 def _clean_downstream_items(items: list, state: DeliveryState) -> list:
     """Drop stale clarification/confirmation items from downstream artifacts."""
     answered = _answered_clarification_topics(state)
-    if not answered:
+    decisions = ClarificationDecisions(state)
+    if not answered and not decisions.resolved:
         return list(items or [])
 
     cleaned = []
@@ -743,12 +791,19 @@ def _clean_downstream_items(items: list, state: DeliveryState) -> list:
         "clarify", "clarification", "confirm", "confirmation",
         "determine", "unknown", "uncertainty", "must be confirmed",
         "needs to be confirmed", "needs confirmation",
+        "decide", "decision", "undecided", "tbd", "to be agreed",
     )
     for item in items or []:
         text = str(item)
         lower = text.lower()
+        if not any(marker in lower for marker in stale_markers):
+            cleaned.append(item)
+            continue
+        if decisions.is_pending(text):
+            cleaned.append(item)
+            continue
         topic = _question_topic(lower)
-        if topic in answered and any(marker in lower for marker in stale_markers):
+        if topic in answered or decisions.resolves(text):
             continue
         cleaned.append(item)
     return cleaned
@@ -1515,6 +1570,7 @@ REQUIREMENTS:
     validation["non_blocking_questions"] = _filter_answered_questions(
         validation.get("non_blocking_questions", []) or [],
         state,
+        keep_pending=True,
     )
 
     # Deterministic lifecycle gate.
@@ -1671,6 +1727,7 @@ REQUIREMENTS:
                 state,
             ),
             state,
+            keep_pending=True,
         ),
         "estimable": not blocking_questions,
         "missing_evidence": [gap.reason for gap in evidence_gaps],
@@ -1731,7 +1788,9 @@ def clarification_agent(state: DeliveryState) -> dict:
     for item in validation.get("blocking_questions", []) or []:
         add_question(item, "REQUIRED")
 
-    questions = _filter_answered_questions(list(question_map.values()), state)
+    questions = _filter_answered_questions(
+        list(question_map.values()), state, semantic=False,
+    )
     blocking = [q for q in questions if q["blocks_workflow"]]
     non_blocking = [q for q in questions if not q["blocks_workflow"]]
 

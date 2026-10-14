@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
 from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
+from app.decisions import dedupe_equivalent_questions
 from app.evidence import is_numeric_duration, normalize_question_text, substantive_answered_questions
 from app.gap_close import gap_closing_eligible
 from app.llm_cost import calculate_llm_cost, log_llm_cost
@@ -813,10 +814,10 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         required=False,
     )
     blocking_text = {item["question"].lower() for item in blocking_questions}
-    non_blocking_questions = [
+    non_blocking_questions = dedupe_equivalent_questions([
         item for item in non_blocking_questions
         if item["question"].lower() not in blocking_text
-    ]
+    ])
 
     resolved_run_id = run_id or result.get("run_id") or new_run_id()
     save_run(resolved_run_id, result)
