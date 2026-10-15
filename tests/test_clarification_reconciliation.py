@@ -1524,3 +1524,151 @@ def test_carry_collapses_modal_duplicates_across_capability_fields():
         ]
         assert len(view_items) == 1, field
     assert "Analytics" in carried["sow"]["out_of_scope"]
+
+
+ACCESS_FINITE = (
+    "The system must allow field technicians to access installation details "
+    "and previous inspection reports."
+)
+ACCESS_GERUND = (
+    "Accessing installation details and previous inspection reports from "
+    "the asset registry"
+)
+CREATE_FINITE = (
+    "The system must allow field technicians to create follow-up "
+    "maintenance actions for identified defects."
+)
+CREATE_GERUND = "Creating follow-up maintenance actions for identified defects"
+
+
+def test_gerund_and_finite_access_collapse_to_registry_wording():
+    for items in (
+        [ACCESS_FINITE, ACCESS_GERUND],
+        [ACCESS_GERUND, ACCESS_FINITE],
+    ):
+        collapsed = collapse_equivalent_scope_items(items)
+        assert len(collapsed) == 1
+        assert "asset registry" in collapsed[0].lower()
+        assert "installation details" in collapsed[0].lower()
+        assert "previous inspection reports" in collapsed[0].lower()
+
+
+def test_gerund_and_finite_follow_up_collapse_to_one():
+    for items in (
+        [CREATE_FINITE, CREATE_GERUND],
+        [CREATE_GERUND, CREATE_FINITE],
+    ):
+        collapsed = collapse_equivalent_scope_items(items)
+        assert len(collapsed) == 1
+        blob = collapsed[0].lower()
+        assert "follow-up" in blob
+        assert "identified defects" in blob
+
+
+def test_distinct_view_checklist_defect_offline_and_integrations_remain():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            ACCESS_FINITE,
+            ACCESS_GERUND,
+            CREATE_FINITE,
+            CREATE_GERUND,
+            "Viewing assigned sites and inspection jobs",
+            "Viewing installation details and previous inspection reports",
+            "Technicians can complete inspection checklists.",
+            "Technicians can record equipment defects.",
+            "Technicians can create follow-up maintenance actions for identified defects.",
+            "Technicians can continue work with no network connection.",
+            "Technicians can continue work while offline.",
+            "The system must prevent duplicate submissions.",
+            "The system must provide a way to resolve synchronization conflicts.",
+            "Integrate with the asset registry.",
+            "Integrate with the project management system.",
+            "Integrate with the source-code repository.",
+            "Integrate with the asset registry, the project management system, "
+            "and the source-code repository.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    access_items = [
+        item for item in collapsed if "installation details" in item.lower()
+        and "access" in item.lower()
+    ]
+    assert len(access_items) == 1
+    assert "asset registry" in access_items[0].lower()
+    view_assignments = [
+        item for item in collapsed
+        if "assigned sites" in item.lower() and "view" in item.lower()
+    ]
+    view_history = [
+        item for item in collapsed
+        if "previous inspection reports" in item.lower() and "view" in item.lower()
+    ]
+    assert view_assignments
+    assert view_history
+    assert _constituent_survives(
+        collapsed, "complete inspection checklists", "record equipment defects"
+    )
+    assert _constituent_survives(
+        collapsed, "record equipment defects", "create follow-up"
+    )
+    assert "network" in blob
+    assert "offline" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+    assert "asset registry" in blob
+    assert "project management" in blob
+    assert "source-code repository" in blob
+    assert sum("integrate with the asset registry." in item.lower() for item in collapsed) >= 1
+    assert any("project management system." in item.lower() for item in collapsed)
+    assert any("source-code repository." in item.lower() for item in collapsed)
+
+
+def test_plain_and_equivalent_gwt_acceptance_collapse_to_one():
+    plain = (
+        "The technician can access installation details and previous "
+        "inspection reports."
+    )
+    gwt = (
+        "Given a technician, When they access installation details and "
+        "previous inspection reports, Then those reports are shown."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [plain],
+            "acceptance_criteria": [
+                plain,
+                gwt,
+                "Verified by demonstration or test that: The technician can "
+                "access installation details and previous inspection reports.",
+            ],
+        },
+        {"user_request": "x"},
+    )
+    acceptance = requirements["acceptance_criteria"]
+    access_items = [
+        item for item in acceptance if "installation details" in item.lower()
+    ]
+    assert len(access_items) == 1
+    assert "verified by demonstration" not in " ".join(acceptance).lower()
+
+
+def test_gwt_with_distinct_precondition_and_compound_action_remain():
+    plain = "The technician can record an equipment defect."
+    offline_gwt = (
+        "Given no network connection, When the technician records an "
+        "equipment defect, Then the defect is stored on the device."
+    )
+    compound = (
+        "Given a completed checklist, When the technician records an "
+        "equipment defect, Then a follow-up maintenance action is created."
+    )
+    checklist = "The technician can complete an inspection checklist."
+    collapsed = collapse_equivalent_scope_items(
+        [plain, offline_gwt, compound, checklist]
+    )
+    blob = " ".join(collapsed).lower()
+    assert "record an equipment defect" in blob
+    assert "network" in blob
+    assert "follow-up" in blob
+    assert "complete an inspection checklist" in blob
+    assert len(collapsed) == 4

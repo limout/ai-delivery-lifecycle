@@ -1166,3 +1166,69 @@ def test_explicitly_excluded_scope_remains_out_of_scope():
     out_of_scope = _blob((payload.get("sow") or {}).get("out_of_scope"))
     assert "mobile app" in out_of_scope
     assert "analytics" in out_of_scope
+
+
+def test_unresolved_sync_deliverable_stays_provisional_and_in_scope():
+    request = (
+        "Build a mobile inspection app for field technicians. They need to "
+        "work at remote sites with unreliable mobile connectivity, but the "
+        "exact offline behavior and synchronization rules have not yet been "
+        "defined."
+    )
+    answer = (
+        "Field technicians will view assigned jobs. The exact offline "
+        "behavior and synchronization rules have not yet been defined."
+    )
+    payload = _complete(
+        {
+            "user_request": request,
+            "clarification_history": [
+                {
+                    "question": "What are the offline behavior and synchronization rules?",
+                    "answer": answer,
+                }
+            ],
+            "discovery": _discovery(["Field technicians"]),
+            "requirements": _requirements(
+                ["Field technicians can view assigned jobs."]
+            ),
+            "solution": {
+                "solution_summary": (
+                    "A mobile inspection app for remote sites with unreliable "
+                    "connectivity."
+                ),
+                "key_capabilities": [
+                    "View assigned jobs",
+                    "Work at remote sites with unreliable connectivity",
+                ],
+                "integration_approach": [],
+            },
+            "proposal": {
+                "executive_summary": "A mobile inspection app.",
+                "scope": ["View assigned jobs"],
+            },
+            "sow": {
+                "objectives": ["Inspect remote sites"],
+                "deliverables": [
+                    "Mobile inspection application",
+                    "Offline data synchronization module",
+                ],
+                "in_scope": ["View assigned jobs"],
+                "out_of_scope": [],
+                "acceptance": ["A technician can view assigned jobs."],
+                "assumptions": [],
+            },
+        }
+    )
+    sow = payload.get("sow") or {}
+    deliverables = " ".join(str(item) for item in sow.get("deliverables") or [])
+    assumptions = " ".join(str(item) for item in sow.get("assumptions") or [])
+    out_of_scope = _blob(sow.get("out_of_scope"))
+    capabilities = _blob((payload.get("solution") or {}).get("key_capabilities"))
+    assert "offline data synchronization module" in deliverables.lower()
+    assert "provisional planning item" in deliverables.lower()
+    assert "provisional planning item" in assumptions.lower()
+    assert "not a customer-approved design" in assumptions.lower()
+    assert "offline" not in out_of_scope
+    assert "synchron" not in out_of_scope
+    assert "unreliable connectivity" in capabilities

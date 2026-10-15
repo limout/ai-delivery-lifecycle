@@ -11,6 +11,7 @@ from app.decisions import (
     dedupe_equivalent_questions,
     drop_resolved,
     drop_unresolved_out_of_scope_items,
+    qualify_unresolved_sow_deliverables,
     question_text,
     reconcile_discovery_actors,
     reconcile_open_questions,
@@ -1004,6 +1005,7 @@ def apply_established_scope_carry(state: dict | None) -> dict:
         sow["out_of_scope"] = drop_unresolved_out_of_scope_items(
             sow.get("out_of_scope"), state
         )
+        sow = qualify_unresolved_sow_deliverables(sow, state)
         updates["sow"] = sow
     return updates
 
@@ -3047,6 +3049,11 @@ Rules:
      list or user names.
    - assumptions: unconfirmed planning facts.
    - dependencies: external inputs, access, or participation required.
+8. When exact offline behavior or synchronization rules are still unresolved,
+   describe any related deliverable as a provisional planning item. Do not
+   present a synchronization module, architecture, or conflict-resolution
+   rule as a customer-approved design, and do not place that unresolved
+   topic out of scope.
 """
 
     sow = provider.generate_json(

@@ -1280,9 +1280,91 @@ _BEHAVIOR_STEMS = frozenset(
 )
 
 
+_ACTOR_STEMS = frozenset(
+    _stem(word)
+    for word in (
+        "technician",
+        "field",
+        "member",
+        "librarian",
+        "receptionist",
+        "operator",
+        "officer",
+        "clerk",
+        "staff",
+        "user",
+        "coordinator",
+        "picker",
+    )
+)
+
+
+def _normalize_comparison_token(token: str) -> str:
+    """Align gerund and base stems for comparison only.
+
+    ``_stem`` strips ``ing`` before a trailing ``s``, so ``accessing`` stays
+    ``access`` while ``access`` becomes ``acces``. It also drops the silent
+    ``e`` in ``creating`` (``creat``) but not in ``create``.
+    """
+    if len(token) >= 5 and token.endswith("ss"):
+        token = token[:-1]
+    extended = token + "e"
+    if len(token) >= 4 and extended in _BEHAVIOR_STEMS:
+        token = extended
+    return token
+
+
 def _comparison_tokens(tokens: frozenset[str]) -> frozenset[str]:
-    """Drop modal scaffolding used only when testing equivalence or subsets."""
-    return frozenset(token for token in tokens if token not in _MODAL_STEMS)
+    """Modal-free tokens used only when testing equivalence or subsets."""
+    return frozenset(
+        _normalize_comparison_token(token)
+        for token in tokens
+        if token not in _MODAL_STEMS
+    )
+
+
+def _scope_parts(
+    tokens: frozenset[str],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    behavior = tokens & _BEHAVIOR_STEMS
+    actors = tokens & _ACTOR_STEMS
+    objects = tokens - _BEHAVIOR_STEMS - _ACTOR_STEMS
+    return behavior, actors, objects
+
+
+def _same_behavior_and_objects(left: frozenset[str], right: frozenset[str]) -> bool:
+    """True when the action and objects match, not merely the verb.
+
+    One side may add a qualifier such as a source system. Different actors
+    stay distinct. A shared behavior stem with different objects does not match.
+    """
+    left_behavior, left_actors, left_objects = _scope_parts(left)
+    right_behavior, right_actors, right_objects = _scope_parts(right)
+    if not left_behavior or left_behavior != right_behavior:
+        return False
+    if not left_objects or not right_objects:
+        return False
+    if left_actors and right_actors and left_actors != right_actors:
+        return False
+    if min(len(left_objects), len(right_objects)) < 3:
+        return False
+    return left_objects <= right_objects or right_objects <= left_objects
+
+
+def _more_informative(
+    new_text: str,
+    new_tokens: frozenset[str],
+    old_text: str,
+    old_tokens: frozenset[str],
+) -> bool:
+    """Prefer the wording that keeps extra objects, such as a named source."""
+    _new_behavior, _new_actors, new_objects = _scope_parts(new_tokens)
+    _old_behavior, _old_actors, old_objects = _scope_parts(old_tokens)
+    if len(new_objects) != len(old_objects):
+        return len(new_objects) > len(old_objects)
+    if len(new_tokens) != len(old_tokens):
+        return len(new_tokens) > len(old_tokens)
+    return len(new_text) > len(old_text)
 
 
 def _tokens_covered_by(candidate: frozenset[str], reference: frozenset[str]) -> bool:
@@ -1310,13 +1392,15 @@ def _is_short_paraphrase(short_tokens: frozenset[str], long_tokens: frozenset[st
 def collapse_equivalent_scope_items(items) -> list:
     """Keep one wording per behavior; never drop a distinct action or qualifier.
 
-    Later must/shall paraphrases of one kept item collapse. Modal scaffolding
-    such as allow/able is ignored only while comparing items. A short fragment
-    collapses into one longer statement of the same behavior only when the
-    extra tokens are not additional actions or meaningful qualifiers. A
-    compound bullet does not delete its constituent behaviors, and a later
-    pass does not delete a distinct requirement merely because its tokens
-    appear across several other bullets.
+    Later must/shall and gerund paraphrases of one kept item collapse.
+    Modal scaffolding such as allow/able is ignored only while comparing
+    items. A short fragment collapses into one longer statement of the same
+    behavior only when the extra tokens are not additional actions or
+    meaningful qualifiers. The more informative wording is kept, including
+    a named source such as an asset registry. A compound bullet does not
+    delete its constituent behaviors, and a later pass does not delete a
+    distinct requirement merely because its tokens appear across several
+    other bullets.
     """
     kept: list[str] = []
     kept_tokens: list[frozenset[str]] = []
@@ -1325,39 +1409,121 @@ def collapse_equivalent_scope_items(items) -> list:
         if not text:
             continue
         tokens = _comparison_tokens(content_tokens(_requirement_body(text)))
-        if any(
-            _equivalent_paraphrase(tokens, existing)
-            or _is_short_paraphrase(tokens, existing)
-            for existing in kept_tokens
-        ):
+        replaced = False
+        for index, existing in enumerate(kept_tokens):
+            longer_than_existing = _is_short_paraphrase(existing, tokens)
+            same_scope = (
+                _equivalent_paraphrase(tokens, existing)
+                or _same_behavior_and_objects(tokens, existing)
+                or longer_than_existing
+            )
+            if not same_scope:
+                continue
+            if longer_than_existing and sum(
+                1 for other in kept_tokens if other and other < tokens
+            ) >= 2:
+                replaced = True
+                break
+            if _more_informative(text, tokens, kept[index], existing):
+                kept[index] = text
+                kept_tokens[index] = tokens
+            replaced = True
+            break
+        if replaced:
             continue
         kept.append(text)
         kept_tokens.append(tokens)
 
+    compounds: set[int] = set()
+    for index, tokens in enumerate(kept_tokens):
+        covered = [
+            other
+            for other_index, other in enumerate(kept_tokens)
+            if other_index != index and other and other < tokens
+        ]
+        if len(covered) >= 2:
+            compounds.add(index)
+
     survivors: list[int] = []
     for index, tokens in enumerate(kept_tokens):
+        if index in compounds:
+            continue
         if any(
-            other != index and _is_short_paraphrase(tokens, kept_tokens[other])
+            other != index
+            and other not in compounds
+            and _is_short_paraphrase(tokens, kept_tokens[other])
             for other in range(len(kept_tokens))
         ):
             continue
         survivors.append(index)
-    kept = [kept[index] for index in survivors]
-    kept_tokens = [kept_tokens[index] for index in survivors]
+    return [kept[index] for index in survivors]
 
-    remaining: list[str] = []
-    for index, tokens in enumerate(kept_tokens):
-        constituents = 0
-        for other_index, other in enumerate(kept_tokens):
-            if other_index == index or not other:
-                continue
-            extra = tokens - other
-            if other <= tokens and extra & _BEHAVIOR_STEMS:
-                constituents += 1
-        if constituents >= 2:
+
+_OFFLINE_DESIGN = re.compile(
+    r"\b(?:offline|synchron\w*|sync)\b.+\b(?:module|architecture|design|mechanism)\b|"
+    r"\b(?:module|architecture|design|mechanism)\b.+\b(?:offline|synchron\w*|sync)\b|"
+    r"\b(?:last[- ]write[- ]wins|conflict[- ]resolution rule)\b",
+    re.I,
+)
+_PROVISIONAL_DELIVERABLE_PREFIX = (
+    "Provisional planning item, pending unresolved offline behavior "
+    "and synchronization rules: "
+)
+_PROVISIONAL_SYNC_ASSUMPTION = (
+    "Exact offline behavior and synchronization rules are unresolved. "
+    "Any synchronization module or conflict-resolution approach is a "
+    "provisional planning item, not a customer-approved design."
+)
+
+
+def _pending_offline_sync(state: dict | None) -> bool:
+    decisions = ClarificationDecisions(state)
+    texts = [statement.text for statement in decisions.pending]
+    texts.extend(decisions.remainder_questions())
+    texts.extend(unanswered_request_items(state))
+    return any(
+        re.search(r"\b(?:offline|synchron\w*|sync)\b", str(text or ""), re.I)
+        for text in texts
+    )
+
+
+def qualify_unresolved_sow_deliverables(sow: dict | None, state: dict | None) -> dict:
+    """Mark an unresolved sync design as provisional without removing the topic.
+
+    Does not move the deliverable out of scope and does not alter solution
+    capabilities. A customer-approved design is left unchanged when no
+    offline or synchronization decision is still pending.
+    """
+    if not isinstance(sow, dict) or not _pending_offline_sync(state):
+        return sow or {}
+    deliverables = []
+    qualified = False
+    for item in sow.get("deliverables") or []:
+        text = str(item or "").strip()
+        if not text:
             continue
-        remaining.append(kept[index])
-    return remaining
+        if text.startswith(_PROVISIONAL_DELIVERABLE_PREFIX):
+            deliverables.append(text)
+            qualified = True
+            continue
+        if _OFFLINE_DESIGN.search(text):
+            deliverables.append(_PROVISIONAL_DELIVERABLE_PREFIX + text)
+            qualified = True
+            continue
+        deliverables.append(text)
+    if not qualified:
+        return sow
+    updated = dict(sow)
+    updated["deliverables"] = deliverables
+    assumptions = [
+        str(item).strip()
+        for item in updated.get("assumptions") or []
+        if str(item).strip()
+    ]
+    if _PROVISIONAL_SYNC_ASSUMPTION not in assumptions:
+        assumptions.append(_PROVISIONAL_SYNC_ASSUMPTION)
+    updated["assumptions"] = assumptions
+    return updated
 
 
 def drop_unresolved_out_of_scope_items(items, state: dict | None) -> list:
