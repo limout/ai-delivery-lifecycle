@@ -1205,10 +1205,13 @@ def _covered(statement_tokens: frozenset[str], texts: list[str]) -> bool:
     # Strict on purpose: a decision that only partly overlaps an existing
     # requirement (for example, missing its qualifying condition) is new.
     allowed_missing = len(statement_tokens) // 8
-    return any(
+    if any(
         len(statement_tokens - content_tokens(text)) <= allowed_missing
         for text in texts
-    )
+    ):
+        return True
+    combined = content_tokens(" ".join(str(text or "") for text in texts))
+    return len(statement_tokens - combined) <= allowed_missing
 
 
 def _sentence_case(text: str) -> str:

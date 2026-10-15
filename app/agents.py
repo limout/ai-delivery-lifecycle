@@ -918,20 +918,19 @@ def _merge_prior_scope_lists(
     return current
 
 
-_PRODUCT_SCOPE_SOURCES = (
-    ("discovery", "users"),
+_CAPABILITY_SCOPE_SOURCES = (
     ("requirements", "functional_requirements"),
-    ("requirements", "non_functional_requirements"),
-    ("requirements", "acceptance_criteria"),
     ("solution", "key_capabilities"),
     ("proposal", "scope"),
     ("sow", "in_scope"),
-    ("sow", "objectives"),
-    ("sow", "acceptance"),
 )
 _SYSTEM_SCOPE_SOURCES = (
     ("discovery", "existing_systems"),
     ("solution", "integration_approach"),
+)
+_ACCEPTANCE_SCOPE_SOURCES = (
+    ("requirements", "acceptance_criteria"),
+    ("sow", "acceptance"),
 )
 
 
@@ -951,40 +950,44 @@ def apply_established_scope_carry(state: dict | None) -> dict:
     """Copy still-active structured scope into regenerated downstream lists.
 
     Downstream regeneration only sees a prior copy of the same artifact. After
-    clarification, that copy is often empty, so in-force discovery/requirements
-    lists must be unioned in. Withdrawals are still honored by ``_union_scope_items``.
+    clarification, that copy is often empty, so in-force same-role lists must
+    be unioned in. Users, NFRs, and acceptance criteria are not copied into
+    capabilities or in-scope. Objectives stay on the same-field merge.
+    Withdrawals are still honored by ``_union_scope_items``.
     """
     state = dict(state or {})
     updates: dict = {}
-    product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
+    capability_items = _collect_structured_list_items(state, _CAPABILITY_SCOPE_SOURCES)
     system_items = _collect_structured_list_items(state, _SYSTEM_SCOPE_SOURCES)
+    acceptance_items = _collect_structured_list_items(state, _ACCEPTANCE_SCOPE_SOURCES)
 
     if state.get("solution") is not None:
         solution = dict(state.get("solution") or {})
         solution["key_capabilities"] = _union_scope_items(
-            product_items, solution.get("key_capabilities") or [], state
+            capability_items, solution.get("key_capabilities") or [], state
         )
         solution["integration_approach"] = _union_scope_items(
             system_items, solution.get("integration_approach") or [], state
         )
         updates["solution"] = solution
         state["solution"] = solution
-        product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
-        system_items = _collect_structured_list_items(state, _SYSTEM_SCOPE_SOURCES)
 
     if state.get("proposal") is not None:
         proposal = dict(state.get("proposal") or {})
         proposal["scope"] = _union_scope_items(
-            product_items, proposal.get("scope") or [], state
+            capability_items, proposal.get("scope") or [], state
         )
         updates["proposal"] = proposal
         state["proposal"] = proposal
-        product_items = _collect_structured_list_items(state, _PRODUCT_SCOPE_SOURCES)
 
     if state.get("sow") is not None:
         sow = dict(state.get("sow") or {})
-        for key in _SOW_SCOPE_LISTS:
-            sow[key] = _union_scope_items(product_items, sow.get(key) or [], state)
+        sow["in_scope"] = _union_scope_items(
+            capability_items, sow.get("in_scope") or [], state
+        )
+        sow["acceptance"] = _union_scope_items(
+            acceptance_items, sow.get("acceptance") or [], state
+        )
         updates["sow"] = sow
     return updates
 
@@ -3000,6 +3003,16 @@ Rules:
 5. Treat timeline and estimate as indicative unless explicitly
    confirmed by the customer.
 6. Do not invent commercial or contractual terms.
+7. Keep SOW fields semantically distinct. Do not repeat the same capability across every field.
+   - objectives: business outcomes.
+   - deliverables: work products produced.
+   - in_scope: capabilities and work included in the engagement;
+     do not paste the functional-requirements list.
+   - acceptance: testable evidence that deliverables meet the
+     agreed requirements; do not paste the functional-requirements
+     list or user names.
+   - assumptions: unconfirmed planning facts.
+   - dependencies: external inputs, access, or participation required.
 """
 
     sow = provider.generate_json(

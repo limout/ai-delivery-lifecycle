@@ -801,3 +801,219 @@ def test_thirteen_question_accumulation_is_reconciled():
     assert state["user_request"] == request
     assert state["clarification_history"] == original_history
     assert len(questions) < 13
+
+
+def _decision_state(request: str, question: str, answer: str) -> dict:
+    return {
+        "user_request": request,
+        "clarification_history": [{"question": question, "answer": answer}],
+        "clarification_state": {
+            "version": 1,
+            "answers": [
+                {
+                    "question": question,
+                    "answer": answer,
+                    "status": "ACCEPTED",
+                    "source": "customer clarification",
+                }
+            ],
+            "decisions": [
+                {
+                    "question": question,
+                    "decision": answer,
+                    "status": "RESOLVED",
+                    "source": "customer clarification",
+                }
+            ],
+            "questions": [
+                {
+                    "question": question,
+                    "status": "RESOLVED",
+                    "priority": "REQUIRED",
+                    "blocks_workflow": True,
+                    "reason": "",
+                }
+            ],
+        },
+    }
+
+
+def test_compound_restatement_does_not_create_mega_requirement():
+    question = "Who will use the first release, and what will they do in it?"
+    restatement = (
+        "They will search holdings, create holds, and renew loans."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Members can search holdings.",
+                "Members can create holds.",
+                "Members can renew loans.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A member can search holdings.",
+                "A member can create holds.",
+                "A member can renew loans.",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a catalog so members can search holdings, create holds, "
+            "and renew loans.",
+            question,
+            restatement,
+        ),
+    )
+    sourced = [
+        item
+        for item in requirements["functional_requirements"]
+        if "Source: customer clarification" in item
+    ]
+    assert not any(
+        "search holdings" in item.lower()
+        and "create holds" in item.lower()
+        and "renew loans" in item.lower()
+        for item in sourced
+    )
+    assert "Members can search holdings." in requirements["functional_requirements"]
+    assert "Members can create holds." in requirements["functional_requirements"]
+    assert "Members can renew loans." in requirements["functional_requirements"]
+
+
+def test_additive_clarification_still_creates_requirement():
+    question = "Who will use the first release, and what will they do in it?"
+    additive = (
+        "Librarians will also review incoming returns through a staff console."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Members can search holdings.",
+                "Members can create holds.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A member can search holdings.",
+                "A member can create holds.",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a catalog so members can search holdings and create holds.",
+            question,
+            additive,
+        ),
+    )
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "review incoming returns" in functional
+    assert any(
+        "Source: customer clarification" in item
+        for item in requirements["functional_requirements"]
+    )
+
+
+def test_additive_integration_clarification_still_creates_requirement():
+    question = (
+        "Which systems must the first release integrate with, and what is "
+        "the source of truth?"
+    )
+    additive = (
+        "The first release must integrate with the interlibrary loan service."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Members can search holdings.",
+                "Integrate with the library catalog database.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A member can search holdings.",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a catalog so members can search holdings.",
+            question,
+            additive,
+        ),
+    )
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "interlibrary loan" in functional
+    assert "library catalog database" in functional
+
+
+def test_kiosk_compound_restatement_does_not_create_mega_requirement():
+    question = "Who will use the first release, and what will they do in it?"
+    restatement = (
+        "They will search visitor appointments and create check-in records."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Receptionists can search visitor appointments.",
+                "Receptionists can create check-in records.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A receptionist can search visitor appointments.",
+                "A receptionist can create check-in records.",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a lobby kiosk so receptionists can search visitor "
+            "appointments and create check-in records.",
+            question,
+            restatement,
+        ),
+    )
+    sourced = [
+        item
+        for item in requirements["functional_requirements"]
+        if "Source: customer clarification" in item
+    ]
+    assert not any(
+        "search visitor appointments" in item.lower()
+        and "create check-in records" in item.lower()
+        for item in sourced
+    )
+
+
+def test_additive_offline_clarification_still_creates_requirement():
+    question = (
+        "What are the offline behavior and data synchronization rules?"
+    )
+    additive = (
+        "Receptionists can search visitor appointments with no network "
+        "connection. Queued check-ins synchronize automatically when "
+        "connectivity returns."
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Receptionists can search visitor appointments.",
+                "Receptionists can create check-in records.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A receptionist can search visitor appointments.",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a lobby kiosk so receptionists can search visitor "
+            "appointments and create check-in records.",
+            question,
+            additive,
+        ),
+    )
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "network" in functional or "offline" in functional or "queued" in functional
+    assert "synchronize" in functional or "connectivity" in functional

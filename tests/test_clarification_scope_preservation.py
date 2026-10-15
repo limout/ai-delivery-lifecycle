@@ -39,6 +39,7 @@ LIBRARY = {
     "prior_requirement": "Members can create holds.",
     "original_system": "Library catalog database",
     "added_system": "Interlibrary loan service",
+    "third_system": "Patron identity directory",
     "lost_oos_item": "Members searching holdings",
     "outcome_fragment": "search holdings",
     "prohibition_capability": "Send marketing email to members.",
@@ -62,6 +63,7 @@ KIOSK = {
     "prior_requirement": "Receptionists can create check-in records.",
     "original_system": "Visitor appointment register",
     "added_system": "Staff messaging bus",
+    "third_system": "Building access panel",
     "lost_oos_item": "Receptionists searching visitor appointments",
     "outcome_fragment": "search visitor",
     "prohibition_capability": "Store visitor payment card numbers.",
@@ -469,7 +471,10 @@ def test_additive_clarification_final_artifacts_keep_original_audience(domain):
         "clarification_history": _history(domain, domain["additive_answer"]),
         "discovery": _discovery(
             [domain["original_user"]],
-            existing_systems=[domain["original_system"]],
+            existing_systems=[
+                domain["original_system"],
+                domain["third_system"],
+            ],
         ),
         "requirements": _requirements([domain["prior_requirement"]]),
     }
@@ -571,6 +576,50 @@ def test_additive_clarification_final_artifacts_keep_original_audience(domain):
     assert domain["prior_requirement"].lower() in sow_in
     assert domain["original_system"].lower() in integrations
     assert domain["added_system"].lower() in integrations
+    assert domain["third_system"].lower() in integrations
+
+
+@DOMAINS
+def test_sow_prompt_distinguishes_field_roles(domain):
+    provider = RecordingProvider(
+        {
+            "objectives": [f"Serve {domain['added_user']}"],
+            "deliverables": ["Increment"],
+            "in_scope": [f"{domain['added_user']} review work"],
+            "out_of_scope": [],
+            "dependencies": [],
+            "acceptance": [f"{domain['added_user']} can review incoming work"],
+            "timeline": "See estimate",
+            "assumptions": [],
+        }
+    )
+    sow_agent(
+        {
+            "user_request": domain["request"],
+            "discovery": _discovery([domain["original_user"], domain["added_user"]]),
+            "requirements": _requirements([domain["prior_requirement"]]),
+            "solution": {
+                "solution_summary": f"A product for {domain['added_user']}.",
+                "key_capabilities": [domain["prior_requirement"]],
+                "integration_approach": [],
+            },
+            "delivery_plan": {"delivery_phases": ["Build"]},
+            "estimate": {
+                "duration_range": "4-6 weeks",
+                "standard_deadline_fit": "NOT_DEMONSTRATED",
+                "assumptions": [],
+            },
+        },
+        provider,
+    )
+    prompt = " ".join(provider.prompts).lower()
+    assert "business outcomes" in prompt
+    assert "work products produced" in prompt
+    assert "do not paste the functional-requirements list" in prompt
+    assert "testable evidence" in prompt
+    assert "unconfirmed planning facts" in prompt
+    assert "external inputs, access, or participation required" in prompt
+    assert "do not repeat the same capability across every field" in prompt
 
 
 @DOMAINS
@@ -584,12 +633,16 @@ def test_workflow_response_carries_established_scope_into_drifted_downstream(dom
                 existing_systems=[
                     domain["original_system"],
                     domain["added_system"],
+                    domain["third_system"],
                 ],
             ),
             "requirements": _requirements(
                 [
                     domain["prior_requirement"],
                     f"{domain['added_user']} can review incoming work.",
+                    f"Integrate with {domain['original_system']}.",
+                    f"Integrate with {domain['added_system']}.",
+                    f"Integrate with {domain['third_system']}.",
                 ]
             ),
             "solution": {
@@ -626,11 +679,86 @@ def test_workflow_response_carries_established_scope_into_drifted_downstream(dom
     assert domain["prior_requirement"].lower() in sow_in
     assert domain["original_system"].lower() in integrations
     assert domain["added_system"].lower() in integrations
+    assert domain["third_system"].lower() in integrations
     out_of_scope = " ".join(
         str(item).lower()
         for item in (payload.get("sow") or {}).get("out_of_scope") or []
     )
     assert domain["original_user"].lower() not in out_of_scope
+
+
+@DOMAINS
+def test_workflow_response_does_not_dump_cross_field_scope(domain):
+    nfr = "The service must encrypt stored records at rest."
+    sourced_ac = (
+        "Verified by demonstration or test that: "
+        f"{domain['added_user']} can review incoming work "
+        "(Source: customer clarification)"
+    )
+    payload = _complete(
+        {
+            "user_request": domain["request"],
+            "clarification_history": _history(domain, domain["additive_answer"]),
+            "discovery": _discovery(
+                [domain["original_user"], domain["added_user"]],
+                existing_systems=[
+                    domain["original_system"],
+                    domain["added_system"],
+                    domain["third_system"],
+                ],
+            ),
+            "requirements": _requirements(
+                [
+                    domain["prior_requirement"],
+                    f"{domain['added_user']} can review incoming work.",
+                    f"Integrate with {domain['original_system']}.",
+                    f"Integrate with {domain['added_system']}.",
+                    f"Integrate with {domain['third_system']}.",
+                ],
+                non_functional_requirements=[nfr],
+                acceptance_criteria=[
+                    sourced_ac,
+                    f"A {domain['original_user'].lower()} can complete the original task.",
+                ],
+            ),
+            "solution": {
+                "solution_summary": f"A product for {domain['added_user']}.",
+                "key_capabilities": [f"{domain['added_user']} can review incoming work."],
+                "integration_approach": [f"Integrate with {domain['added_system']}."],
+            },
+            "sow": {
+                "objectives": [f"Serve {domain['added_user']}"],
+                "deliverables": ["Increment"],
+                "in_scope": [f"{domain['added_user']} review work"],
+                "out_of_scope": [domain["lost_oos_item"]],
+                "acceptance": [],
+            },
+        }
+    )
+    caps = [
+        str(item).strip()
+        for item in (payload.get("solution") or {}).get("key_capabilities") or []
+    ]
+    sow_in = list((payload.get("sow") or {}).get("in_scope") or [])
+    sow_acceptance = list((payload.get("sow") or {}).get("acceptance") or [])
+    sow_objectives = list((payload.get("sow") or {}).get("objectives") or [])
+    assert sow_in != sow_acceptance
+    assert sow_in != sow_objectives
+    assert domain["original_user"] not in caps
+    assert domain["added_user"] not in caps
+    assert nfr not in caps
+    assert not any("verified by demonstration" in item.lower() for item in caps)
+    sow_in_blob = " ".join(str(item).lower() for item in sow_in)
+    assert domain["prior_requirement"].lower() in sow_in_blob
+    assert domain["added_user"].lower() in sow_in_blob
+    scope_blob = _blob(
+        (payload.get("requirements") or {}).get("functional_requirements"),
+        sow_in,
+        (payload.get("solution") or {}).get("integration_approach"),
+    )
+    assert domain["original_system"].lower() in scope_blob
+    assert domain["added_system"].lower() in scope_blob
+    assert domain["third_system"].lower() in scope_blob
 
 
 def test_explicit_replacement_drops_withdrawn_product_from_active_scope():
