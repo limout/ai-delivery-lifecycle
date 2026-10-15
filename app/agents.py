@@ -7,11 +7,13 @@ from app.decisions import (
     active_open_questions,
     apply_decisions_to_requirements,
     apply_reconciled_project_state,
+    collapse_equivalent_scope_items,
     dedupe_equivalent_questions,
     drop_resolved,
     question_text,
     reconcile_discovery_actors,
     reconcile_open_questions,
+    strip_verified_clarification_items,
 )
 from app.evidence import (
     answer_retracts_scope,
@@ -963,8 +965,10 @@ def apply_established_scope_carry(state: dict | None) -> dict:
 
     if state.get("solution") is not None:
         solution = dict(state.get("solution") or {})
-        solution["key_capabilities"] = _union_scope_items(
-            capability_items, solution.get("key_capabilities") or [], state
+        solution["key_capabilities"] = collapse_equivalent_scope_items(
+            _union_scope_items(
+                capability_items, solution.get("key_capabilities") or [], state
+            )
         )
         solution["integration_approach"] = _union_scope_items(
             system_items, solution.get("integration_approach") or [], state
@@ -974,19 +978,27 @@ def apply_established_scope_carry(state: dict | None) -> dict:
 
     if state.get("proposal") is not None:
         proposal = dict(state.get("proposal") or {})
-        proposal["scope"] = _union_scope_items(
-            capability_items, proposal.get("scope") or [], state
+        proposal["scope"] = collapse_equivalent_scope_items(
+            _union_scope_items(
+                capability_items, proposal.get("scope") or [], state
+            )
         )
         updates["proposal"] = proposal
         state["proposal"] = proposal
 
     if state.get("sow") is not None:
         sow = dict(state.get("sow") or {})
-        sow["in_scope"] = _union_scope_items(
-            capability_items, sow.get("in_scope") or [], state
+        sow["in_scope"] = collapse_equivalent_scope_items(
+            _union_scope_items(
+                capability_items, sow.get("in_scope") or [], state
+            )
         )
-        sow["acceptance"] = _union_scope_items(
-            acceptance_items, sow.get("acceptance") or [], state
+        sow["acceptance"] = collapse_equivalent_scope_items(
+            strip_verified_clarification_items(
+                _union_scope_items(
+                    acceptance_items, sow.get("acceptance") or [], state
+                )
+            )
         )
         updates["sow"] = sow
     return updates
@@ -1567,6 +1579,12 @@ Return the complete requirements schema.
         _REQUIREMENT_SCOPE_LISTS,
         state,
     )
+    requirements["functional_requirements"] = collapse_equivalent_scope_items(
+        requirements.get("functional_requirements")
+    )
+    requirements["acceptance_criteria"] = strip_verified_clarification_items(
+        requirements.get("acceptance_criteria")
+    )
 
     has_any_requirements = any(
         requirements.get(key)
@@ -1615,6 +1633,12 @@ request-stated outcome.
             requirements,
             _REQUIREMENT_SCOPE_LISTS,
             state,
+        )
+        requirements["functional_requirements"] = collapse_equivalent_scope_items(
+            requirements.get("functional_requirements")
+        )
+        requirements["acceptance_criteria"] = strip_verified_clarification_items(
+            requirements.get("acceptance_criteria")
         )
 
     return {

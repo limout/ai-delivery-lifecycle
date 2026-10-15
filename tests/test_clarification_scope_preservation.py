@@ -759,6 +759,119 @@ def test_workflow_response_does_not_dump_cross_field_scope(domain):
     assert domain["original_system"].lower() in scope_blob
     assert domain["added_system"].lower() in scope_blob
     assert domain["third_system"].lower() in scope_blob
+    sow_acceptance_blob = " ".join(str(item).lower() for item in sow_acceptance)
+    assert "verified by demonstration" not in sow_acceptance_blob
+    assert domain["added_user"].lower() in _blob(
+        (payload.get("requirements") or {}).get("functional_requirements")
+    )
+
+
+@DOMAINS
+def test_workflow_response_collapses_modal_paraphrases_and_keeps_distinct_scope(domain):
+    must = (
+        f"The system must allow {domain['original_user'].lower()} to "
+        f"{domain['outcome_fragment']}."
+    )
+    shall = (
+        f"The system shall allow {domain['original_user'].lower()} to "
+        f"{domain['outcome_fragment']}."
+    )
+    om = f"{domain['added_user']} can review incoming work."
+    offline = (
+        f"{domain['original_user']} can continue work with no network connection."
+    )
+    sync = (
+        "Queued updates persist locally and synchronize when connectivity returns."
+    )
+    duplicate = "The system must prevent duplicate submissions."
+    conflict = "The system must provide a way to resolve synchronization conflicts."
+    integrations = [
+        f"Integrate with {domain['original_system']}.",
+        f"Integrate with {domain['added_system']}.",
+        f"Integrate with {domain['third_system']}.",
+    ]
+    verified = (
+        "Verified by demonstration or test that: "
+        f"{domain['original_user']} can {domain['outcome_fragment']} "
+        "(Source: customer clarification)"
+    )
+    payload = _complete(
+        {
+            "user_request": domain["request"],
+            "clarification_history": _history(domain, domain["additive_answer"]),
+            "discovery": _discovery(
+                [domain["original_user"], domain["added_user"]],
+                existing_systems=[
+                    domain["original_system"],
+                    domain["added_system"],
+                    domain["third_system"],
+                ],
+            ),
+            "requirements": _requirements(
+                [must, shall, om, offline, sync, duplicate, conflict, *integrations]
+            ),
+            "solution": {
+                "solution_summary": f"A product for {domain['added_user']}.",
+                "key_capabilities": [must, shall, om],
+                "integration_approach": list(integrations),
+            },
+            "proposal": {
+                "executive_summary": f"A product for {domain['added_user']}.",
+                "scope": [must, shall, f"View {domain['outcome_fragment']}"],
+            },
+            "sow": {
+                "objectives": [f"Serve {domain['original_user']} with faster operations."],
+                "deliverables": ["Increment"],
+                "in_scope": [must, shall, om],
+                "out_of_scope": [],
+                "acceptance": [
+                    verified,
+                    f"A {domain['original_user'].lower()} can {domain['outcome_fragment']}.",
+                ],
+            },
+        }
+    )
+    frs = list(
+        (payload.get("requirements") or {}).get("functional_requirements") or []
+    )
+    proposal_scope = list((payload.get("proposal") or {}).get("scope") or [])
+    sow_in = list((payload.get("sow") or {}).get("in_scope") or [])
+    sow_acceptance = list((payload.get("sow") or {}).get("acceptance") or [])
+    sow_objectives = list((payload.get("sow") or {}).get("objectives") or [])
+
+    def _modal_count(items):
+        return sum(
+            1
+            for item in items
+            if domain["outcome_fragment"] in str(item).lower()
+            and "network" not in str(item).lower()
+            and (
+                "must allow" in str(item).lower()
+                or "shall allow" in str(item).lower()
+            )
+        )
+
+    assert _modal_count(frs) == 1
+    assert _modal_count(proposal_scope) <= 1
+    assert _modal_count(sow_in) <= 1
+    blob = _blob(frs, proposal_scope, sow_in)
+    assert domain["outcome_fragment"] in blob
+    assert domain["added_user"].lower() in blob
+    assert "no network" in blob
+    assert "synchronize" in blob or "connectivity" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+    assert domain["original_system"].lower() in blob
+    assert domain["added_system"].lower() in blob
+    assert domain["third_system"].lower() in blob
+    assert "verified by demonstration" not in " ".join(
+        str(item).lower() for item in sow_acceptance
+    )
+    assert domain["outcome_fragment"] in _blob(frs)
+    assert "must allow" not in " ".join(str(item).lower() for item in sow_objectives)
+    assert domain["prior_requirement"].lower() not in " ".join(
+        str(item).lower() for item in sow_objectives
+    )
 
 
 def test_explicit_replacement_drops_withdrawn_product_from_active_scope():

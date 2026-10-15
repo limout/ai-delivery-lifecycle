@@ -1214,6 +1214,141 @@ def _covered(statement_tokens: frozenset[str], texts: list[str]) -> bool:
     return len(statement_tokens - combined) <= allowed_missing
 
 
+_VERIFIED_CLARIFICATION = re.compile(
+    r"^verified by demonstration or test that:\s*",
+    re.I,
+)
+
+
+def is_verified_clarification_item(text: str) -> bool:
+    """True for raw sourced clarification sentences used as acceptance bullets."""
+    return bool(_VERIFIED_CLARIFICATION.match(str(text or "").strip()))
+
+
+def strip_verified_clarification_items(items) -> list:
+    """Drop prefixed clarification restatements; keep testable acceptance text."""
+    cleaned = []
+    for item in items or []:
+        text = str(item or "").strip()
+        if text and not is_verified_clarification_item(text):
+            cleaned.append(text)
+    return cleaned
+
+
+_BEHAVIOR_STEMS = frozenset(
+    _stem(word)
+    for word in (
+        "complete",
+        "record",
+        "submit",
+        "create",
+        "attach",
+        "prevent",
+        "resolve",
+        "persist",
+        "synchronize",
+        "synchronization",
+        "queue",
+        "queued",
+        "network",
+        "offline",
+        "duplicate",
+        "conflict",
+        "review",
+        "track",
+        "integrate",
+        "integration",
+        "access",
+        "search",
+        "capture",
+        "continue",
+        "identify",
+        "coordinate",
+        "reconnect",
+        "overwrite",
+        "detect",
+        "retry",
+        "renew",
+        "photo",
+        "photograph",
+    )
+)
+
+
+def _tokens_covered_by(candidate: frozenset[str], reference: frozenset[str]) -> bool:
+    if not candidate:
+        return True
+    return len(candidate - reference) <= len(candidate) // 8
+
+
+def _equivalent_paraphrase(left: frozenset[str], right: frozenset[str]) -> bool:
+    if not left or not right:
+        return False
+    return _tokens_covered_by(left, right) and _tokens_covered_by(right, left)
+
+
+def _is_short_paraphrase(short_tokens: frozenset[str], long_tokens: frozenset[str]) -> bool:
+    """True when short is the same behavior as long, not a distinct constituent."""
+    if not short_tokens or short_tokens == long_tokens:
+        return False
+    if not short_tokens <= long_tokens:
+        return False
+    extra = long_tokens - short_tokens
+    return bool(extra) and not (extra & _BEHAVIOR_STEMS)
+
+
+def collapse_equivalent_scope_items(items) -> list:
+    """Keep one wording per behavior; never drop a distinct action or qualifier.
+
+    Later must/shall paraphrases of one kept item collapse. A short fragment
+    collapses into one longer statement of the same behavior only when the
+    extra tokens are not additional actions or meaningful qualifiers. A
+    compound bullet does not delete its constituent behaviors, and a later
+    pass does not delete a distinct requirement merely because its tokens
+    appear across several other bullets.
+    """
+    kept: list[str] = []
+    kept_tokens: list[frozenset[str]] = []
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        tokens = content_tokens(_requirement_body(text))
+        if any(
+            _equivalent_paraphrase(tokens, existing)
+            or _is_short_paraphrase(tokens, existing)
+            for existing in kept_tokens
+        ):
+            continue
+        kept.append(text)
+        kept_tokens.append(tokens)
+
+    survivors: list[int] = []
+    for index, tokens in enumerate(kept_tokens):
+        if any(
+            other != index and _is_short_paraphrase(tokens, kept_tokens[other])
+            for other in range(len(kept_tokens))
+        ):
+            continue
+        survivors.append(index)
+    kept = [kept[index] for index in survivors]
+    kept_tokens = [kept_tokens[index] for index in survivors]
+
+    remaining: list[str] = []
+    for index, tokens in enumerate(kept_tokens):
+        constituents = 0
+        for other_index, other in enumerate(kept_tokens):
+            if other_index == index or not other:
+                continue
+            extra = tokens - other
+            if other <= tokens and extra & _BEHAVIOR_STEMS:
+                constituents += 1
+        if constituents >= 2:
+            continue
+        remaining.append(kept[index])
+    return remaining
+
+
 def _sentence_case(text: str) -> str:
     text = text.strip().rstrip(".;")
     return text[:1].upper() + text[1:] if text else text
@@ -1268,16 +1403,19 @@ def _filter_requirement_list(items: list[str], decisions: ClarificationDecisions
 def apply_decisions_to_requirements(requirements: dict | None, state: dict | None) -> dict:
     """Write resolved product decisions into requirements and keep pending ones open.
 
-    Resolved product-behavior statements become sourced requirements (and
-    acceptance criteria) unless an equivalent entry already exists. Planning
-    facts, capacity unknowns, and existing-state evidence stay in
-    ``clarified_decisions`` with provenance but are not turned into product
-    requirements or "Verified by demonstration..." criteria. Pending
-    statements keep their question open.
+    Resolved product-behavior statements become sourced requirements unless
+    an equivalent entry already exists. They are not copied into acceptance
+    as "Verified by demonstration..." sentences. Planning facts, capacity
+    unknowns, and existing-state evidence stay in ``clarified_decisions``
+    with provenance. Pending statements keep their question open.
     """
     requirements = dict(requirements or {})
     decisions = ClarificationDecisions(state)
     if not decisions.statements:
+        if "acceptance_criteria" in requirements:
+            requirements["acceptance_criteria"] = strip_verified_clarification_items(
+                requirements.get("acceptance_criteria")
+            )
         return requirements
 
     functional = _filter_requirement_list(
@@ -1303,11 +1441,6 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
                 non_functional.append(text)
             else:
                 functional.append(text)
-        if not _covered(tokens, acceptance):
-            acceptance.append(
-                "Verified by demonstration or test that: "
-                f"{_sentence_case(statement.text)} (Source: {SOURCE_LABEL})"
-            )
 
     open_questions = reconcile_open_questions(
         [str(i) for i in requirements.get("open_questions") or []]
@@ -1316,9 +1449,9 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
         state,
     )
 
-    requirements["functional_requirements"] = functional
+    requirements["functional_requirements"] = collapse_equivalent_scope_items(functional)
     requirements["non_functional_requirements"] = non_functional
-    requirements["acceptance_criteria"] = acceptance
+    requirements["acceptance_criteria"] = strip_verified_clarification_items(acceptance)
     requirements["open_questions"] = [question_text(item) for item in open_questions]
     requirements["clarified_decisions"] = [
         {

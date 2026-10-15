@@ -348,9 +348,6 @@ def test_iteration4_workflow_lists_match_canonical_ledger():
     functional = " ".join(
         (payload.get("requirements") or {}).get("functional_requirements") or []
     ).lower()
-    acceptance = " ".join(
-        (payload.get("requirements") or {}).get("acceptance_criteria") or []
-    ).lower()
     capabilities = " ".join(
         ((payload.get("solution") or {}).get("capabilities") or [])
     ).lower()
@@ -361,7 +358,8 @@ def test_iteration4_workflow_lists_match_canonical_ledger():
     ):
         assert fragment in functional
         assert fragment in capabilities or fragment in functional
-    assert "offline" in acceptance or "queued for synchronization" in acceptance
+    assert "offline" in functional
+    assert "queued for synchronization" in functional
     assert payload["user_request"] == original_request
     assert payload["clarification_history"] == original_history
 

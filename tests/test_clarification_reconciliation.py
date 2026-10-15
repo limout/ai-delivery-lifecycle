@@ -22,9 +22,11 @@ from app.api import workflow_response
 from app.decisions import (
     ClarificationDecisions,
     apply_decisions_to_requirements,
+    collapse_equivalent_scope_items,
     dedupe_equivalent_questions,
     questions_equivalent,
     reconcile_open_questions,
+    strip_verified_clarification_items,
 )
 from app.resume import apply_clarification_facts
 
@@ -222,8 +224,8 @@ def test_resolved_decision_is_sourced_requirement_and_acceptance(scenario):
     ]
     assert len(functional) == 1
     assert "Source: customer clarification" in functional[0]
-    assert any(
-        scenario.resolved_detail in item
+    assert not any(
+        "verified by demonstration" in str(item).lower()
         for item in requirements["acceptance_criteria"]
     )
     statuses = {d["status"] for d in requirements["clarified_decisions"]}
@@ -319,14 +321,14 @@ def test_discovery_and_requirements_agents_drop_stale_wording(scenario):
     )["requirements"]
     for fragment in scenario.resolved_fragments:
         assert fragment not in _lower_all(requirements["open_questions"])
-    assert any(
-        scenario.resolved_detail in item
-        for item in requirements["functional_requirements"]
-    )
-    assert any(
-        scenario.resolved_detail in item
-        for item in requirements["acceptance_criteria"]
-    )
+        assert any(
+            scenario.resolved_detail in item
+            for item in requirements["functional_requirements"]
+        )
+        assert not any(
+            "verified by demonstration" in str(item).lower()
+            for item in requirements["acceptance_criteria"]
+        )
 
 
 @SCENARIOS
@@ -1017,3 +1019,288 @@ def test_additive_offline_clarification_still_creates_requirement():
     functional = " ".join(requirements["functional_requirements"]).lower()
     assert "network" in functional or "offline" in functional or "queued" in functional
     assert "synchronize" in functional or "connectivity" in functional
+
+
+def test_must_shall_paraphrase_collapses_without_dropping_distinct_behaviors():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "The system must allow members to search holdings.",
+            "The system shall allow members to search holdings.",
+            "Members can create holds.",
+            "Librarians can review incoming returns.",
+            "Integrate with the library catalog database.",
+            "Integrate with the interlibrary loan service.",
+            "Integrate with the patron identity directory.",
+            "Members can search holdings with no network connection.",
+            "Queued updates persist locally and synchronize when connectivity returns.",
+            "The system must prevent duplicate submissions.",
+            "The system must provide a way to resolve synchronization conflicts.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    search_online = [
+        item
+        for item in collapsed
+        if "search holdings" in item.lower() and "network" not in item.lower()
+    ]
+    assert len(search_online) == 1
+    assert "create holds" in blob
+    assert "review incoming returns" in blob
+    assert "library catalog database" in blob
+    assert "interlibrary loan" in blob
+    assert "patron identity" in blob
+    assert "network" in blob
+    assert "synchronize" in blob or "connectivity" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+
+
+def test_kiosk_must_shall_paraphrase_collapses_without_dropping_distinct_behaviors():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "The system must allow receptionists to search visitor appointments.",
+            "The system shall allow receptionists to search visitor appointments.",
+            "Receptionists can create check-in records.",
+            "Security officers can review today's check-ins.",
+            "Integrate with the visitor appointment register.",
+            "Integrate with the staff messaging bus.",
+            "Integrate with the building access panel.",
+            "Receptionists can search visitor appointments with no network connection.",
+            "Queued check-ins persist locally and synchronize when connectivity returns.",
+            "The system must prevent duplicate submissions.",
+            "The system must provide a way to resolve synchronization conflicts.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    search_online = [
+        item
+        for item in collapsed
+        if "search visitor" in item.lower() and "network" not in item.lower()
+    ]
+    assert len(search_online) == 1
+    assert "check-in records" in blob
+    assert "security officers" in blob
+    assert "visitor appointment register" in blob
+    assert "staff messaging bus" in blob
+    assert "building access panel" in blob
+    assert "network" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+
+
+def test_strip_verified_clarification_keeps_testable_acceptance():
+    cleaned = strip_verified_clarification_items(
+        [
+            "A member can search holdings.",
+            "Verified by demonstration or test that: Members can search holdings "
+            "(Source: customer clarification)",
+            "A librarian can review incoming returns.",
+        ]
+    )
+    blob = " ".join(cleaned).lower()
+    assert "verified by demonstration" not in blob
+    assert "a member can search holdings." in blob
+    assert "a librarian can review incoming returns." in blob
+
+
+def _constituent_survives(items, phrase, excluded):
+    return any(
+        phrase in item.lower() and excluded not in item.lower()
+        for item in items
+    )
+
+
+def test_compound_first_does_not_drop_constituent_behaviors():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "Members can complete inspection checklists and record equipment defects.",
+            "Members can complete inspection checklists.",
+            "Members can record equipment defects.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    assert "complete inspection checklists" in blob
+    assert "record equipment defects" in blob
+    assert _constituent_survives(
+        collapsed, "complete inspection checklists", "record equipment defects"
+    )
+    assert _constituent_survives(
+        collapsed, "record equipment defects", "complete inspection checklists"
+    )
+
+
+def test_compound_last_does_not_drop_constituent_behaviors():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "Members can complete inspection checklists.",
+            "Members can record equipment defects.",
+            "Members can complete inspection checklists and record equipment defects.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    assert "complete inspection checklists" in blob
+    assert "record equipment defects" in blob
+    assert _constituent_survives(
+        collapsed, "complete inspection checklists", "record equipment defects"
+    )
+    assert _constituent_survives(
+        collapsed, "record equipment defects", "complete inspection checklists"
+    )
+
+
+def test_short_view_fragment_collapses_into_equivalent_must_shall():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "View assigned jobs",
+            "The system must allow technicians to view assigned jobs.",
+            "The system shall allow technicians to view assigned jobs.",
+        ]
+    )
+    view_items = [
+        item for item in collapsed if "view assigned jobs" in item.lower()
+    ]
+    assert len(view_items) == 1
+
+    reversed_order = collapse_equivalent_scope_items(
+        [
+            "The system must allow technicians to view assigned jobs.",
+            "View assigned jobs",
+            "The system shall allow technicians to view assigned jobs.",
+        ]
+    )
+    reversed_view = [
+        item for item in reversed_order if "view assigned jobs" in item.lower()
+    ]
+    assert len(reversed_view) == 1
+
+
+def test_offline_conflict_manager_and_integrations_remain_distinct():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            "The system must allow members to search holdings.",
+            "The system shall allow members to search holdings.",
+            "Members can search holdings with no network connection.",
+            "Queued updates persist locally and synchronize when connectivity returns.",
+            "The system must prevent duplicate submissions.",
+            "The system must provide a way to resolve synchronization conflicts.",
+            "Librarians can review incoming work.",
+            "Librarians can track delivery status.",
+            "Librarians can identify blockers.",
+            "Librarians can coordinate follow-up.",
+            "Integrate with the library catalog database.",
+            "Integrate with the interlibrary loan service.",
+            "Integrate with the patron identity directory.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    search_online = [
+        item
+        for item in collapsed
+        if "search holdings" in item.lower() and "network" not in item.lower()
+    ]
+    assert len(search_online) == 1
+    assert "network" in blob
+    assert "synchronize" in blob or "connectivity" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+    assert "review incoming work" in blob
+    assert "track delivery status" in blob
+    assert "identify blockers" in blob
+    assert "coordinate follow-up" in blob
+    assert "library catalog database" in blob
+    assert "interlibrary loan" in blob
+    assert "patron identity" in blob
+
+
+def test_apply_decisions_strips_verified_acceptance_without_statements():
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                "Members can search holdings.",
+                "The system must prevent duplicate submissions.",
+            ],
+            "acceptance_criteria": [
+                "A member can search holdings from the catalog.",
+                "Verified by demonstration or test that: Members can search holdings "
+                "(Source: customer clarification)",
+            ],
+        },
+        {"user_request": "x"},
+    )
+    acceptance = [str(item).lower() for item in requirements["acceptance_criteria"]]
+    assert not any("verified by demonstration" in item for item in acceptance)
+    assert any("a member can search holdings from the catalog." in item for item in acceptance)
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "search holdings" in functional
+    assert "duplicate" in functional
+
+
+def test_apply_decisions_strips_verified_acceptance_with_statements():
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": ["Members can search holdings."],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [
+                "A member can search holdings from the catalog.",
+                "Verified by demonstration or test that: Members can search holdings "
+                "(Source: customer clarification)",
+            ],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a catalog so members can search holdings.",
+            "Who will use the first release, and what will they do in it?",
+            "Librarians will also review incoming returns through a staff console.",
+        ),
+    )
+    acceptance = [str(item).lower() for item in requirements["acceptance_criteria"]]
+    assert not any("verified by demonstration" in item for item in acceptance)
+    assert any("a member can search holdings from the catalog." in item for item in acceptance)
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "search holdings" in functional
+    assert "review incoming returns" in functional
+
+
+def test_requirements_agent_strips_verified_acceptance_after_merge():
+    state = {
+        "user_request": "Build a catalog so members can search holdings.",
+        "clarification_history": [],
+        "discovery": {
+            "problem": "Catalog",
+            "business_goal": "Faster holds",
+            "users": ["Members"],
+            "stakeholders": [],
+            "existing_systems": [],
+            "constraints": [],
+            "assumptions": [],
+            "unknowns": [],
+            "clarification_questions": [],
+        },
+        "requirements": {
+            "functional_requirements": ["Members can search holdings."],
+            "acceptance_criteria": [
+                "Verified by demonstration or test that: Members can search holdings.",
+            ],
+        },
+    }
+    requirements = requirements_agent(
+        state,
+        ScriptedProvider(
+            requirements={
+                "functional_requirements": ["Members can search holdings."],
+                "non_functional_requirements": [],
+                "acceptance_criteria": [
+                    "A member can search holdings from the catalog.",
+                    "Verified by demonstration or test that: Members can create holds.",
+                ],
+                "open_questions": [],
+                "contradictions": [],
+            }
+        ),
+    )["requirements"]
+    acceptance = [str(item).lower() for item in requirements["acceptance_criteria"]]
+    assert not any("verified by demonstration" in item for item in acceptance)
+    assert any("a member can search holdings from the catalog." in item for item in acceptance)
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "search holdings" in functional
