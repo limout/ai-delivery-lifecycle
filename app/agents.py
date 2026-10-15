@@ -10,6 +10,7 @@ from app.decisions import (
     collapse_equivalent_scope_items,
     dedupe_equivalent_questions,
     drop_resolved,
+    drop_unresolved_out_of_scope_items,
     question_text,
     reconcile_discovery_actors,
     reconcile_open_questions,
@@ -1000,6 +1001,9 @@ def apply_established_scope_carry(state: dict | None) -> dict:
                 )
             )
         )
+        sow["out_of_scope"] = drop_unresolved_out_of_scope_items(
+            sow.get("out_of_scope"), state
+        )
         updates["sow"] = sow
     return updates
 
@@ -1582,9 +1586,12 @@ Return the complete requirements schema.
     requirements["functional_requirements"] = collapse_equivalent_scope_items(
         requirements.get("functional_requirements")
     )
-    requirements["acceptance_criteria"] = strip_verified_clarification_items(
-        requirements.get("acceptance_criteria")
-    )
+    if "acceptance_criteria" in requirements:
+        requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+            strip_verified_clarification_items(
+                requirements.get("acceptance_criteria")
+            )
+        )
 
     has_any_requirements = any(
         requirements.get(key)
@@ -1637,9 +1644,12 @@ request-stated outcome.
         requirements["functional_requirements"] = collapse_equivalent_scope_items(
             requirements.get("functional_requirements")
         )
-        requirements["acceptance_criteria"] = strip_verified_clarification_items(
-            requirements.get("acceptance_criteria")
-        )
+        if "acceptance_criteria" in requirements:
+            requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+                strip_verified_clarification_items(
+                    requirements.get("acceptance_criteria")
+                )
+            )
 
     return {
         "requirements": requirements,

@@ -926,6 +926,11 @@ def apply_original_scope_consistency(state: dict | None) -> dict:
             for item in sow.get("out_of_scope") or []
             if str(item).strip() and not original_scope_item_still_in_force(item, state)
         ]
+        from app.decisions import drop_unresolved_out_of_scope_items
+
+        sow["out_of_scope"] = drop_unresolved_out_of_scope_items(
+            sow["out_of_scope"], state
+        )
         updates["sow"] = sow
         state["sow"] = sow
 

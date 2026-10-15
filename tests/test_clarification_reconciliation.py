@@ -14,6 +14,7 @@ from app.agents import (
     REQUIREMENTS_SCHEMA,
     VALIDATION_SCHEMA,
     _ground_downstream_artifact,
+    apply_established_scope_carry,
     discovery_agent,
     requirements_agent,
     validation_agent,
@@ -24,6 +25,7 @@ from app.decisions import (
     apply_decisions_to_requirements,
     collapse_equivalent_scope_items,
     dedupe_equivalent_questions,
+    is_pending_text,
     questions_equivalent,
     reconcile_open_questions,
     strip_verified_clarification_items,
@@ -1304,3 +1306,221 @@ def test_requirements_agent_strips_verified_acceptance_after_merge():
     assert any("a member can search holdings from the catalog." in item for item in acceptance)
     functional = " ".join(requirements["functional_requirements"]).lower()
     assert "search holdings" in functional
+
+
+SHALL_ALLOW_VIEW = (
+    "The system shall allow technicians to view assigned sites and inspection jobs."
+)
+MUST_BE_ABLE_VIEW = (
+    "Field technicians must be able to view assigned commercial solar "
+    "installation sites and inspection jobs."
+)
+EQUIVALENT_BEHAVIOR_PAIRS = (
+    (
+        "The system shall allow technicians to access installation details "
+        "and previous inspection reports.",
+        "Field technicians must be able to access installation details and "
+        "previous inspection reports.",
+        "access installation details",
+    ),
+    (
+        "The system shall allow technicians to complete inspection checklists.",
+        "Field technicians must be able to complete inspection checklists.",
+        "complete inspection checklists",
+    ),
+    (
+        "The system shall allow technicians to record equipment defects.",
+        "Field technicians must be able to record equipment defects.",
+        "record equipment defects",
+    ),
+    (
+        "The system shall allow technicians to submit inspection reports.",
+        "Field technicians must be able to submit inspection reports.",
+        "submit inspection reports",
+    ),
+    (
+        "The system shall allow technicians to create follow-up actions.",
+        "Field technicians must be able to create follow-up actions.",
+        "create follow-up",
+    ),
+)
+
+
+def test_shall_allow_and_must_be_able_view_jobs_collapse_to_one():
+    collapsed = collapse_equivalent_scope_items(
+        [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW]
+    )
+    assert len(collapsed) == 1
+    blob = collapsed[0].lower()
+    assert "view assigned" in blob
+    assert "inspection jobs" in blob
+    reversed_order = collapse_equivalent_scope_items(
+        [MUST_BE_ABLE_VIEW, SHALL_ALLOW_VIEW]
+    )
+    assert len(reversed_order) == 1
+
+
+def test_shall_allow_and_must_be_able_equivalent_behaviors_collapse():
+    for shall, able, fragment in EQUIVALENT_BEHAVIOR_PAIRS:
+        collapsed = collapse_equivalent_scope_items([shall, able])
+        assert len(collapsed) == 1, fragment
+        assert fragment in collapsed[0].lower()
+
+
+def test_modal_collapse_keeps_distinct_checklist_defect_offline_and_integrations():
+    collapsed = collapse_equivalent_scope_items(
+        [
+            SHALL_ALLOW_VIEW,
+            MUST_BE_ABLE_VIEW,
+            "Members can complete inspection checklists.",
+            "Members can record equipment defects.",
+            "Members can complete inspection checklists and record equipment defects.",
+            "Members can search holdings with no network connection.",
+            "Queued updates persist locally and synchronize when connectivity returns.",
+            "The system must prevent duplicate submissions.",
+            "The system must provide a way to resolve synchronization conflicts.",
+            "Integrate with the asset registry.",
+            "Integrate with the project management system.",
+            "Integrate with the source-code repository.",
+        ]
+    )
+    blob = " ".join(collapsed).lower()
+    view_items = [
+        item for item in collapsed if "view assigned" in item.lower()
+    ]
+    assert len(view_items) == 1
+    assert _constituent_survives(
+        collapsed, "complete inspection checklists", "record equipment defects"
+    )
+    assert _constituent_survives(
+        collapsed, "record equipment defects", "complete inspection checklists"
+    )
+    assert "network" in blob
+    assert "synchronize" in blob or "connectivity" in blob
+    assert "duplicate" in blob
+    assert "conflict" in blob
+    assert "asset registry" in blob
+    assert "project management" in blob
+    assert "source-code" in blob
+
+
+def test_apply_decisions_collapses_equivalent_acceptance_criteria():
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": ["Technicians can view assigned jobs."],
+            "acceptance_criteria": [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW],
+        },
+        {"user_request": "x"},
+    )
+    acceptance = requirements["acceptance_criteria"]
+    assert len(acceptance) == 1
+    assert "view assigned" in acceptance[0].lower()
+
+
+def test_apply_decisions_collapses_acceptance_and_functional_with_statements():
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a mobile inspection app for field technicians.",
+            "Who will use the first release, and what will they do in it?",
+            "Field technicians will view assigned jobs.",
+        ),
+    )
+    view_frs = [
+        item
+        for item in requirements["functional_requirements"]
+        if "view assigned" in item.lower()
+    ]
+    view_acceptance = [
+        item
+        for item in requirements["acceptance_criteria"]
+        if "view assigned" in item.lower()
+    ]
+    assert len(view_frs) == 1
+    assert len(view_acceptance) == 1
+
+
+def test_apply_decisions_drops_pending_and_colon_truncated_sourced_fragments():
+    colon_fragment = (
+        "The first release must integrate with three existing systems: "
+        "(Source: customer clarification)"
+    )
+    pending_fragment = (
+        "The exact system names and integration details will be confirmed "
+        "during implementation planning (Source: customer clarification)"
+    )
+    assert is_pending_text(
+        "The exact system names and integration details will be confirmed "
+        "during implementation planning"
+    )
+    requirements = apply_decisions_to_requirements(
+        {
+            "functional_requirements": [
+                colon_fragment,
+                pending_fragment,
+                "Integrate with the asset registry.",
+                "Integrate with the project management system.",
+                "Integrate with the source-code repository.",
+            ],
+            "non_functional_requirements": [],
+            "acceptance_criteria": [colon_fragment],
+            "open_questions": [],
+            "contradictions": [],
+        },
+        _decision_state(
+            "Build a mobile inspection app for field technicians.",
+            "Which systems must the first release integrate with, and what is "
+            "the source of truth?",
+            "The first release must integrate with three existing systems:\n"
+            "The exact system names and integration details will be confirmed "
+            "during implementation planning.\n"
+            "Integrate with the asset registry. Integrate with the project "
+            "management system. Integrate with the source-code repository.",
+        ),
+    )
+    functional = " ".join(requirements["functional_requirements"]).lower()
+    assert "three existing systems:" not in functional
+    assert "will be confirmed during implementation planning" not in functional
+    assert "asset registry" in functional
+    assert "project management" in functional
+    assert "source-code repository" in functional
+    acceptance = " ".join(requirements["acceptance_criteria"]).lower()
+    assert "three existing systems:" not in acceptance
+
+
+def test_carry_collapses_modal_duplicates_across_capability_fields():
+    state = {
+        "user_request": "Build a mobile inspection app.",
+        "requirements": {
+            "functional_requirements": [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW],
+            "acceptance_criteria": [SHALL_ALLOW_VIEW, MUST_BE_ABLE_VIEW],
+        },
+        "solution": {
+            "key_capabilities": [SHALL_ALLOW_VIEW],
+            "integration_approach": [],
+        },
+        "proposal": {"scope": [MUST_BE_ABLE_VIEW]},
+        "sow": {
+            "in_scope": [SHALL_ALLOW_VIEW],
+            "acceptance": [MUST_BE_ABLE_VIEW],
+            "out_of_scope": ["Analytics"],
+        },
+    }
+    carried = apply_established_scope_carry(state)
+    for field, items in (
+        ("key_capabilities", carried["solution"]["key_capabilities"]),
+        ("scope", carried["proposal"]["scope"]),
+        ("in_scope", carried["sow"]["in_scope"]),
+        ("acceptance", carried["sow"]["acceptance"]),
+    ):
+        view_items = [
+            item for item in items if "view assigned" in str(item).lower()
+        ]
+        assert len(view_items) == 1, field
+    assert "Analytics" in carried["sow"]["out_of_scope"]

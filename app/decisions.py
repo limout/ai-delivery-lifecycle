@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 
 from app.evidence import (
+    answer_retracts_scope,
     is_non_substantive_clarification_answer,
     normalize_question_text,
     unpack_clarification_record,
@@ -66,6 +67,7 @@ _PENDING_PATTERNS = tuple(
         r"\bmust (?:still )?be (?:obtained|collected|gathered|provided)\b",
         r"\bpending\b(?![- ]sync)",
         r"\b(?:awaiting|undecided|unconfirmed|unapproved|undetermined|tbd|tbc)\b",
+        r"\b(?:will|must|should)\s+be\s+(?:confirmed|decided|approved|determined|agreed|defined|finali[sz]ed|specified|established)\b",
         r"\bto\s+be\s+(?:confirmed|decided|approved|determined|agreed|defined|finali[sz]ed)\b",
         r"\b(?:subject\s+to|needs?|requires?|awaits?|waiting\s+for)\s+(?:\w+\s+){0,3}?"
         r"(?:approval|sign-?off|confirmation)\b",
@@ -1235,6 +1237,9 @@ def strip_verified_clarification_items(items) -> list:
     return cleaned
 
 
+_MODAL_STEMS = frozenset(
+    _stem(word) for word in ("allow", "able", "enable", "permit")
+)
 _BEHAVIOR_STEMS = frozenset(
     _stem(word)
     for word in (
@@ -1275,6 +1280,11 @@ _BEHAVIOR_STEMS = frozenset(
 )
 
 
+def _comparison_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    """Drop modal scaffolding used only when testing equivalence or subsets."""
+    return frozenset(token for token in tokens if token not in _MODAL_STEMS)
+
+
 def _tokens_covered_by(candidate: frozenset[str], reference: frozenset[str]) -> bool:
     if not candidate:
         return True
@@ -1300,7 +1310,8 @@ def _is_short_paraphrase(short_tokens: frozenset[str], long_tokens: frozenset[st
 def collapse_equivalent_scope_items(items) -> list:
     """Keep one wording per behavior; never drop a distinct action or qualifier.
 
-    Later must/shall paraphrases of one kept item collapse. A short fragment
+    Later must/shall paraphrases of one kept item collapse. Modal scaffolding
+    such as allow/able is ignored only while comparing items. A short fragment
     collapses into one longer statement of the same behavior only when the
     extra tokens are not additional actions or meaningful qualifiers. A
     compound bullet does not delete its constituent behaviors, and a later
@@ -1313,7 +1324,7 @@ def collapse_equivalent_scope_items(items) -> list:
         text = str(item or "").strip()
         if not text:
             continue
-        tokens = content_tokens(_requirement_body(text))
+        tokens = _comparison_tokens(content_tokens(_requirement_body(text)))
         if any(
             _equivalent_paraphrase(tokens, existing)
             or _is_short_paraphrase(tokens, existing)
@@ -1349,6 +1360,44 @@ def collapse_equivalent_scope_items(items) -> list:
     return remaining
 
 
+def drop_unresolved_out_of_scope_items(items, state: dict | None) -> list:
+    """Keep explicit exclusions; drop bullets that only restate open decisions."""
+    kept: list[str] = []
+    open_token_sets = _unresolved_scope_token_sets(state)
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if answer_retracts_scope(text, state):
+            kept.append(text)
+            continue
+        if _restates_unresolved_scope(text, open_token_sets):
+            continue
+        kept.append(text)
+    return kept
+
+
+def _unresolved_scope_token_sets(state: dict | None) -> list[frozenset[str]]:
+    decisions = ClarificationDecisions(state)
+    units = [statement.text for statement in decisions.pending]
+    units.extend(decisions.remainder_questions())
+    units.extend(unanswered_request_items(state))
+    return [content_tokens(text) for text in units if str(text or "").strip()]
+
+
+def _restates_unresolved_scope(text: str, open_token_sets: list[frozenset[str]]) -> bool:
+    if is_pending_text(text):
+        return True
+    tokens = content_tokens(text)
+    if not tokens:
+        return False
+    for other in open_token_sets:
+        shared = tokens & other
+        if len(shared) >= 2 and (shared & _BEHAVIOR_STEMS):
+            return True
+    return False
+
+
 def _sentence_case(text: str) -> str:
     text = text.strip().rstrip(".;")
     return text[:1].upper() + text[1:] if text else text
@@ -1375,6 +1424,12 @@ def _is_non_product_requirement(text: str) -> bool:
     return bool(_PLANNING_FACT.search(body) or _EXISTING_EVIDENCE.search(body))
 
 
+def _is_incomplete_requirement_fragment(text: str) -> bool:
+    """True for colon-truncated or empty clarification leftovers, not named requirements."""
+    body = _requirement_body(text).rstrip()
+    return (not body) or body.endswith(":")
+
+
 def _unsupported_resolution_policy(text: str, decisions: ClarificationDecisions) -> bool:
     """True when a generated last-write/overwrite policy was not customer-confirmed."""
     if not _RESOLUTION_POLICY.search(str(text or "")):
@@ -1385,6 +1440,10 @@ def _unsupported_resolution_policy(text: str, decisions: ClarificationDecisions)
 def _is_product_statement(statement: ClarifiedStatement) -> bool:
     blob = f"{statement.question} {statement.text}"
     if _DELIVERY_ADMIN.search(blob):
+        return False
+    if is_pending_text(statement.text):
+        return False
+    if _is_incomplete_requirement_fragment(statement.text):
         return False
     if _is_non_product_requirement(statement.text):
         return False
@@ -1397,6 +1456,8 @@ def _filter_requirement_list(items: list[str], decisions: ClarificationDecisions
         for item in items
         if not _is_non_product_requirement(item)
         and not _unsupported_resolution_policy(item, decisions)
+        and not is_pending_text(_requirement_body(item))
+        and not _is_incomplete_requirement_fragment(item)
     ]
 
 
@@ -1413,8 +1474,10 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
     decisions = ClarificationDecisions(state)
     if not decisions.statements:
         if "acceptance_criteria" in requirements:
-            requirements["acceptance_criteria"] = strip_verified_clarification_items(
-                requirements.get("acceptance_criteria")
+            requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+                strip_verified_clarification_items(
+                    requirements.get("acceptance_criteria")
+                )
             )
         return requirements
 
@@ -1451,7 +1514,9 @@ def apply_decisions_to_requirements(requirements: dict | None, state: dict | Non
 
     requirements["functional_requirements"] = collapse_equivalent_scope_items(functional)
     requirements["non_functional_requirements"] = non_functional
-    requirements["acceptance_criteria"] = strip_verified_clarification_items(acceptance)
+    requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+        strip_verified_clarification_items(acceptance)
+    )
     requirements["open_questions"] = [question_text(item) for item in open_questions]
     requirements["clarified_decisions"] = [
         {

@@ -1070,3 +1070,99 @@ def test_prohibition_is_removed_from_final_in_scope_artifacts(domain):
     assert domain["original_user"].lower() in _blob(
         (payload.get("discovery") or {}).get("users")
     )
+
+
+def test_unresolved_offline_is_not_converted_to_out_of_scope():
+    request = (
+        "Build a mobile inspection app for field technicians. They need to "
+        "work at remote sites with unreliable mobile connectivity, but the "
+        "exact offline behavior and synchronization rules have not yet been "
+        "defined."
+    )
+    answer = (
+        "Field technicians will view assigned jobs. The exact offline "
+        "behavior and synchronization rules have not yet been defined."
+    )
+    payload = _complete(
+        {
+            "user_request": request,
+            "clarification_history": [
+                {
+                    "question": "What are the offline behavior and synchronization rules?",
+                    "answer": answer,
+                }
+            ],
+            "discovery": _discovery(["Field technicians"]),
+            "requirements": _requirements(
+                ["Field technicians can view assigned jobs."]
+            ),
+            "solution": {
+                "solution_summary": "A mobile inspection app.",
+                "key_capabilities": ["View assigned jobs"],
+                "integration_approach": [],
+            },
+            "proposal": {
+                "executive_summary": "A mobile inspection app.",
+                "scope": ["View assigned jobs"],
+            },
+            "sow": {
+                "objectives": ["Inspect remote sites"],
+                "deliverables": ["Increment"],
+                "in_scope": ["View assigned jobs"],
+                "out_of_scope": [
+                    "Extended offline storage and synchronization",
+                    "Analytics",
+                ],
+                "acceptance": ["A technician can view assigned jobs."],
+            },
+        }
+    )
+    out_of_scope = _blob((payload.get("sow") or {}).get("out_of_scope"))
+    assert "offline" not in out_of_scope
+    assert "synchron" not in out_of_scope
+    assert "analytics" in out_of_scope
+
+
+def test_explicitly_excluded_scope_remains_out_of_scope():
+    request = (
+        "Build a mobile application so inspectors can search assigned sites "
+        "and create inspection reports."
+    )
+    answer = (
+        "Replace the mobile app with a web portal; the mobile app is no longer "
+        "in scope."
+    )
+    payload = _complete(
+        {
+            "user_request": request,
+            "clarification_history": [
+                {
+                    "question": "Should the first release be a mobile app or a web portal?",
+                    "answer": answer,
+                }
+            ],
+            "discovery": _discovery(["Inspectors"]),
+            "requirements": _requirements(
+                ["Inspectors can search assigned sites."]
+            ),
+            "solution": {
+                "solution_summary": "A web portal.",
+                "key_capabilities": ["Web portal work review"],
+                "integration_approach": [],
+            },
+            "proposal": {
+                "executive_summary": "Web portal",
+                "scope": ["Web portal for inspectors"],
+            },
+            "sow": {
+                "objectives": ["Web portal"],
+                "deliverables": ["Increment"],
+                "in_scope": ["Web portal for inspectors"],
+                "out_of_scope": ["The mobile app", "Analytics"],
+                "acceptance": ["A coordinator can review work"],
+            },
+        }
+    )
+    out_of_scope = _blob((payload.get("sow") or {}).get("out_of_scope"))
+    assert "mobile app" in out_of_scope
+    assert "analytics" in out_of_scope
