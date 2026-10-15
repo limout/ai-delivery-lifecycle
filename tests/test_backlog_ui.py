@@ -70,6 +70,7 @@ class BacklogWakeUi:
         self.status_checks = 0
         self.error = ""
         self.retry_visible = False
+        self.progress = ""
         self.label = "Backlog Agent availability is unknown."
 
     def _label(self):
@@ -117,7 +118,15 @@ class BacklogWakeUi:
                 self.startup_failed = False
         self.retry_visible = self.startup_failed
         self.label = self._label()
+        self.progress = self._progress()
         self.poll_interval_ms = WAKE_POLL_MS if self._needs_wake() else IDLE_POLL_MS
+
+    def _progress(self):
+        if not self.generating:
+            return ""
+        if self.status == "ready":
+            return "Generating backlog…"
+        return "Starting backlog service…"
 
     def _needs_wake(self):
         if self.status in PERMANENT_STATUSES or self.startup_failed or self.status == "ready":
@@ -141,26 +150,26 @@ class BacklogWakeUi:
     def click_generate(self):
         if self.generating:
             return
-        if self.status != "ready":
-            if not can_queue_backlog_generate(
-                {"status": "COMPLETE", "workflow_status": "COMPLETE"},
-                self.status,
-                generating=self.generating,
-                pending=self.pending_generate,
-                startup_failed=self.startup_failed,
-            ):
-                return
-            self.pending_generate = True
+        envelope = {"status": "COMPLETE", "workflow_status": "COMPLETE"}
+        if not can_queue_backlog_generate(
+            envelope,
+            self.status,
+            generating=self.generating,
+            pending=self.pending_generate,
+            startup_failed=self.startup_failed,
+        ):
             return
-        self._post_generate_once()
-
-    def _post_generate_once(self):
-        if self.generating:
-            return
-        self.pending_generate = False
+        self.pending_generate = self.status != "ready"
         self.generating = True
         self.generate_posts += 1
+        self.progress = self._progress()
+
+    def finish_generate(self, *, ok=True, message=""):
         self.generating = False
+        self.pending_generate = False
+        self.progress = ""
+        if not ok:
+            self.error = message
 
     def on_status(self, status, now_ms):
         if self.status_in_flight:
@@ -169,8 +178,7 @@ class BacklogWakeUi:
         self.status_checks += 1
         self.apply_status(status, now_ms)
         self.status_in_flight = False
-        if self.pending_generate and not self.generating and self.status == "ready":
-            self._post_generate_once()
+        self.progress = self._progress()
 
 
 def should_poll_backlog_status(current_tab, page_hidden):
@@ -471,6 +479,12 @@ def test_generate_posts_copilot_backlog_once_with_envelope():
     assert "isCompleteEnvelope(envelope)" in source
     assert "backlogGenerating" in source
     assert "backlogPendingGenerate" in source
+    assert "if (backlogGenerating || backlogAbort) return;" in source
+    assert "AbortController" in source
+    assert "pagehide" in INDEX
+    assert "cancelBacklogGenerate" in INDEX
+    assert "Generating backlog…" in INDEX
+    assert "backlogFailureMessage" in source
     assert "selectTab('backlog')" not in source
     assert "generateBacklog()" not in INDEX.split("function selectTab", 1)[1].split("function formatExportSection", 1)[0]
 
@@ -612,11 +626,43 @@ def test_pending_generate_resumes_once():
     ui.click_generate()
     ui.click_generate()
     assert ui.pending_generate is True
-    assert ui.generate_posts == 0
+    assert ui.generating is True
+    assert ui.generate_posts == 1
+    assert ui.progress == "Starting backlog service…"
     ui.on_status("ready", 6000)
     assert ui.generate_posts == 1
+    assert ui.progress == "Generating backlog…"
     ui.on_status("ready", 9000)
     assert ui.generate_posts == 1
+    ui.finish_generate()
+    assert ui.generating is False
+    assert ui.progress == ""
+
+
+def test_generation_failure_stops_spinner():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("ready", 0)
+    ui.click_generate()
+    assert ui.progress == "Generating backlog…"
+    ui.finish_generate(ok=False, message="Backlog Agent returned an error. (stage: generate, HTTP 500)")
+    assert ui.generating is False
+    assert ui.progress == ""
+    assert "stage: generate" in ui.error
+    assert "HTTP 500" in ui.error
+
+
+def test_duplicate_click_does_not_start_second_generate():
+    ui = BacklogWakeUi()
+    ui.open_tab(0)
+    ui.on_status("ready", 0)
+    ui.click_generate()
+    ui.click_generate()
+    ui.click_generate()
+    assert ui.generate_posts == 1
+    ui.finish_generate()
+    ui.click_generate()
+    assert ui.generate_posts == 2
 
 
 def test_ui_exposes_retry_without_agent_token():

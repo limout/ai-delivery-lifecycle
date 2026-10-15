@@ -2932,6 +2932,7 @@ function updateRunningStatus(message) {
     let backlogPollTimer = null;
     let backlogPollIntervalMs = 0;
     let backlogStatusInFlight = false;
+    let backlogAbort = null;
     let backlogIndex = null;
 
     function workflowKey(data) {
@@ -2997,6 +2998,20 @@ function updateRunningStatus(message) {
         element.classList.toggle("hidden", !message);
     }
 
+    function backlogFailureMessage(payload, response) {
+        const message = payload && (payload.message || payload.error)
+            ? String(payload.message || payload.error)
+            : "Backlog generation did not complete.";
+        const stage = payload && payload.stage ? String(payload.stage) : "generate";
+        const httpStatus = payload && payload.http_status != null
+            ? payload.http_status
+            : (response ? response.status : "");
+        if (httpStatus === "" || httpStatus == null) {
+            return message + " (stage: " + stage + ")";
+        }
+        return message + " (stage: " + stage + ", HTTP " + httpStatus + ")";
+    }
+
     function backlogStatusLabel(status) {
         if (status === "ready") return "Backlog Agent is ready.";
         if (status === "not_configured") {
@@ -3035,10 +3050,11 @@ function updateRunningStatus(message) {
             retryButton.classList.toggle("hidden", !backlogStartupFailed);
             retryButton.disabled = backlogGenerating;
         }
-        setHidden("backlogGenerateProgress", !(backlogGenerating || waiting || backlogAgentStatus === "starting"));
+        const waking = waiting && !backlogStartupFailed;
+        setHidden("backlogGenerateProgress", !(backlogGenerating || waking));
         const progress = document.getElementById("backlogGenerateProgress");
         if (progress && !progress.classList.contains("hidden")) {
-            progress.textContent = backlogGenerating
+            progress.textContent = backlogGenerating && backlogAgentStatus === "ready"
                 ? "Generating backlog…"
                 : "Starting backlog service…";
         }
@@ -3141,10 +3157,20 @@ function updateRunningStatus(message) {
     }
 
     function maybeResumePendingGenerate() {
-        if (!backlogPendingGenerate || backlogGenerating) return;
-        if (backlogAgentStatus !== "ready") return;
+        if (backlogGenerating || backlogAbort) return;
+        if (!backlogPendingGenerate || backlogAgentStatus !== "ready") return;
         backlogPendingGenerate = false;
         generateBacklog();
+    }
+
+    function cancelBacklogGenerate() {
+        if (backlogAbort) {
+            backlogAbort.abort();
+            backlogAbort = null;
+        }
+        backlogGenerating = false;
+        backlogPendingGenerate = false;
+        updateBacklogGenerateButton();
     }
 
     function applyBacklogStatus(status) {
@@ -3219,11 +3245,11 @@ function updateRunningStatus(message) {
     }
 
     async function generateBacklog() {
-        if (backlogGenerating) return;
+        if (backlogGenerating || backlogAbort) return;
         const envelope = currentData;
         if (!isCompleteEnvelope(envelope)) return;
+        if (!canQueueBacklogGenerate() && backlogAgentStatus !== "ready") return;
         if (backlogAgentStatus !== "ready") {
-            if (!canQueueBacklogGenerate()) return;
             backlogPendingGenerate = true;
             if (!backlogWakeDeadline || backlogStartupFailed) {
                 backlogWakeDeadline = Date.now() + BACKLOG_WAKE_BUDGET_MS;
@@ -3232,23 +3258,20 @@ function updateRunningStatus(message) {
             if (backlogAgentStatus === "unknown" || backlogAgentStatus === "unavailable") {
                 backlogAgentStatus = "starting";
             }
-            setBacklogError("");
-            updateBacklogGenerateButton();
-            checkBacklogStatus();
-            ensureBacklogStatusPolling();
-            return;
-        }
-        if (backlogPendingGenerate) {
-            backlogPendingGenerate = false;
         }
         backlogGenerating = true;
         setBacklogError("");
         updateBacklogGenerateButton();
+        const controller = new AbortController();
+        backlogAbort = controller;
+        checkBacklogStatus();
+        ensureBacklogStatusPolling();
         try {
             const response = await fetch("/backlog", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(envelope)
+                body: JSON.stringify(envelope),
+                signal: controller.signal
             });
             let payload = null;
             try {
@@ -3258,28 +3281,21 @@ function updateRunningStatus(message) {
             }
             if (!response.ok) {
                 const error = payload && payload.error ? String(payload.error) : "";
-                const message = payload && (payload.message || payload.error)
-                    ? String(payload.message || payload.error)
-                    : "Backlog generation did not complete.";
-                if (error === "BACKLOG_STARTING") {
-                    backlogPendingGenerate = true;
-                    applyBacklogStatus("starting");
-                    setBacklogError("");
-                    ensureBacklogStatusPolling();
-                    return;
-                }
                 if (error === "BACKLOG_NOT_CONFIGURED") {
                     applyBacklogStatus("not_configured");
                 } else if (error === "BACKLOG_INVALID_URL") {
                     applyBacklogStatus("invalid_url");
                 } else if (error === "BACKLOG_UNAUTHORIZED") {
                     applyBacklogStatus("unauthorized");
+                } else if (error === "BACKLOG_STARTING") {
+                    applyBacklogStatus("starting");
+                    backlogStartupFailed = true;
                 }
-                setBacklogError(message);
+                setBacklogError(backlogFailureMessage(payload, response));
                 return;
             }
             if (!payload || typeof payload !== "object" || !("backlog" in payload) || !("findings" in payload)) {
-                setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown.");
+                setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown. (stage: generate)");
                 return;
             }
             backlogResult = payload;
@@ -3287,10 +3303,16 @@ function updateRunningStatus(message) {
             const findingsEl = document.getElementById("backlogFindings");
             if (findingsEl) findingsEl.innerHTML = "";
             renderBacklogViewer(payload);
-        } catch (_) {
-            setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown.");
+        } catch (err) {
+            if (err && err.name === "AbortError") {
+                setBacklogError("");
+                return;
+            }
+            setBacklogError("Backlog generation did not return a confirmed result. The outcome is unknown. (stage: generate)");
         } finally {
+            if (backlogAbort === controller) backlogAbort = null;
             backlogGenerating = false;
+            backlogPendingGenerate = false;
             updateBacklogGenerateButton();
         }
     }
@@ -3780,6 +3802,10 @@ function updateRunningStatus(message) {
         if (currentArtifactTab === "backlog") {
             startBacklogStatusPolling();
         }
+    });
+    window.addEventListener("pagehide", () => {
+        cancelBacklogGenerate();
+        stopBacklogStatusPolling();
     });
 
     const generateBacklogButton = document.getElementById("generateBacklogButton");

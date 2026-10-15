@@ -52,8 +52,8 @@ def _configure(monkeypatch) -> None:
     monkeypatch.setenv("BACKLOG_AGENT_URL", AGENT_URL)
     monkeypatch.setenv("BACKLOG_API_TOKEN", AGENT_TOKEN)
     monkeypatch.setenv("BACKLOG_AGENT_TIMEOUT_SECONDS", "300")
-    monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "180")
-    monkeypatch.setenv("BACKLOG_AGENT_HEALTH_TIMEOUT_SECONDS", "75")
+    monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("BACKLOG_AGENT_HEALTH_TIMEOUT_SECONDS", "5")
 
 
 def _assert_status(response, status: str, *, available: bool) -> dict:
@@ -137,8 +137,8 @@ def test_backlog_status_ready(monkeypatch):
     assert all(call["method"] != "POST" for call in calls)
     timeout = clients[0]["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.read == 75.0
-    assert timeout.connect == 20.0
+    assert timeout.read == 5.0
+    assert timeout.connect == 5.0
     assert clients[0]["follow_redirects"] is True
 
 
@@ -286,19 +286,69 @@ def test_sleeping_service_becomes_ready_after_transient_status_probes(monkeypatc
     assert sum(1 for call in calls if call["method"] == "POST") == 1
 
 
-def test_generate_while_sleeping_does_not_wait_or_submit(monkeypatch):
+def test_generate_wakes_sleeping_service_then_posts_once(monkeypatch):
     _configure(monkeypatch)
     calls, _clients, clock, _started = _patch_http(
         monkeypatch,
-        [httpx.ConnectError("connection refused")],
+        [
+            httpx.ConnectError("connection refused"),
+            _response(503, {"status": "starting"}),
+            httpx.TimeoutException("timed out"),
+            _ok_health(),
+            _response(200, SUCCESS_PAYLOAD),
+        ],
+    )
+
+    response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    assert response.status_code == 200
+    assert response.json() == SUCCESS_PAYLOAD
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "GET", "POST"]
+    assert calls[-1]["url"] == f"{AGENT_URL}/generate"
+    assert calls[-1]["json"] == COMPLETE_ENVELOPE
+    assert clock["t"] >= 2.0
+    assert clock["t"] <= 9.0
+    assert sum(1 for call in calls if call["url"].endswith("/generate")) == 1
+
+
+def test_generate_cold_start_timeout_does_not_post(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "2.5")
+    calls, _clients, clock, _started = _patch_http(
+        monkeypatch,
+        [
+            httpx.TimeoutException("timed out"),
+            httpx.ConnectError("connection refused"),
+            httpx.TimeoutException("timed out"),
+        ],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
 
     assert response.status_code == 503
-    assert response.json()["error"] == "BACKLOG_STARTING"
-    assert all(call["method"] != "POST" for call in calls)
-    assert clock["t"] == 0.0
+    data = response.json()
+    assert data["error"] == "BACKLOG_STARTING"
+    assert data["stage"] == "health"
+    assert all(not call["url"].endswith("/generate") for call in calls)
+    assert len([call for call in calls if call["method"] == "GET"]) >= 2
+    assert clock["t"] >= 2.0
+
+
+def test_generate_normalizes_base_url(monkeypatch):
+    monkeypatch.setenv("BACKLOG_AGENT_URL", f"{AGENT_URL}/health/")
+    monkeypatch.setenv("BACKLOG_API_TOKEN", AGENT_TOKEN)
+    monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "120")
+    calls, _clients, _clock, _started = _patch_http(
+        monkeypatch,
+        [_ok_health(), _response(200, SUCCESS_PAYLOAD)],
+    )
+
+    response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == f"{AGENT_URL}/health"
+    assert calls[1]["url"] == f"{AGENT_URL}/generate"
+    assert calls[1]["json"] == COMPLETE_ENVELOPE
 
 
 def test_concurrent_status_probes_share_one_health_request(monkeypatch):

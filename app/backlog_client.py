@@ -14,11 +14,13 @@ import httpx
 _LOG = logging.getLogger("app.backlog_client")
 
 _DEFAULT_GENERATE_TIMEOUT = 300.0
-_DEFAULT_STARTUP_TIMEOUT = 180.0
-_WAKE_CONNECT_TIMEOUT = 20.0
-_WAKE_READ_TIMEOUT = 75.0
-_WAKE_WRITE_TIMEOUT = 15.0
-_WAKE_POOL_TIMEOUT = 15.0
+_DEFAULT_STARTUP_TIMEOUT = 120.0
+_WAKE_CONNECT_TIMEOUT = 5.0
+_WAKE_READ_TIMEOUT = 5.0
+_WAKE_WRITE_TIMEOUT = 5.0
+_WAKE_POOL_TIMEOUT = 5.0
+_WAKE_DELAY_SECONDS = 2.0
+_WAKE_DELAY_MAX_SECONDS = 3.0
 _TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
 _AUTH_HTTP = frozenset({401, 403})
 _REDIRECT_HTTP = frozenset({301, 302, 303, 307, 308})
@@ -44,25 +46,47 @@ class BacklogInvalidUrlError(Exception):
 class BacklogNotReadyError(Exception):
     """Health checks did not become ready within the startup window."""
 
+    def __init__(self, http_status: int | None = None) -> None:
+        super().__init__("backlog agent did not become ready")
+        self.stage = "health"
+        self.http_status = http_status
+
 
 class BacklogUnavailableError(Exception):
     """Backlog Agent is not reachable or not healthy."""
+
+    def __init__(self, http_status: int | None = None, stage: str = "health") -> None:
+        super().__init__("backlog agent is unavailable")
+        self.stage = stage
+        self.http_status = http_status
 
 
 class BacklogUnauthorizedError(Exception):
     """Backlog Agent rejected the bearer token."""
 
+    def __init__(self, http_status: int | None = None, stage: str = "health") -> None:
+        super().__init__("backlog agent rejected the bearer token")
+        self.stage = stage
+        self.http_status = http_status
+
 
 class BacklogGenerationUnconfirmedError(Exception):
     """POST /generate timed out or was interrupted; the result is unknown."""
+
+    def __init__(self) -> None:
+        super().__init__("backlog generation did not return a confirmed result")
+        self.stage = "generate"
+        self.http_status = None
 
 
 class BacklogDownstreamError(Exception):
     """The Backlog Agent returned a non-success HTTP status."""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, stage: str = "generate") -> None:
         super().__init__("backlog agent returned an error")
         self.status_code = status_code
+        self.stage = stage
+        self.http_status = status_code
 
 
 def reset_wake_state() -> None:
@@ -89,9 +113,13 @@ def _env_float(name: str, default: float) -> float:
 def _normalized_agent_url(raw: str) -> str | None:
     url = raw.strip().rstrip("/")
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
         return None
-    return url
+    path = parsed.path.rstrip("/")
+    for suffix in ("/health", "/generate"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
 
 
 def _settings() -> tuple[str, str, float, float]:
@@ -110,13 +138,7 @@ def _settings() -> tuple[str, str, float, float]:
 
 
 def _wake_timeout() -> httpx.Timeout:
-    """Hold the health request long enough for Render to boot the instance.
-
-    A sleeping Free service accepts the proxy connection, then produces no
-    response until the process is up. Aborting that wait (a 5s timeout) cancels
-    the request that would have started the service; a browser load succeeds
-    because it waits. Connect is bounded separately from the read wait.
-    """
+    """Bound one health attempt. The startup window, not this timeout, waits for boot."""
 
     read_timeout = _env_float("BACKLOG_AGENT_HEALTH_TIMEOUT_SECONDS", _WAKE_READ_TIMEOUT)
     return httpx.Timeout(
@@ -144,13 +166,17 @@ def _status_payload(
     *,
     attempt: int = 0,
     elapsed_seconds: float = 0.0,
-) -> dict[str, bool | str | int | float]:
-    return {
+    http_status: int | None = None,
+) -> dict[str, bool | str | int | float | None]:
+    payload: dict[str, bool | str | int | float | None] = {
         "available": status == "ready",
         "status": status,
         "attempt": attempt,
         "elapsed_seconds": round(max(0.0, elapsed_seconds), 3),
     }
+    if http_status is not None:
+        payload["http_status"] = http_status
+    return payload
 
 
 def _classify_health_response(response: httpx.Response) -> str:
@@ -220,7 +246,12 @@ async def _probe_health_once(url: str) -> dict[str, bool | str | int | float]:
     if outcome == "ready":
         _probe_started_at = None
         _probe_attempt = 0
-    return _status_payload(outcome, attempt=attempt, elapsed_seconds=elapsed)
+    return _status_payload(
+        outcome,
+        attempt=attempt,
+        elapsed_seconds=elapsed,
+        http_status=response.status_code,
+    )
 
 
 async def _coalesced_probe(url: str) -> dict[str, bool | str | int | float]:
@@ -250,22 +281,54 @@ async def backlog_status() -> dict[str, bool | str | int | float]:
     return await _coalesced_probe(url)
 
 
-def _raise_for_status_outcome(outcome: str) -> None:
+def _http_status_of(health: dict[str, bool | str | int | float | None]) -> int | None:
+    value = health.get("http_status")
+    return value if isinstance(value, int) else None
+
+
+def _raise_for_status_outcome(
+    outcome: str,
+    http_status: int | None = None,
+) -> None:
     if outcome == "ready":
         return
     if outcome == "unauthorized":
-        raise BacklogUnauthorizedError
+        raise BacklogUnauthorizedError(http_status, stage="health")
     if outcome == "unavailable":
-        raise BacklogUnavailableError
-    raise BacklogNotReadyError
+        raise BacklogUnavailableError(http_status, stage="health")
+    raise BacklogNotReadyError(http_status)
+
+
+async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
+    """Poll GET /health until ready, or fail when the cold-start window ends."""
+
+    deadline = _now() + startup_timeout
+    delay = _WAKE_DELAY_SECONDS
+    last_http_status: int | None = None
+    while True:
+        if _now() >= deadline:
+            raise BacklogNotReadyError(last_http_status)
+        health = await _probe_health_once(url)
+        outcome = str(health["status"])
+        last_http_status = _http_status_of(health)
+        if outcome == "ready":
+            return
+        if outcome in {"unauthorized", "unavailable"}:
+            _raise_for_status_outcome(outcome, last_http_status)
+        remaining = deadline - _now()
+        if remaining <= 0:
+            raise BacklogNotReadyError(last_http_status)
+        await asyncio.sleep(min(delay, remaining))
+        delay = min(_WAKE_DELAY_MAX_SECONDS, delay + 0.5)
+        if _now() >= deadline:
+            raise BacklogNotReadyError(last_http_status)
 
 
 async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Confirm health with one coalesced probe, then POST /generate exactly once."""
+    """Wake the Backlog Agent, then POST the original envelope exactly once."""
 
-    url, token, generate_timeout, _startup_timeout = _settings()
-    health = await _coalesced_probe(url)
-    _raise_for_status_outcome(str(health["status"]))
+    url, token, generate_timeout, startup_timeout = _settings()
+    await _await_backlog_ready(url, startup_timeout)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -278,7 +341,7 @@ async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
         raise BacklogGenerationUnconfirmedError from None
 
     if response.status_code in _AUTH_HTTP:
-        raise BacklogUnauthorizedError
+        raise BacklogUnauthorizedError(response.status_code, stage="generate")
     if response.status_code == 200:
         try:
             payload = response.json()

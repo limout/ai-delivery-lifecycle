@@ -1038,6 +1038,24 @@ async def backlog_agent_status() -> dict:
     return await backlog_status()
 
 
+def _backlog_failure(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    stage: str,
+    http_status: int | None = None,
+) -> JSONResponse:
+    content: dict[str, str | int] = {
+        "error": code,
+        "message": message,
+        "stage": stage,
+    }
+    if http_status is not None:
+        content["http_status"] = http_status
+    return JSONResponse(status_code=status_code, content=content)
+
+
 @router.post("/backlog")
 async def create_backlog(payload: dict):
     if not _complete_envelope(payload):
@@ -1051,64 +1069,64 @@ async def create_backlog(payload: dict):
     try:
         return await generate_backlog(payload)
     except BacklogConfigError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "BACKLOG_NOT_CONFIGURED",
-                "message": "Backlog Agent is not configured.",
-            },
+        return _backlog_failure(
+            503,
+            "BACKLOG_NOT_CONFIGURED",
+            "Backlog Agent is not configured.",
+            stage="configuration",
         )
     except BacklogInvalidUrlError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "BACKLOG_INVALID_URL",
-                "message": "Backlog Agent URL is invalid.",
-            },
+        return _backlog_failure(
+            503,
+            "BACKLOG_INVALID_URL",
+            "Backlog Agent URL is invalid.",
+            stage="configuration",
         )
-    except BacklogNotReadyError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "BACKLOG_STARTING",
-                "message": "Backlog Agent did not become ready in time.",
-            },
+    except BacklogNotReadyError as exc:
+        return _backlog_failure(
+            503,
+            "BACKLOG_STARTING",
+            "Backlog Agent did not become ready in time.",
+            stage=exc.stage,
+            http_status=exc.http_status,
         )
-    except BacklogUnauthorizedError:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "error": "BACKLOG_UNAUTHORIZED",
-                "message": "Backlog Agent authentication failed.",
-            },
+    except BacklogUnauthorizedError as exc:
+        return _backlog_failure(
+            401,
+            "BACKLOG_UNAUTHORIZED",
+            "Backlog Agent authentication failed.",
+            stage=exc.stage,
+            http_status=exc.http_status,
         )
-    except BacklogUnavailableError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "BACKLOG_UNAVAILABLE",
-                "message": "Backlog Agent is unavailable.",
-            },
+    except BacklogUnavailableError as exc:
+        return _backlog_failure(
+            503,
+            "BACKLOG_UNAVAILABLE",
+            "Backlog Agent is unavailable.",
+            stage=exc.stage,
+            http_status=exc.http_status,
         )
-    except BacklogGenerationUnconfirmedError:
-        return JSONResponse(
-            status_code=504,
-            content={
-                "error": "BACKLOG_GENERATION_UNCONFIRMED",
-                "message": "Backlog generation did not return a confirmed result. The outcome is unknown.",
-            },
+    except BacklogGenerationUnconfirmedError as exc:
+        return _backlog_failure(
+            504,
+            "BACKLOG_GENERATION_UNCONFIRMED",
+            "Backlog generation did not return a confirmed result. The outcome is unknown.",
+            stage=exc.stage,
         )
     except BacklogDownstreamError as exc:
         status_code = 422 if exc.status_code == 422 else 502
         code = "BACKLOG_REJECTED" if exc.status_code == 422 else "BACKLOG_DOWNSTREAM_ERROR"
-        return JSONResponse(
-            status_code=status_code,
-            content={
-                "error": code,
-                "message": "Backlog Agent rejected the request."
-                if exc.status_code == 422
-                else "Backlog Agent returned an error.",
-            },
+        message = (
+            "Backlog Agent rejected the request."
+            if exc.status_code == 422
+            else "Backlog Agent returned an error."
+        )
+        return _backlog_failure(
+            status_code,
+            code,
+            message,
+            stage=exc.stage,
+            http_status=exc.http_status,
         )
 
 
