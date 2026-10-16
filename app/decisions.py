@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.assessment import repair_generated_grammar
 from app.evidence import (
     _GENERIC_OBJECT_TOKENS,
     answer_retracts_scope,
@@ -1580,15 +1581,50 @@ def _nominal_integration_summary(index, other, behavior, texts, signatures) -> b
     )
 
 
+def _behavior_statement(family: str, obj: str) -> str:
+    """One finite line for a behavior that a compound stated but did not keep."""
+    object_text = " ".join(part for part in str(obj or "").split() if part)
+    if object_text:
+        return f"The system shall {family} {object_text}."
+    return f"The system shall {family}."
+
+
+def _standalone_label(text: str, others: list[str]) -> bool:
+    """A short name that adds no behavior already stated by another item."""
+    raw = str(text or "").strip()
+    if not raw or re.search(r"\b(?:shall|must|should|given|when|then)\b", raw, re.I):
+        return False
+    if behavior_signatures(raw):
+        return False
+    words = re.findall(r"[A-Za-z0-9]+", raw)
+    if not words or len(words) > 3:
+        return False
+    tokens = [word.lower() for word in words if len(word) > 1]
+    if not tokens:
+        return False
+    for other in others:
+        if other == raw or not behavior_signatures(other):
+            continue
+        other_tokens = {word.lower() for word in re.findall(r"[A-Za-z0-9]+", other)}
+        if all(token in other_tokens for token in tokens):
+            return True
+    return False
+
+
 def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
     """Drop same-behavior paraphrases. Keep distinct behaviors.
 
     A compound is removed only when every behavior it states is already a
-    separate item. A compound that adds a behavior the other items do not
-    state is kept, with an actionable finding. Items with no recognized
-    behavior are left unchanged.
+    separate item. When a compound also states a behavior the other items
+    do not, that remaining behavior is kept as its own line. A short name
+    with no behavior of its own is dropped when a fuller item already
+    names it. Unrecognized statements are left unchanged.
     """
-    texts = [str(item or "").strip() for item in items or [] if str(item or "").strip()]
+    texts = [
+        repair_generated_grammar(str(item or "").strip())
+        for item in items or []
+        if str(item or "").strip()
+    ]
     signatures = [behavior_signatures(text) for text in texts]
     conditions = [_condition_key(text) for text in texts]
     kept: list[int] = []
@@ -1717,19 +1753,46 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 index, [other for other in kept if other not in redundant]
             )
             if represented and missing:
+                missing_families = {family for family, _obj in missing}
+                if "integrate" in missing_families and _statement_rank(text)[0] == 1:
+                    final.append(text)
+                    continue
+                replacements = []
+                existing = {item.lower() for item in final}
+                for family, obj in missing:
+                    line = _behavior_statement(family, obj)
+                    if line.lower() in existing:
+                        continue
+                    replacements.append(line)
+                    existing.add(line.lower())
                 findings.append(
                     {
-                        "code": "AMBIGUOUS_OVERLAP",
-                        "item": text,
-                        "overlaps": represented,
+                        "code": "COMPOUND_SPLIT",
+                        "removed": text,
+                        "kept": replacements or represented,
                         "reason": (
-                            "This item overlaps an existing behavior and also states "
-                            "a distinct one. It was left unchanged."
+                            "Overlapping wording was removed. "
+                            "The behavior that was not already stated was kept separately."
                         ),
                     }
                 )
+                final.extend(replacements)
+                continue
         final.append(text)
-    return final, findings
+    labeled = []
+    for text in final:
+        if _standalone_label(text, final):
+            findings.append(
+                {
+                    "code": "LABEL_ABSORBED",
+                    "removed": text,
+                    "kept": "",
+                    "reason": "The item names a technology already stated by another requirement.",
+                }
+            )
+            continue
+        labeled.append(text)
+    return labeled, findings
 
 
 _FINAL_SCOPE_FIELDS = (
@@ -1798,23 +1861,26 @@ def final_artifact_defects(payload: dict | None) -> list[dict]:
         artifact = payload.get(artifact_key)
         if not isinstance(artifact, dict):
             continue
-        _kept, findings = normalize_paraphrase_duplicates(artifact.get(field) or [])
+        current = [str(entry).strip() for entry in artifact.get(field) or [] if str(entry).strip()]
+        _kept, findings = normalize_paraphrase_duplicates(current)
+        seen_subjects: set[str] = set()
         for item in findings:
-            if item.get("code") not in {
-                "EXACT_DUPLICATE",
-                "PARAPHRASE_COLLAPSED",
-                "COMPOUND_REDUNDANT",
-            }:
+            if not isinstance(item, dict):
                 continue
-            removed = str(item.get("removed") or "").strip()
+            subject = str(item.get("item") or item.get("removed") or "").strip()
+            if not subject or subject not in current or subject in seen_subjects:
+                continue
+            if item.get("code") == "EXACT_DUPLICATE" and current.count(subject) < 2:
+                continue
+            seen_subjects.add(subject)
             defects.append(
                 {
                     "kind": "equivalent_scope_item",
                     "field": f"{artifact_key}.{field}",
                     "code": item.get("code"),
-                    "removed": removed,
+                    "removed": subject,
                     "message": (
-                        f"Equivalent scope items remain in {artifact_key}.{field}: {removed}"
+                        f"Equivalent scope items remain in {artifact_key}.{field}: {subject}"
                     ),
                 }
             )
@@ -1843,10 +1909,25 @@ def final_artifact_defects(payload: dict | None) -> list[dict]:
     return defects
 
 
+def _refresh_assembled_texts(payload: dict) -> None:
+    """Rebuild copy text from the fields that will actually be returned."""
+    if "artifact_texts" not in payload:
+        return
+    from app.artifact_export import build_artifact_texts
+
+    payload["artifact_texts"] = build_artifact_texts(payload)
+
+
 def apply_final_artifact_quality(payload: dict | None) -> list[dict]:
-    """Repair equivalent scope items, then reject a clean result if defects remain."""
+    """Repair equivalent scope items, then grade the assembled artifact.
+
+    Copy text is rebuilt after list repair. The clean flag is taken from that
+    final payload, so an earlier cleanup cannot hide a defect that is still
+    present.
+    """
     payload = payload or {}
     repair_final_scope_lists(payload)
+    _refresh_assembled_texts(payload)
     defects = final_artifact_defects(payload)
     if not defects:
         payload["artifact_quality"] = "CLEAN"

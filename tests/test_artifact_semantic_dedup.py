@@ -7,7 +7,8 @@ They do not depend on a customer-portal vocabulary.
 from app.agents import apply_established_scope_carry, proposal_agent
 from app.assessment import canonical_fit_comparison, strip_repeated_deadline_statements
 from app.timeline import classify_date_commitment
-from app.decisions import normalize_paraphrase_duplicates
+from app.assessment import repair_generated_grammar
+from app.decisions import apply_final_artifact_quality, normalize_paraphrase_duplicates
 from app.evidence import behavior_signatures
 from app.providers import AIProvider
 
@@ -208,9 +209,9 @@ def test_ambiguous_compound_is_kept_and_reported():
         "Creation and tracking of service requests.",
     ]
     kept, findings = normalize_paraphrase_duplicates(items)
-    assert kept == items
-    assert findings[0]["code"] == "AMBIGUOUS_OVERLAP"
-    assert "left unchanged" in findings[0]["reason"].lower()
+    assert items[0] in kept
+    assert items[1] not in kept
+    assert findings[0]["code"] == "COMPOUND_SPLIT"
     assert ("track", "service request") in _signatures(kept)
     assert ("create", "service request") in _signatures(kept)
 
@@ -355,3 +356,90 @@ def test_deadline_statement_stays_in_timeline_and_leaves_scope_lists():
     )
     assert stripped["in_scope"] == ["Assign jobs."]
     assert stripped["timeline"] == canonical
+
+
+def test_notification_paraphrase_collapses_and_tracking_is_kept():
+    notify = "The system must allow customers to receive email notifications."
+    nominal = "Email notifications triggered by system events"
+    create = "The system must allow customers to create service requests."
+    compound = "Service request creation and status tracking"
+    pay = "Online payments processing via Stripe"
+    integrate = "The system must integrate with Stripe for online payments."
+    kept, findings = normalize_paraphrase_duplicates([notify, nominal, create, compound, pay, integrate])
+    blob = " ".join(kept).lower()
+    assert blob.count("email") == 1 or blob.count("notification") == 1
+    assert nominal not in kept
+    assert "create" in blob and "track" in blob
+    assert compound not in kept
+    assert any("pay" in item.lower() or "payment" in item.lower() for item in kept)
+    assert any("integrat" in item.lower() for item in kept)
+    assert findings
+    again, again_findings = normalize_paraphrase_duplicates(kept)
+    assert again == kept
+    assert again_findings == []
+
+
+def test_bare_technology_labels_are_absorbed_and_grammar_is_repaired():
+    fuller = "The system must integrate with the ledger service for account records."
+    kept, findings = normalize_paraphrase_duplicates(
+        [
+            "Ledger",
+            fuller,
+            "Order viewing retrieving historical records",
+            "Given a member is enrolled, when a notice fires, then the member receives an notice.",
+        ]
+    )
+    assert "Ledger" not in kept
+    assert fuller in kept
+    assert any(item["code"] == "LABEL_ABSORBED" for item in findings)
+    rendered = " ".join(kept)
+    assert "viewing retrieving" not in rendered
+    assert "viewing and retrieving" in rendered
+    assert "an notice" not in rendered
+    assert "a notice" in rendered
+    narrative = repair_generated_grammar(
+        "The date is an internal target rather than stated internal target."
+    )
+    assert "rather than a stated internal target" in narrative
+    assert repair_generated_grammar(narrative) == narrative
+
+
+def test_unrelated_domain_keeps_distinct_behaviors_and_grades_the_final_artifact():
+    schedule = "The system shall allow nurses to schedule clinic visits."
+    cancel = "The system shall allow nurses to cancel clinic visits."
+    compound = "Clinic visit scheduling and cancellation"
+    notify = "The system must allow patients to receive visit notifications."
+    nominal = "Visit notifications triggered by system events"
+    device = "Infusion pump"
+    integrate = "The system shall integrate with the infusion pump for visit records."
+    kept, _findings = normalize_paraphrase_duplicates(
+        [schedule, cancel, compound, notify, nominal, device, integrate]
+    )
+    blob = " ".join(kept).lower()
+    assert "schedule" in blob and "cancel" in blob
+    assert compound not in kept
+    assert nominal not in kept
+    assert device not in kept
+    assert any("integrat" in item.lower() for item in kept)
+    again, _again_findings = normalize_paraphrase_duplicates(kept)
+    assert again == kept
+
+    valid = {
+        "delivery_review": {"status": "READY", "warnings": [], "blocking_issues": []},
+        "proposal": {"scope": [schedule, cancel], "executive_summary": "Nurses schedule and cancel visits."},
+        "artifact_texts": {"proposal": "stale"},
+    }
+    assert apply_final_artifact_quality(valid) == []
+    assert valid["artifact_quality"] == "CLEAN"
+    assert valid["delivery_review"]["status"] == "READY"
+    defective = {
+        "delivery_review": {"status": "READY", "warnings": [], "blocking_issues": []},
+        "proposal": {
+            "scope": [schedule],
+            "executive_summary": "Visits are scheduled.The nurse confirms the change.",
+        },
+    }
+    defects = apply_final_artifact_quality(defective)
+    assert defective["artifact_quality"] == "DEFECTS"
+    assert defective["delivery_review"]["status"] == "READY"
+    assert defects

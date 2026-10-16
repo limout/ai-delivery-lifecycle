@@ -88,8 +88,9 @@ def test_create_and_track_remain_distinct_when_both_are_present():
 
 def test_compound_is_removed_only_when_every_behavior_is_already_covered():
     partial, partial_findings = normalize_paraphrase_duplicates([CREATE, CREATE_AND_TRACK])
-    assert partial == [CREATE, CREATE_AND_TRACK]
-    assert partial_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert CREATE in partial and CREATE_AND_TRACK not in partial
+    assert any("track" in item.lower() for item in partial)
+    assert partial_findings[0]["code"] == "COMPOUND_SPLIT"
 
     covered, covered_findings = normalize_paraphrase_duplicates([CREATE, TRACK, CREATE_AND_TRACK])
     assert CREATE in covered and TRACK in covered
@@ -97,8 +98,9 @@ def test_compound_is_removed_only_when_every_behavior_is_already_covered():
     assert covered_findings[0]["code"] == "COMPOUND_REDUNDANT"
 
     login_only, login_findings = normalize_paraphrase_duplicates([LOGIN, LOGIN_PROFILE])
-    assert LOGIN_PROFILE in login_only
-    assert login_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert LOGIN in login_only and LOGIN_PROFILE not in login_only
+    assert any("manage" in item.lower() for item in login_only)
+    assert login_findings[0]["code"] == "COMPOUND_SPLIT"
 
     broader, broader_findings = normalize_paraphrase_duplicates([LOGIN, PROFILE, LOGIN_PROFILE])
     assert LOGIN in broader and PROFILE in broader
@@ -222,10 +224,10 @@ def test_ready_result_surfaces_residual_artifact_defects():
     assert defects
     assert EMAIL_PARAPHRASE not in payload["proposal"]["scope"]
     assert PAYMENTS_PARAPHRASE not in payload["sow"]["acceptance"]
-    assert CREATE_AND_TRACK in payload["sow"]["in_scope"]
+    assert CREATE_AND_TRACK not in payload["sow"]["in_scope"]
+    assert any("track" in item.lower() for item in payload["sow"]["in_scope"])
     messages = " ".join(payload["delivery_review"]["warnings"])
     assert "proposal.executive_summary" in messages
-    assert CREATE_AND_TRACK not in messages
 
 
 # Run e2d40394-e8b6-46fc-b2d6-d5b4e98da568. The full payload is not stored locally.
@@ -292,8 +294,9 @@ def test_latest_acceptance_and_scope_duplicates_are_removed():
     assert any(item["removed"] == COMBINED_INTEGRATION for item in findings)
 
     partial, partial_findings = normalize_paraphrase_duplicates([CREATE_SHALL, CREATE_TRACK])
-    assert CREATE_SHALL in partial and CREATE_TRACK in partial
-    assert partial_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert CREATE_SHALL in partial and CREATE_TRACK not in partial
+    assert any("track" in item.lower() for item in partial)
+    assert partial_findings[0]["code"] == "COMPOUND_SPLIT"
 
     again, again_findings = normalize_paraphrase_duplicates(kept)
     assert again == kept
@@ -430,3 +433,95 @@ def test_latest_assembled_artifact_is_clean_only_after_the_fields_pass():
     assert "EXCEEDS. The independent estimate" in payload["sow"]["timeline"]
     assert payload["proposal"]["executive_summary"].lower().count(CANONICAL.lower().rstrip(".")) == 1
     assert payload["artifact_quality"] == "CLEAN"
+
+
+INSPECTION = "The system shall record inspection results."
+ARCHIVE = "The system shall archive inspection photos."
+GLUED_APPROACH = "Results are stored.The archive copy is retained."
+
+
+def _inspection_result(**overrides):
+    payload = {
+        "workflow_status": "COMPLETE",
+        "user_request": "Record inspection results and archive the photos.",
+        "proposal": {
+            "executive_summary": "Inspection results are stored.",
+            "scope": [INSPECTION, ARCHIVE],
+        },
+        "solution": {"key_capabilities": [INSPECTION, ARCHIVE]},
+        "sow": {"in_scope": [INSPECTION, ARCHIVE]},
+        "delivery_review": {
+            "status": "READY",
+            "warnings": [],
+            "blocking_issues": [],
+            "checks": [],
+        },
+        "blocking_questions": [],
+        "non_blocking_questions": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_remaining_detected_overlap_is_not_clean():
+    payload = {
+        "delivery_review": {"status": "READY", "warnings": [], "blocking_issues": []},
+        "proposal": {"scope": [CREATE_SHALL, CREATE_TRACK]},
+        "artifact_texts": {"proposal": "stale duplicate render"},
+    }
+    findings = normalize_paraphrase_duplicates([CREATE_SHALL, CREATE_TRACK])[1]
+    assert findings and findings[0]["code"] == "COMPOUND_SPLIT"
+
+    defects = apply_final_artifact_quality(payload)
+
+    assert CREATE_TRACK not in payload["proposal"]["scope"]
+    assert CREATE_SHALL in payload["proposal"]["scope"]
+    assert any("track" in item.lower() for item in payload["proposal"]["scope"])
+    assert payload["artifact_quality"] == "CLEAN"
+    assert payload["delivery_review"]["status"] == "READY"
+    assert defects == []
+    assert "stale duplicate render" not in payload["artifact_texts"]["proposal"]
+    assert payload["artifact_texts"]["proposal"].count(CREATE_SHALL) == 1
+
+
+def test_valid_assembled_artifact_stays_clean():
+    payload = {
+        "delivery_review": {"status": "READY", "warnings": [], "blocking_issues": []},
+        "proposal": {
+            "executive_summary": "Inspection results are stored.",
+            "scope": [INSPECTION, ARCHIVE],
+        },
+        "artifact_texts": {"proposal": f"{INSPECTION}\n{INSPECTION}"},
+    }
+
+    defects = apply_final_artifact_quality(payload)
+
+    assert defects == []
+    assert payload["artifact_quality"] == "CLEAN"
+    assert payload["delivery_review"]["status"] == "READY"
+    assert payload["artifact_texts"]["proposal"].count(INSPECTION) == 1
+    assert ARCHIVE in payload["artifact_texts"]["proposal"]
+
+
+def test_quality_status_is_calculated_after_assembly():
+    defective = workflow_response(
+        _inspection_result(
+            proposal={
+                "executive_summary": "Inspection results are stored.",
+                "delivery_approach": GLUED_APPROACH,
+                "scope": [INSPECTION, INSPECTION, ARCHIVE],
+            }
+        )
+    )
+    rendered = defective["artifact_texts"]["proposal"]
+    assert defective["status"] == "COMPLETE"
+    assert defective["workflow_status"] == "COMPLETE"
+    assert defective["proposal"]["scope"].count(INSPECTION) == 1
+    assert rendered.count(INSPECTION) == 1
+    assert "stored.The" in rendered
+    assert defective["artifact_quality"] == "DEFECTS"
+
+    clean = workflow_response(_inspection_result())
+    assert clean["artifact_quality"] == "CLEAN"
+    assert clean["artifact_texts"]["proposal"].count(INSPECTION) == 1
+    assert clean["status"] == "COMPLETE"

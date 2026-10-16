@@ -185,12 +185,58 @@ def sanitize_comparison_wording(
 _JOINED_SENTENCE = re.compile(r"(?<=[.!?])(?=[A-Z])")
 
 
+def repair_generated_grammar(text: str) -> str:
+    """Repair article agreement, adjacent gerunds, and a missing determiner.
+
+    The rules are grammatical. They do not replace project-specific phrases.
+    """
+
+    def _an_to_a(match: re.Match) -> str:
+        word = match.group(1)
+        if word.lower().startswith(("hour", "honest", "honor", "honour", "heir")):
+            return match.group(0)
+        article = "A" if match.group(0)[:1].isupper() else "a"
+        return f"{article} {word}"
+
+    def _a_to_an(match: re.Match) -> str:
+        word = match.group(1)
+        if word.lower().startswith(("uni", "use", "one", "euro")):
+            return match.group(0)
+        article = "An" if match.group(0)[:1].isupper() else "an"
+        return f"{article} {word}"
+
+    def _rather_than(match: re.Match) -> str:
+        phrase = match.group(1).strip()
+        words = phrase.split()
+        if not words or words[-1].lower().endswith("s"):
+            return match.group(0)
+        first = words[0]
+        article = "an" if first[:1].lower() in "aeiou" and not first.lower().startswith(("uni", "use", "one")) else "a"
+        return f"rather than {article} {phrase}"
+
+    repaired = re.sub(r"\b[Aa]n\s+([bcdfghjklmnpqrstvwxz]\w*)", _an_to_a, str(text or ""))
+    repaired = re.sub(r"\b[Aa]\s+([aeiou]\w*)", _a_to_an, repaired)
+    repaired = re.sub(
+        r"\b(\w+ing)\s+(?!and\b)(\w+ing)\b",
+        r"\1 and \2",
+        repaired,
+        flags=re.I,
+    )
+    repaired = re.sub(
+        r"\brather than\s+(?!an?\b|the\b|to\b)([A-Za-z]+(?:\s+[A-Za-z]+){0,5})",
+        _rather_than,
+        repaired,
+        flags=re.I,
+    )
+    return repaired
+
+
 def separate_joined_sentences(text: str) -> str:
     """Insert the missing space when a sentence is glued to the next one.
 
     Decimal points stay in place because the following character is a digit.
     """
-    return _JOINED_SENTENCE.sub(" ", str(text or ""))
+    return repair_generated_grammar(_JOINED_SENTENCE.sub(" ", str(text or "")))
 
 
 def joined_sentence_boundaries(text: str) -> list[str]:

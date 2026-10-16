@@ -115,6 +115,7 @@ _VERB_FAMILIES = (
     frozenset({"onboard", "onboarding"}),
     frozenset({"pay", "payment", "paying"}),
     frozenset({"integrate", "integration", "integrating"}),
+    frozenset({"schedule", "scheduling"}),
 )
 
 _NAMED_SYSTEM = re.compile(
@@ -536,6 +537,7 @@ _PREFERRED_FAMILY_IDS = (
     "onboard",
     "pay",
     "integrate",
+    "schedule",
 )
 _FAMILY_ID_BY_TOKEN: dict[str, str] = {}
 for _family in _VERB_FAMILIES:
@@ -586,6 +588,7 @@ _SIGNATURE_SKIP = _STOPWORDS | {
     "succeeds", "successful", "successfully", "provided", "including",
     "sent", "sending", "send",
     "then", "when", "given",
+    "receive", "receives", "received",
 }
 _GENERIC_OBJECT_TOKENS = frozenset({
     "data", "system", "record", "information", "platform", "application",
@@ -626,6 +629,8 @@ def _signature_object(words: list[str]) -> str:
     stems: list[str] = []
     for word in words:
         if word in _SIGNATURE_SKIP or word in _SIGNATURE_FILLERS or word in _SIGNATURE_QUALIFIERS:
+            continue
+        if word.endswith("ed") and not _family_id(word) and len(word) > 4:
             continue
         if _family_id(word):
             break
@@ -689,6 +694,8 @@ def _behavior_family(words: list[str], index: int) -> str | None:
             return family
         nxt += 1
     if prev < 0 or nxt >= len(words):
+        return family
+    if words[nxt].endswith("ed") or words[nxt].endswith("ing"):
         return family
     if words[nxt] in _SIGNATURE_QUALIFIERS:
         return family
@@ -812,6 +819,13 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
                 elif not any(family_name == item for family_name, _object in found):
                     found.append((item, ""))
         index = max(cursor, index + 1)
+    objects = [obj for family, obj in found if obj and family != "authenticate"]
+    if len(set(objects)) == 1:
+        shared = objects[0]
+        found = [
+            (family, shared) if family != "authenticate" and not obj else (family, obj)
+            for family, obj in found
+        ]
     return frozenset(found)
 
 
