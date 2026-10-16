@@ -1045,6 +1045,7 @@ def _backlog_failure(
     *,
     stage: str,
     http_status: int | None = None,
+    reason: str | None = None,
 ) -> JSONResponse:
     content: dict[str, str | int] = {
         "error": code,
@@ -1053,6 +1054,8 @@ def _backlog_failure(
     }
     if http_status is not None:
         content["http_status"] = http_status
+    if reason is not None:
+        content["reason"] = reason
     return JSONResponse(status_code=status_code, content=content)
 
 
@@ -1086,9 +1089,10 @@ async def create_backlog(payload: dict):
         return _backlog_failure(
             503,
             "BACKLOG_STARTING",
-            "Backlog Agent did not become ready in time.",
+            exc.public_message,
             stage=exc.stage,
             http_status=exc.http_status,
+            reason=exc.reason,
         )
     except BacklogUnauthorizedError as exc:
         return _backlog_failure(
