@@ -152,6 +152,29 @@ def sanitize_comparison_wording(
     return _EXCEEDS_CLAUSE.sub(replace_clause, source)
 
 
+def strip_repeated_deadline_statements(document: dict, canonical: str) -> dict:
+    """Remove a deadline sentence copied into list fields.
+
+    The timeline and executive summary keep the assessment. A scope, acceptance,
+    or capability bullet that only repeats that sentence does not.
+    """
+    needle = str(canonical or "").strip().lower().rstrip(".")
+    if not needle or not isinstance(document, dict):
+        return document
+    protected = {"timeline", "executive_summary", "optimization_summary", "quality_findings"}
+    for key, value in list(document.items()):
+        if key in protected or not isinstance(value, list):
+            continue
+        kept = []
+        for item in value:
+            text = str(item).strip().lower().rstrip(".")
+            if text == needle or (needle in text and len(text) <= len(needle) + 12):
+                continue
+            kept.append(item)
+        document[key] = kept
+    return document
+
+
 def standard_deadline_fit(estimate: dict | None) -> str:
     """Return the canonical standard-estimate deadline assessment."""
     if not isinstance(estimate, dict):

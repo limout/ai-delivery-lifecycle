@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from app.evidence import (
     answer_retracts_scope,
+    behavior_signatures,
     is_non_substantive_clarification_answer,
     normalize_question_text,
     unpack_clarification_record,
@@ -1457,6 +1458,139 @@ def collapse_equivalent_scope_items(items) -> list:
             continue
         survivors.append(index)
     return [kept[index] for index in survivors]
+
+
+_CONDITION_FLAGS = ("no network", "offline", "without connectivity")
+
+
+def _condition_key(text: str) -> tuple[str, ...]:
+    lower = str(text or "").lower()
+    return tuple(flag for flag in _CONDITION_FLAGS if flag in lower)
+
+
+def _statement_rank(text: str) -> tuple[int, int, int]:
+    finite = 1 if re.search(r"\b(?:shall|must|can|cannot|able)\b", text, re.I) else 0
+    return (finite, len(str(text).split()), len(str(text)))
+
+
+def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
+    """Drop same-behavior paraphrases. Keep distinct behaviors.
+
+    A compound is removed only when every behavior it states is already a
+    separate item. A compound that adds a behavior the other items do not
+    state is kept, with an actionable finding. Items with no recognized
+    behavior are left unchanged.
+    """
+    texts = [str(item or "").strip() for item in items or [] if str(item or "").strip()]
+    signatures = [behavior_signatures(text) for text in texts]
+    conditions = [_condition_key(text) for text in texts]
+    kept: list[int] = []
+    findings: list[dict] = []
+    seen_exact: set[str] = set()
+
+    for index, text in enumerate(texts):
+        exact = text.lower()
+        if exact in seen_exact:
+            findings.append(
+                {
+                    "code": "EXACT_DUPLICATE",
+                    "removed": text,
+                    "kept": text,
+                    "reason": "The same statement was already present.",
+                }
+            )
+            continue
+        seen_exact.add(exact)
+        signature = signatures[index]
+        if not signature:
+            kept.append(index)
+            continue
+        match = next(
+            (
+                other
+                for other in kept
+                if signatures[other]
+                and signatures[other] == signature
+                and conditions[other] == conditions[index]
+            ),
+            None,
+        )
+        if match is None:
+            kept.append(index)
+            continue
+        if _statement_rank(text)[0] > _statement_rank(texts[match])[0]:
+            removed = texts[match]
+            texts[match] = text
+            signatures[match] = signature
+            conditions[match] = conditions[index]
+            kept_text = text
+        else:
+            removed = text
+            kept_text = texts[match]
+        findings.append(
+            {
+                "code": "PARAPHRASE_COLLAPSED",
+                "removed": removed,
+                "kept": kept_text,
+                "reason": "The statement repeats a behavior already in this list.",
+            }
+        )
+
+    single_behaviors = {
+        next(iter(signatures[index]))
+        for index in kept
+        if len(signatures[index]) == 1
+    }
+    final: list[str] = []
+    for index in kept:
+        signature = signatures[index]
+        text = texts[index]
+        if len(signature) >= 2 and signature <= single_behaviors:
+            covered = [
+                texts[other]
+                for other in kept
+                if other != index
+                and len(signatures[other]) == 1
+                and signatures[other] <= signature
+            ]
+            findings.append(
+                {
+                    "code": "COMPOUND_REDUNDANT",
+                    "removed": text,
+                    "kept": covered,
+                    "reason": "Every behavior in this item is already stated separately.",
+                }
+            )
+            continue
+        if len(signature) >= 2:
+            overlap = [
+                texts[other]
+                for other in kept
+                if other != index
+                and signatures[other]
+                and signatures[other] <= signature
+                and signatures[other] != signature
+            ]
+            other_behaviors = [
+                signatures[other]
+                for other in kept
+                if other != index and signatures[other]
+            ]
+            extra = signature - set().union(*other_behaviors) if other_behaviors else signature
+            if overlap and extra:
+                findings.append(
+                    {
+                        "code": "AMBIGUOUS_OVERLAP",
+                        "item": text,
+                        "overlaps": overlap,
+                        "reason": (
+                            "This item overlaps an existing behavior and also states "
+                            "a distinct one. It was left unchanged."
+                        ),
+                    }
+                )
+        final.append(text)
+    return final, findings
 
 
 _OFFLINE_DESIGN = re.compile(

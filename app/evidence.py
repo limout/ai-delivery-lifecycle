@@ -515,6 +515,156 @@ def _verb_family(verb: str) -> frozenset[str]:
     return frozenset({normalized})
 
 
+_PREFERRED_FAMILY_IDS = (
+    "authenticate",
+    "view",
+    "create",
+    "track",
+    "update",
+    "manage",
+    "search",
+    "export",
+    "import",
+    "approve",
+    "upload",
+    "download",
+    "cancel",
+    "assign",
+    "notify",
+    "onboard",
+)
+_FAMILY_ID_BY_TOKEN: dict[str, str] = {}
+for _family in _VERB_FAMILIES:
+    _family_id = next(
+        (name for name in _PREFERRED_FAMILY_IDS if name in _family),
+        min(_family),
+    )
+    for _token in _family:
+        _FAMILY_ID_BY_TOKEN[_token] = _family_id
+
+# Nominal and gerund forms of the same generic verb families. Not product nouns.
+_NOMINAL_VERBS = {
+    "creation": "create",
+    "creating": "create",
+    "tracking": "track",
+    "submission": "submit",
+    "submitting": "submit",
+    "management": "manage",
+    "managing": "manage",
+    "searching": "search",
+    "viewing": "view",
+    "updating": "update",
+    "editing": "edit",
+    "placing": "place",
+    "browsing": "browse",
+    "uploading": "upload",
+    "downloading": "download",
+    "cancelling": "cancel",
+    "canceling": "cancel",
+    "cancellation": "cancel",
+    "assigning": "assign",
+    "notifying": "notify",
+}
+for _nominal, _verb in _NOMINAL_VERBS.items():
+    _FAMILY_ID_BY_TOKEN.setdefault(_nominal, _FAMILY_ID_BY_TOKEN.get(_verb, _verb))
+
+_SIGNATURE_SKIP = _STOPWORDS | {
+    "a", "an", "of", "to", "for", "from", "into", "onto", "with", "via", "by", "on", "in",
+    "is", "are", "be", "been", "being", "was", "were", "can", "may", "shall",
+    "must", "should", "able", "allow", "allows", "allowed", "their", "its",
+    "available", "possible", "supported", "support", "works", "work",
+    "succeeds", "successful", "successfully", "provided", "including",
+}
+_SIGNATURE_FILLERS = frozenset({
+    "workflow", "workflows", "capability", "capabilities", "process", "processes",
+    "functionality", "feature", "features", "handling", "ability", "function",
+    "functions",
+})
+_SIGNATURE_QUALIFIERS = frozenset({"status", "state", "progress", "detail", "details"})
+_SIGNATURE_ACTORS = frozenset({
+    "customer", "customers", "user", "users", "member", "members", "staff",
+    "operator", "operators", "patient", "patients", "student", "students",
+    "visitor", "visitors", "employee", "employees", "guest", "guests",
+    "client", "clients",
+})
+
+
+def _family_id(token: str) -> str | None:
+    return _FAMILY_ID_BY_TOKEN.get(str(token or "").lower())
+
+
+def _signature_object(words: list[str]) -> str:
+    stems: list[str] = []
+    for word in words:
+        if word in _SIGNATURE_SKIP or word in _SIGNATURE_FILLERS or word in _SIGNATURE_QUALIFIERS:
+            continue
+        if _family_id(word):
+            break
+        stem = word[:-1] if word.endswith("s") and not word.endswith("ss") and len(word) > 4 else word
+        if stem in _SIGNATURE_QUALIFIERS:
+            continue
+        stems.append(stem)
+        if len(stems) >= 4:
+            break
+    return " ".join(stems)
+
+
+def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
+    """Generic behavior identity for one statement.
+
+    Each signature is a verb family plus the object it applies to. Login and
+    authentication share the authenticate family. Create and track stay
+    distinct. Words outside the generic verb families produce no signature.
+    """
+    raw = str(text or "").lower()
+    raw = re.sub(r"\blog\s+in\b", "login", raw)
+    raw = re.sub(r"\bsign\s+in\b", "signin", raw)
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    words = [word for word in raw.split() if word]
+    found: list[tuple[str, str]] = []
+    index = 0
+    while index < len(words):
+        family = _family_id(words[index])
+        if not family:
+            index += 1
+            continue
+        families = [family]
+        cursor = index + 1
+        while cursor + 1 < len(words) and words[cursor] == "and":
+            nxt = _family_id(words[cursor + 1])
+            if not nxt:
+                break
+            if nxt not in families:
+                families.append(nxt)
+            cursor += 2
+        if cursor < len(words) and words[cursor] == "of":
+            cursor += 1
+        forward: list[str] = []
+        while cursor < len(words) and words[cursor] != "and" and not _family_id(words[cursor]):
+            forward.append(words[cursor])
+            cursor += 1
+            if len(forward) >= 6:
+                break
+        forward_obj = _signature_object(forward)
+        forward_parts = [part for part in forward_obj.split() if part not in _SIGNATURE_ACTORS]
+        obj = " ".join(forward_parts)
+        if not obj:
+            before: list[str] = []
+            back = index - 1
+            while back >= 0 and len(before) < 3 and not _family_id(words[back]):
+                before.append(words[back])
+                back -= 1
+            before.reverse()
+            parts = _signature_object(before).split()
+            while parts and parts[0] in _SIGNATURE_ACTORS:
+                parts = parts[1:]
+            obj = " ".join(parts) or forward_obj
+        for item in families:
+            found.append((item, "" if item == "authenticate" else obj))
+        index = max(cursor, index + 1)
+    return frozenset(found)
+
+
 def _split_coordinated_verbs(blob: str) -> list[str]:
     parts = re.split(r"\s*(?:,|/|\band\b)\s*", str(blob or ""), flags=re.I)
     return [_normalize_action_verb(part) for part in parts if _normalize_action_verb(part)]

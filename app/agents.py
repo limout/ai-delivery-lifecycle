@@ -9,6 +9,7 @@ from app.decisions import (
     apply_reconciled_project_state,
     collapse_equivalent_scope_items,
     dedupe_equivalent_questions,
+    normalize_paraphrase_duplicates,
     drop_resolved,
     drop_unresolved_out_of_scope_items,
     qualify_unresolved_sow_deliverables,
@@ -950,6 +951,35 @@ def _collect_structured_list_items(state: dict | None, sources: tuple) -> list:
     return items
 
 
+def _finalize_scope_items(items) -> tuple[list, list[dict]]:
+    """Drop same-behavior paraphrases, then token-equivalent wording.
+
+    Signature matching runs first so a later nominal paraphrase cannot
+    replace the earlier testable statement.
+    """
+    normalized, findings = normalize_paraphrase_duplicates(items)
+    return collapse_equivalent_scope_items(normalized), findings
+
+
+def _attach_quality_findings(artifact: dict, findings: list[dict]) -> None:
+    if not findings:
+        return
+    existing = [
+        item for item in artifact.get("quality_findings") or [] if isinstance(item, dict)
+    ]
+    seen = {
+        (item.get("code"), str(item.get("removed") or item.get("item") or ""), item.get("field"))
+        for item in existing
+    }
+    for item in findings:
+        key = (item.get("code"), str(item.get("removed") or item.get("item") or ""), item.get("field"))
+        if key in seen:
+            continue
+        existing.append(item)
+        seen.add(key)
+    artifact["quality_findings"] = existing
+
+
 def apply_established_scope_carry(state: dict | None) -> dict:
     """Copy still-active structured scope into regenerated downstream lists.
 
@@ -967,10 +997,15 @@ def apply_established_scope_carry(state: dict | None) -> dict:
 
     if state.get("solution") is not None:
         solution = dict(state.get("solution") or {})
-        solution["key_capabilities"] = collapse_equivalent_scope_items(
+        capabilities, capability_findings = _finalize_scope_items(
             _union_scope_items(
                 capability_items, solution.get("key_capabilities") or [], state
             )
+        )
+        solution["key_capabilities"] = capabilities
+        _attach_quality_findings(
+            solution,
+            [{**item, "field": "key_capabilities"} for item in capability_findings],
         )
         solution["integration_approach"] = _union_scope_items(
             system_items, solution.get("integration_approach") or [], state
@@ -980,33 +1015,68 @@ def apply_established_scope_carry(state: dict | None) -> dict:
 
     if state.get("proposal") is not None:
         proposal = dict(state.get("proposal") or {})
-        proposal["scope"] = collapse_equivalent_scope_items(
+        scope, scope_findings = _finalize_scope_items(
             _union_scope_items(
                 capability_items, proposal.get("scope") or [], state
             )
+        )
+        proposal["scope"] = scope
+        _attach_quality_findings(
+            proposal,
+            [{**item, "field": "scope"} for item in scope_findings],
         )
         updates["proposal"] = proposal
         state["proposal"] = proposal
 
     if state.get("sow") is not None:
         sow = dict(state.get("sow") or {})
-        sow["in_scope"] = collapse_equivalent_scope_items(
+        in_scope, scope_findings = _finalize_scope_items(
             _union_scope_items(
                 capability_items, sow.get("in_scope") or [], state
             )
         )
-        sow["acceptance"] = collapse_equivalent_scope_items(
+        acceptance, acceptance_findings = _finalize_scope_items(
             strip_verified_clarification_items(
                 _union_scope_items(
                     acceptance_items, sow.get("acceptance") or [], state
                 )
             )
         )
+        sow["in_scope"] = in_scope
+        sow["acceptance"] = acceptance
+        _attach_quality_findings(
+            sow,
+            [
+                *[{**item, "field": "in_scope"} for item in scope_findings],
+                *[{**item, "field": "acceptance"} for item in acceptance_findings],
+            ],
+        )
         sow["out_of_scope"] = drop_unresolved_out_of_scope_items(
             sow.get("out_of_scope"), state
         )
         sow = qualify_unresolved_sow_deliverables(sow, state)
         updates["sow"] = sow
+        state["sow"] = sow
+
+    if isinstance(state.get("requirements"), dict):
+        requirements = dict(state.get("requirements") or {})
+        functional, functional_findings = _finalize_scope_items(
+            requirements.get("functional_requirements")
+        )
+        acceptance, acceptance_findings = _finalize_scope_items(
+            strip_verified_clarification_items(requirements.get("acceptance_criteria"))
+        )
+        requirements["functional_requirements"] = functional
+        if "acceptance_criteria" in requirements or acceptance:
+            requirements["acceptance_criteria"] = acceptance
+        _attach_quality_findings(
+            requirements,
+            [
+                *[{**item, "field": "functional_requirements"} for item in functional_findings],
+                *[{**item, "field": "acceptance_criteria"} for item in acceptance_findings],
+            ],
+        )
+        updates["requirements"] = requirements
     return updates
 
 
@@ -1585,15 +1655,25 @@ Return the complete requirements schema.
         _REQUIREMENT_SCOPE_LISTS,
         state,
     )
-    requirements["functional_requirements"] = collapse_equivalent_scope_items(
+    functional, functional_findings = _finalize_scope_items(
         requirements.get("functional_requirements")
     )
+    requirements["functional_requirements"] = functional
+    acceptance_findings: list[dict] = []
     if "acceptance_criteria" in requirements:
-        requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+        acceptance, acceptance_findings = _finalize_scope_items(
             strip_verified_clarification_items(
                 requirements.get("acceptance_criteria")
             )
         )
+        requirements["acceptance_criteria"] = acceptance
+    _attach_quality_findings(
+        requirements,
+        [
+            *[{**item, "field": "functional_requirements"} for item in functional_findings],
+            *[{**item, "field": "acceptance_criteria"} for item in acceptance_findings],
+        ],
+    )
 
     has_any_requirements = any(
         requirements.get(key)
@@ -1643,15 +1723,25 @@ request-stated outcome.
             _REQUIREMENT_SCOPE_LISTS,
             state,
         )
-        requirements["functional_requirements"] = collapse_equivalent_scope_items(
+        functional, functional_findings = _finalize_scope_items(
             requirements.get("functional_requirements")
         )
+        requirements["functional_requirements"] = functional
+        acceptance_findings = []
         if "acceptance_criteria" in requirements:
-            requirements["acceptance_criteria"] = collapse_equivalent_scope_items(
+            acceptance, acceptance_findings = _finalize_scope_items(
                 strip_verified_clarification_items(
                     requirements.get("acceptance_criteria")
                 )
             )
+            requirements["acceptance_criteria"] = acceptance
+        _attach_quality_findings(
+            requirements,
+            [
+                *[{**item, "field": "functional_requirements"} for item in functional_findings],
+                *[{**item, "field": "acceptance_criteria"} for item in acceptance_findings],
+            ],
+        )
 
     return {
         "requirements": requirements,
@@ -3088,6 +3178,7 @@ def _apply_deadline_honesty(document: dict, estimate: dict, date_kind: str = "")
         deadline_honesty_timeline,
         sanitize_comparison_wording,
         standard_deadline_fit,
+        strip_repeated_deadline_statements,
     )
 
     fit = standard_deadline_fit(estimate)
@@ -3128,6 +3219,8 @@ def _apply_deadline_honesty(document: dict, estimate: dict, date_kind: str = "")
             )
             for item in risks
         ]
+    if canonical:
+        strip_repeated_deadline_statements(document, canonical)
     return document
 
 
