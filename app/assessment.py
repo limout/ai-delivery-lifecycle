@@ -48,10 +48,13 @@ _DURATION_ANY = re.compile(
     r"\s*-?\s*(?P<unit>days?|weeks?|months?)",
     re.I,
 )
+# A decimal point inside a duration such as 4.5 is not a sentence boundary.
+_CLAUSE_CHAR = r"(?:\d\.\d|[^.!?])"
 _EXCEEDS_CLAUSE = re.compile(
-    r"(?P<left>[^.!?]{0,160}?)\b(?P<neg>does\s+not\s+)?exceeds?\b(?P<right>[^.!?]{0,160})",
+    rf"(?P<left>{_CLAUSE_CHAR}{{0,180}}?)\b(?P<neg>does\s+not\s+)?exceeds?\b(?P<right>{_CLAUSE_CHAR}{{0,180}})",
     re.I,
 )
+_ESTIMATE_OPENING = "The independent estimate of "
 
 
 def _duration_to_weeks(value: float, unit: str) -> float:
@@ -108,6 +111,32 @@ def canonical_fit_comparison(estimate: dict | None, date_kind: str = "") -> str:
     )
 
 
+def _preserved_comparison_prefix(left: str) -> str:
+    """Keep a field label that introduces the comparison sentence."""
+    label = re.match(r"^(\s*.*?\b(?:Evidence|because|that):\s*)", str(left or ""), re.I)
+    return label.group(1) if label else ""
+
+
+def _repair_spliced_comparison(text: str, canonical: str) -> str:
+    """Drop a truncated estimate sentence glued onto the full comparison.
+
+    ``3.5-4.5`` used to be split at the decimal, so normalization reinserted
+    the full sentence after ``3.5-4.``.
+    """
+    bare = str(canonical or "").strip().rstrip(".")
+    if not bare or _ESTIMATE_OPENING.lower() not in str(text or "").lower():
+        return str(text or "")
+    trimmed = re.sub(
+        re.escape(_ESTIMATE_OPENING) + r".*?(?=" + re.escape(_ESTIMATE_OPENING) + ")",
+        "",
+        str(text),
+        flags=re.I | re.S,
+    )
+    doubled = re.compile(r"(?:" + re.escape(bare) + r"\.?\s*){2,}", re.I)
+    trimmed = doubled.sub(bare + ". ", trimmed)
+    return re.sub(r"[ \t]{2,}", " ", trimmed).strip()
+
+
 def sanitize_comparison_wording(
     text: str,
     estimate: dict | None,
@@ -141,15 +170,16 @@ def sanitize_comparison_wording(
             left_is_estimate = abs(left_w - est_w) <= abs(left_w - target_w)
             right_is_target = abs(right_w - target_w) <= abs(right_w - est_w)
             if (left_is_target and right_is_estimate) or (left_is_estimate and right_is_target):
-                return canonical.rstrip(".")
+                return _preserved_comparison_prefix(match.group("left")) + canonical.rstrip(".")
         inverted = (not negated and left_w + 0.05 < right_w) or (
             negated and left_w > right_w + 0.05
         )
         if inverted:
-            return canonical.rstrip(".")
+            return _preserved_comparison_prefix(match.group("left")) + canonical.rstrip(".")
         return match.group(0)
 
-    return _EXCEEDS_CLAUSE.sub(replace_clause, source)
+    rewritten = _EXCEEDS_CLAUSE.sub(replace_clause, source)
+    return _repair_spliced_comparison(rewritten, canonical)
 
 
 def strip_repeated_deadline_statements(document: dict, canonical: str) -> dict:
@@ -571,16 +601,16 @@ def build_assessment(result: dict) -> dict:
     )
     next_steps = _recommended_next_steps(result, verdict, blocking, deadline)
 
+    why_sources = [
+        verdict.get("summary") or "",
+        *_as_list(validation.get("missing_evidence"))[:2],
+    ]
+    summary_text = str(verdict.get("summary") or "")
+    if evidence and evidence.rstrip(".").lower() not in summary_text.lower():
+        why_sources.append(evidence)
     why = [
         sanitize_comparison_wording(item, estimate, date_kind)
-        for item in _unique_texts(
-            [
-                verdict.get("summary") or "",
-                *_as_list(validation.get("missing_evidence"))[:2],
-                evidence,
-            ],
-            limit=3,
-        )
+        for item in _unique_texts(why_sources, limit=3)
     ]
 
     return {
@@ -735,3 +765,42 @@ def format_print_assessment_html(assessment: dict) -> str:
         .replace(">", "&gt;")
     )
     return f"<pre class=\"print-assessment\">{escaped}</pre>"
+
+
+_DUPLICATED_FRAGMENT = re.compile(r"(.{20,}?)(?:\.\s*)(?=\1)")
+_COMPARISON_TEXT_FIELDS = {
+    "proposal": ("executive_summary", "timeline", "risks"),
+    "sow": ("executive_summary", "timeline", "risks", "assumptions"),
+    "solution": ("delivery_risks",),
+    "delivery_plan": ("delivery_risks",),
+    "estimate": ("risks_affecting_estimate",),
+    "delivery_review": ("warnings", "checks"),
+}
+
+
+def duplicated_sentence_fragments(text: str) -> list[str]:
+    """Return repeated sentence fragments glued together by a period."""
+    return [match.group(1) for match in _DUPLICATED_FRAGMENT.finditer(str(text or ""))]
+
+
+def repair_stored_comparison_text(result: dict | None) -> dict:
+    """Rewrite stored estimate comparisons before assessment text is composed."""
+    result = result or {}
+    estimate = result.get("estimate") if isinstance(result.get("estimate"), dict) else {}
+    date_kind = _date_kind_from_result(result)
+    for artifact_key, fields in _COMPARISON_TEXT_FIELDS.items():
+        artifact = result.get(artifact_key)
+        if not isinstance(artifact, dict):
+            continue
+        for field in fields:
+            value = artifact.get(field)
+            if isinstance(value, str):
+                artifact[field] = sanitize_comparison_wording(value, estimate, date_kind)
+            elif isinstance(value, list):
+                artifact[field] = [
+                    sanitize_comparison_wording(item, estimate, date_kind)
+                    if isinstance(item, str)
+                    else item
+                    for item in value
+                ]
+    return result

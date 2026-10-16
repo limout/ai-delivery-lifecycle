@@ -113,6 +113,8 @@ _VERB_FAMILIES = (
     frozenset({"assign"}),
     frozenset({"notify", "notification"}),
     frozenset({"onboard", "onboarding"}),
+    frozenset({"pay", "payment", "paying"}),
+    frozenset({"integrate", "integration", "integrating"}),
 )
 
 _NAMED_SYSTEM = re.compile(
@@ -532,6 +534,8 @@ _PREFERRED_FAMILY_IDS = (
     "assign",
     "notify",
     "onboard",
+    "pay",
+    "integrate",
 )
 _FAMILY_ID_BY_TOKEN: dict[str, str] = {}
 for _family in _VERB_FAMILIES:
@@ -564,6 +568,8 @@ _NOMINAL_VERBS = {
     "cancellation": "cancel",
     "assigning": "assign",
     "notifying": "notify",
+    "paying": "pay",
+    "integrating": "integrate",
 }
 for _nominal, _verb in _NOMINAL_VERBS.items():
     _FAMILY_ID_BY_TOKEN.setdefault(_nominal, _FAMILY_ID_BY_TOKEN.get(_verb, _verb))
@@ -574,13 +580,22 @@ _SIGNATURE_SKIP = _STOPWORDS | {
     "must", "should", "able", "allow", "allows", "allowed", "their", "its",
     "available", "possible", "supported", "support", "works", "work",
     "succeeds", "successful", "successfully", "provided", "including",
+    "sent", "sending", "send",
 }
+_GENERIC_OBJECT_TOKENS = frozenset({
+    "data", "system", "record", "information", "platform", "application",
+    "service", "master", "item", "web", "online", "customer", "user",
+    "secure", "securely",
+})
 _SIGNATURE_FILLERS = frozenset({
     "workflow", "workflows", "capability", "capabilities", "process", "processes",
     "functionality", "feature", "features", "handling", "ability", "function",
-    "functions",
+    "functions", "processing",
 })
-_SIGNATURE_QUALIFIERS = frozenset({"status", "state", "progress", "detail", "details"})
+_SIGNATURE_QUALIFIERS = frozenset({
+    "status", "state", "progress", "detail", "details",
+    "secure", "securely", "online",
+})
 _SIGNATURE_ACTORS = frozenset({
     "customer", "customers", "user", "users", "member", "members", "staff",
     "operator", "operators", "patient", "patients", "student", "students",
@@ -590,7 +605,13 @@ _SIGNATURE_ACTORS = frozenset({
 
 
 def _family_id(token: str) -> str | None:
-    return _FAMILY_ID_BY_TOKEN.get(str(token or "").lower())
+    word = str(token or "").lower()
+    found = _FAMILY_ID_BY_TOKEN.get(word)
+    if found:
+        return found
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 4:
+        return _FAMILY_ID_BY_TOKEN.get(word[:-1])
+    return None
 
 
 def _signature_object(words: list[str]) -> str:
@@ -609,6 +630,67 @@ def _signature_object(words: list[str]) -> str:
     return " ".join(stems)
 
 
+def _content_stem(word: str) -> str:
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 4:
+        return word[:-1]
+    return word
+
+
+def _distinctive_object(words: list[str]) -> str:
+    """Object tokens that name a specific system, not a generic noun."""
+    tokens: list[str] = []
+    for word in words:
+        if (
+            _family_id(word)
+            or word in _SIGNATURE_SKIP
+            or word in _SIGNATURE_FILLERS
+            or word in _SIGNATURE_QUALIFIERS
+            or word in _SIGNATURE_ACTORS
+            or word in _GENERIC_OBJECT_TOKENS
+        ):
+            continue
+        stem = _content_stem(word)
+        if stem in _GENERIC_OBJECT_TOKENS or len(stem) < 3 or stem in tokens:
+            continue
+        tokens.append(stem)
+        if len(tokens) >= 4:
+            break
+    return " ".join(tokens)
+
+
+def _is_nominal_token(word: str) -> bool:
+    stem = _content_stem(word)
+    if stem in _NOMINAL_VERBS or word in _NOMINAL_VERBS:
+        return True
+    return stem.endswith(("tion", "ment", "ing"))
+
+
+def _behavior_family(words: list[str], index: int) -> str | None:
+    """Verb family at this token, ignoring noun modifiers such as 'management system'."""
+    family = _family_id(words[index])
+    if not family or not _is_nominal_token(words[index]):
+        return family
+    prev = index - 1
+    while prev >= 0 and words[prev] in _SIGNATURE_SKIP:
+        prev -= 1
+    nxt = index + 1
+    while nxt < len(words) and (
+        words[nxt] in _SIGNATURE_FILLERS or words[nxt] in _SIGNATURE_SKIP
+    ):
+        if words[nxt] in {"of", "for", "to", "via", "by", "with"}:
+            return family
+        nxt += 1
+    if prev < 0 or nxt >= len(words):
+        return family
+    if words[nxt] in _SIGNATURE_QUALIFIERS:
+        return family
+    if _is_nominal_token(words[index]) and _is_nominal_token(words[nxt]):
+        return None
+    if _family_id(words[prev]) or _family_id(words[nxt]):
+        return family
+    return None
+
+
 def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
     """Generic behavior identity for one statement.
 
@@ -624,14 +706,14 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     index = 0
     while index < len(words):
-        family = _family_id(words[index])
+        family = _behavior_family(words, index)
         if not family:
             index += 1
             continue
         families = [family]
         cursor = index + 1
         while cursor + 1 < len(words) and words[cursor] == "and":
-            nxt = _family_id(words[cursor + 1])
+            nxt = _behavior_family(words, cursor + 1)
             if not nxt:
                 break
             if nxt not in families:
@@ -639,28 +721,54 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
             cursor += 2
         if cursor < len(words) and words[cursor] == "of":
             cursor += 1
-        forward: list[str] = []
-        while cursor < len(words) and words[cursor] != "and" and not _family_id(words[cursor]):
-            forward.append(words[cursor])
-            cursor += 1
-            if len(forward) >= 6:
-                break
-        forward_obj = _signature_object(forward)
-        forward_parts = [part for part in forward_obj.split() if part not in _SIGNATURE_ACTORS]
-        obj = " ".join(forward_parts)
-        if not obj:
-            before: list[str] = []
-            back = index - 1
-            while back >= 0 and len(before) < 3 and not _family_id(words[back]):
-                before.append(words[back])
-                back -= 1
-            before.reverse()
-            parts = _signature_object(before).split()
-            while parts and parts[0] in _SIGNATURE_ACTORS:
-                parts = parts[1:]
-            obj = " ".join(parts) or forward_obj
+        groups: list[list[str]] = []
+        while cursor < len(words) and not _behavior_family(words, cursor):
+            group: list[str] = []
+            while (
+                cursor < len(words)
+                and words[cursor] != "and"
+                and not _behavior_family(words, cursor)
+            ):
+                group.append(words[cursor])
+                cursor += 1
+                if len(group) >= 6:
+                    break
+            if group:
+                groups.append(group)
+            if (
+                groups
+                and cursor < len(words)
+                and words[cursor] == "and"
+                and (cursor + 1 >= len(words) or not _behavior_family(words, cursor + 1))
+            ):
+                cursor += 1
+                continue
+            break
+        before: list[str] = []
+        back = index - 1
+        while back >= 0 and len(before) < 3 and not _behavior_family(words, back):
+            before.append(words[back])
+            back -= 1
+        before.reverse()
+        if not groups:
+            groups = [[]]
         for item in families:
-            found.append((item, "" if item == "authenticate" else obj))
+            if item == "authenticate":
+                found.append((item, ""))
+                continue
+            if item == "integrate":
+                for group in groups:
+                    found.append(("integrate", _distinctive_object([*before, *group])))
+                continue
+            for group in groups:
+                forward_obj = _signature_object(group)
+                parts = [part for part in forward_obj.split() if part not in _SIGNATURE_ACTORS]
+                obj = " ".join(parts)
+                if not obj:
+                    back_obj = _signature_object(before)
+                    back_parts = [part for part in back_obj.split() if part not in _SIGNATURE_ACTORS]
+                    obj = " ".join(back_parts) or forward_obj
+                found.append((item, obj))
         index = max(cursor, index + 1)
     return frozenset(found)
 

@@ -1007,8 +1007,15 @@ def apply_established_scope_carry(state: dict | None) -> dict:
             solution,
             [{**item, "field": "key_capabilities"} for item in capability_findings],
         )
-        solution["integration_approach"] = _union_scope_items(
-            system_items, solution.get("integration_approach") or [], state
+        integration, integration_findings = _finalize_scope_items(
+            _union_scope_items(
+                system_items, solution.get("integration_approach") or [], state
+            )
+        )
+        solution["integration_approach"] = integration
+        _attach_quality_findings(
+            solution,
+            [{**item, "field": "integration_approach"} for item in integration_findings],
         )
         updates["solution"] = solution
         state["solution"] = solution

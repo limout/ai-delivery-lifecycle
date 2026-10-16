@@ -14,9 +14,16 @@ from pydantic import BaseModel, Field
 from app.agents import apply_established_scope_carry
 from app.graph import build_graph, build_optimization_graph, build_gap_close_graph
 from app.artifact_export import build_artifact_texts
-from app.assessment import build_assessment, build_verdict, format_assessment_text, format_print_assessment
+from app.assessment import (
+    build_assessment,
+    build_verdict,
+    format_assessment_text,
+    format_print_assessment,
+    repair_stored_comparison_text,
+)
 from app.decisions import (
     ClarificationDecisions,
+    apply_final_artifact_quality,
     apply_reconciled_project_state,
     build_clarification_state,
     clarification_question_status,
@@ -974,6 +981,7 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         non_blocking_questions=non_blocking_questions,
     )
 
+    repair_stored_comparison_text(result)
     resolved_run_id = run_id or result.get("run_id") or new_run_id()
     save_run(resolved_run_id, result)
 
@@ -1017,6 +1025,7 @@ def workflow_response(result: dict, run_id: str | None = None) -> dict:
         payload["deadline_gap_plan"] = None
     payload["gap_closing_available"] = gap_closing_eligible(payload)
     payload["artifact_texts"] = build_artifact_texts(payload)
+    apply_final_artifact_quality(payload)
     return payload
 
 

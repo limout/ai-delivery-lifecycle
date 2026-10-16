@@ -1473,6 +1473,69 @@ def _statement_rank(text: str) -> tuple[int, int, int]:
     return (finite, len(str(text).split()), len(str(text)))
 
 
+def _object_tokens(obj: str) -> set[str]:
+    return {part for part in str(obj or "").split() if part}
+
+
+def _behaviors_equivalent(
+    left: frozenset[tuple[str, str]],
+    right: frozenset[tuple[str, str]],
+) -> bool:
+    """Same behavior, including two integrations that name the same system."""
+    if left == right:
+        return True
+    if len(left) != 1 or len(right) != 1:
+        return False
+    (left_family, left_obj) = next(iter(left))
+    (right_family, right_obj) = next(iter(right))
+    if left_family != right_family or left_family != "integrate":
+        return False
+    left_tokens = _object_tokens(left_obj)
+    right_tokens = _object_tokens(right_obj)
+    return bool(left_tokens and right_tokens and left_tokens & right_tokens)
+
+
+def _integrate_single_covered(
+    signature: frozenset[tuple[str, str]],
+    other: frozenset[tuple[str, str]],
+) -> bool:
+    """A one-behavior integration summary already named by another item."""
+    if len(signature) != 1 or not other:
+        return False
+    family, obj = next(iter(signature))
+    if family != "integrate":
+        return False
+    tokens = _object_tokens(obj)
+    if not tokens:
+        return False
+    return any(
+        other_family == "integrate" and tokens & _object_tokens(other_obj)
+        for other_family, other_obj in other
+    )
+
+
+def _behavior_represented(
+    behavior: tuple[str, str],
+    other: frozenset[tuple[str, str]],
+) -> bool:
+    """True when one behavior is already stated, including under a broader object."""
+    family, obj = behavior
+    obj_tokens = _object_tokens(obj)
+    for other_family, other_obj in other:
+        if other_family != family:
+            continue
+        other_tokens = _object_tokens(other_obj)
+        if obj == other_obj:
+            return True
+        if family == "integrate" and obj_tokens and other_tokens and (obj_tokens & other_tokens):
+            return True
+        if obj_tokens and other_tokens and obj_tokens <= other_tokens:
+            return True
+        if not obj_tokens and not other_tokens:
+            return True
+    return False
+
+
 def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
     """Drop same-behavior paraphrases. Keep distinct behaviors.
 
@@ -1510,7 +1573,10 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 other
                 for other in kept
                 if signatures[other]
-                and signatures[other] == signature
+                and (
+                    _behaviors_equivalent(signatures[other], signature)
+                    or _integrate_single_covered(signature, signatures[other])
+                )
                 and conditions[other] == conditions[index]
             ),
             None,
@@ -1536,53 +1602,77 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
             }
         )
 
-    single_behaviors = {
-        next(iter(signatures[index]))
+    still_kept: list[int] = []
+    for index in kept:
+        signature = signatures[index]
+        if any(
+            other != index and _integrate_single_covered(signature, signatures[other])
+            for other in kept
+        ):
+            keeper = next(
+                texts[other]
+                for other in kept
+                if other != index and _integrate_single_covered(signature, signatures[other])
+            )
+            findings.append(
+                {
+                    "code": "PARAPHRASE_COLLAPSED",
+                    "removed": texts[index],
+                    "kept": keeper,
+                    "reason": "The statement repeats an integration already in this list.",
+                }
+            )
+            continue
+        still_kept.append(index)
+    kept = still_kept
+
+    def _coverage(index: int, pool: list[int]) -> tuple[list[str], list[tuple[str, str]]]:
+        represented: list[str] = []
+        missing: list[tuple[str, str]] = []
+        for behavior in signatures[index]:
+            covers = [
+                texts[other]
+                for other in pool
+                if other != index
+                and signatures[other]
+                and _behavior_represented(behavior, signatures[other])
+            ]
+            if covers:
+                represented.append(covers[0])
+            else:
+                missing.append(behavior)
+        return represented, missing
+
+    redundant = {
+        index
         for index in kept
-        if len(signatures[index]) == 1
+        if len(signatures[index]) >= 2 and not _coverage(index, kept)[1]
     }
     final: list[str] = []
     for index in kept:
         signature = signatures[index]
         text = texts[index]
-        if len(signature) >= 2 and signature <= single_behaviors:
-            covered = [
-                texts[other]
-                for other in kept
-                if other != index
-                and len(signatures[other]) == 1
-                and signatures[other] <= signature
-            ]
+        if index in redundant:
+            represented, _missing = _coverage(index, kept)
             findings.append(
                 {
                     "code": "COMPOUND_REDUNDANT",
                     "removed": text,
-                    "kept": covered,
+                    "kept": represented,
                     "reason": "Every behavior in this item is already stated separately.",
                 }
             )
             continue
         if len(signature) >= 2:
-            overlap = [
-                texts[other]
-                for other in kept
-                if other != index
-                and signatures[other]
-                and signatures[other] <= signature
-                and signatures[other] != signature
-            ]
-            other_behaviors = [
-                signatures[other]
-                for other in kept
-                if other != index and signatures[other]
-            ]
-            extra = signature - set().union(*other_behaviors) if other_behaviors else signature
-            if overlap and extra:
+            represented, missing = _coverage(
+                index, [other for other in kept if other not in redundant]
+            )
+            if represented and missing:
                 findings.append(
                     {
                         "code": "AMBIGUOUS_OVERLAP",
                         "item": text,
-                        "overlaps": overlap,
+                        "overlaps": represented,
                         "reason": (
                             "This item overlaps an existing behavior and also states "
                             "a distinct one. It was left unchanged."
@@ -1591,6 +1681,115 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 )
         final.append(text)
     return final, findings
+
+
+_FINAL_SCOPE_FIELDS = (
+    ("solution", "key_capabilities"),
+    ("solution", "integration_approach"),
+    ("proposal", "scope"),
+    ("sow", "in_scope"),
+    ("sow", "acceptance"),
+)
+
+
+def _string_leaves(value, location: str):
+    if isinstance(value, str):
+        if value.strip():
+            yield location, value
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _string_leaves(item, f"{location}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _string_leaves(item, f"{location}.{key}")
+
+
+def final_artifact_defects(payload: dict | None) -> list[dict]:
+    """Residual equivalent scope items and glued sentence fragments."""
+    from app.assessment import duplicated_sentence_fragments
+
+    payload = payload or {}
+    defects: list[dict] = []
+    for artifact_key, field in _FINAL_SCOPE_FIELDS:
+        artifact = payload.get(artifact_key)
+        if not isinstance(artifact, dict):
+            continue
+        _kept, findings = normalize_paraphrase_duplicates(artifact.get(field) or [])
+        for item in findings:
+            if item.get("code") not in {
+                "EXACT_DUPLICATE",
+                "PARAPHRASE_COLLAPSED",
+                "COMPOUND_REDUNDANT",
+            }:
+                continue
+            removed = str(item.get("removed") or "").strip()
+            defects.append(
+                {
+                    "kind": "equivalent_scope_item",
+                    "field": f"{artifact_key}.{field}",
+                    "code": item.get("code"),
+                    "removed": removed,
+                    "message": (
+                        f"Equivalent scope items remain in {artifact_key}.{field}: {removed}"
+                    ),
+                }
+            )
+    for artifact_key in (
+        "proposal",
+        "sow",
+        "solution",
+        "delivery_plan",
+        "estimate",
+        "delivery_review",
+        "assessment",
+    ):
+        artifact = payload.get(artifact_key)
+        if not isinstance(artifact, dict):
+            continue
+        for location, text in _string_leaves(artifact, artifact_key):
+            if duplicated_sentence_fragments(text):
+                defects.append(
+                    {
+                        "kind": "duplicated_sentence_fragment",
+                        "field": location,
+                        "message": f"Malformed duplicated sentence fragment in {location}.",
+                    }
+                )
+    for key in ("assessment_text", "print_assessment_text"):
+        text = payload.get(key)
+        if isinstance(text, str) and duplicated_sentence_fragments(text):
+            defects.append(
+                {
+                    "kind": "duplicated_sentence_fragment",
+                    "field": key,
+                    "message": f"Malformed duplicated sentence fragment in {key}.",
+                }
+            )
+    return defects
+
+
+def apply_final_artifact_quality(payload: dict | None) -> list[dict]:
+    """Surface leftover artifact defects on a READY review instead of hiding them."""
+    payload = payload or {}
+    defects = final_artifact_defects(payload)
+    if not defects:
+        payload["artifact_quality"] = "CLEAN"
+        return []
+    review = payload.get("delivery_review")
+    if not isinstance(review, dict):
+        review = {}
+        payload["delivery_review"] = review
+    warnings = [str(item) for item in review.get("warnings") or [] if str(item).strip()]
+    for defect in defects:
+        message = defect["message"]
+        if message not in warnings:
+            warnings.append(message)
+    review["warnings"] = warnings
+    review["artifact_quality"] = "DEFECTS"
+    payload["artifact_quality"] = "DEFECTS"
+    return defects
 
 
 _OFFLINE_DESIGN = re.compile(
