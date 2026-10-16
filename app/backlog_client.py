@@ -14,12 +14,10 @@ import httpx
 _LOG = logging.getLogger("app.backlog_client")
 
 _DEFAULT_GENERATE_TIMEOUT = 300.0
-_DEFAULT_STARTUP_TIMEOUT = 120.0
-_WAKE_CONNECT_TIMEOUT = 5.0
-_WAKE_READ_TIMEOUT = 5.0
-_WAKE_WRITE_TIMEOUT = 5.0
-_WAKE_POOL_TIMEOUT = 5.0
+# Render can return HTTP 502 for longer than a minute while a free instance boots.
+_DEFAULT_STARTUP_TIMEOUT = 180.0
 # Same budget as Invoke-RestMethod -TimeoutSec 30 against GET /health.
+# Every readiness attempt uses this. A shorter poll is answered with an immediate 502.
 _WAKE_REQUEST_TIMEOUT = 30.0
 _WAKE_DELAY_SECONDS = 2.0
 _WAKE_DELAY_MAX_SECONDS = 3.0
@@ -70,8 +68,7 @@ class BacklogNotReadyError(Exception):
             message = "Could not connect to the Backlog Agent during startup."
         elif self.reason == "upstream_bad_gateway":
             message = (
-                "Backlog Agent kept returning HTTP 502. "
-                "The process is not accepting requests."
+                "Backlog Agent kept returning HTTP 502 for the full startup window."
             )
         elif self.reason == "wake_timeout":
             message = "Backlog Agent wake-up timed out before the service responded."
@@ -251,24 +248,6 @@ def _settings() -> tuple[str, str, float, float]:
     return url, token, generate_timeout, startup_timeout
 
 
-def _bounded_timeout(read_timeout: float, remaining: float) -> httpx.Timeout:
-    read = min(max(read_timeout, 0.001), remaining)
-    connect = min(_WAKE_CONNECT_TIMEOUT, remaining)
-    return httpx.Timeout(
-        connect=max(connect, 0.001),
-        read=max(read, 0.001),
-        write=max(min(_WAKE_WRITE_TIMEOUT, remaining), 0.001),
-        pool=max(min(_WAKE_POOL_TIMEOUT, remaining), 0.001),
-    )
-
-
-def _poll_timeout(remaining: float) -> httpx.Timeout:
-    """Bound one readiness poll. These stay short; the wake request does not."""
-
-    configured = _env_float("BACKLOG_AGENT_HEALTH_TIMEOUT_SECONDS", _WAKE_READ_TIMEOUT)
-    return _bounded_timeout(min(configured, _WAKE_READ_TIMEOUT), remaining)
-
-
 def _wake_request_timeout(remaining: float) -> httpx.Timeout:
     """One GET /health budget, matching a 30-second Invoke-RestMethod timeout.
 
@@ -363,11 +342,10 @@ async def _probe_health_once(
     *,
     wake: bool = False,
 ) -> dict[str, bool | str | int | float | None]:
-    """GET /health once.
+    """GET /health once, with the same 30-second timeout as a cold-start wake.
 
-    ``wake=True`` is the explicit cold-start request: a 30-second timeout, the
-    same call as ``Invoke-RestMethod .../health -TimeoutSec 30``. Readiness
-    polls stay on the short health timeout.
+    ``wake`` only labels the log line. Short polls are not used: Render answers
+    those with an immediate HTTP 502 and the instance does not finish booting.
     """
 
     global _probe_attempt, _probe_started_at
@@ -376,8 +354,8 @@ async def _probe_health_once(
     if _probe_started_at is None:
         _probe_started_at = _now()
     started = _probe_started_at
-    budget = _WAKE_READ_TIMEOUT if remaining is None else remaining
-    timeout = _wake_request_timeout(budget) if wake else _poll_timeout(budget)
+    budget = _WAKE_REQUEST_TIMEOUT if remaining is None else remaining
+    timeout = _wake_request_timeout(budget)
     phase = "wake" if wake else "health"
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -447,7 +425,9 @@ async def _coalesced_probe(url: str) -> dict[str, bool | str | int | float]:
     async with _probe_lock:
         current = _probe_task
         if current is None or current.done():
-            current = asyncio.get_running_loop().create_task(_probe_health_once(url))
+            current = asyncio.get_running_loop().create_task(
+                _probe_health_once(url, _WAKE_REQUEST_TIMEOUT, wake=True)
+            )
             _probe_task = current
     return await current
 
@@ -518,10 +498,13 @@ def _failure_reason(
 
 
 async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
-    """Wake with one 30s GET /health, then poll GET /health until it is ready.
+    """Repeat a 30-second GET /health until the agent is ready.
 
-    A wake-up timeout or transient HTTP error is recoverable. POST /generate
-    is not issued here. A non-transient status stops the wait immediately.
+    Each attempt is the same request as
+    ``Invoke-RestMethod .../health -TimeoutSec 30``. A ready response ends the
+    wait. POST /generate is not issued here. A timeout, connection error, or
+    transient HTTP status is retried until the startup window ends. A
+    non-transient status stops the wait immediately.
     """
 
     started = _now()
@@ -532,10 +515,13 @@ async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
     timeouts = 0
     connections = 0
     statuses: list[int] = []
-    woke = False
+    attempts = 0
 
     def elapsed() -> float:
         return max(0.0, _now() - started)
+
+    def stage() -> str:
+        return "wake" if attempts <= 1 else "health"
 
     def give_up(phase: str) -> None:
         raise BacklogNotReadyError(
@@ -565,42 +551,26 @@ async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
             statuses.append(last_http_status)
         return outcome
 
-    remaining = deadline - _now()
-    if remaining <= 0:
-        give_up("wake")
-    wake = await _probe_health_once(url, remaining, wake=True)
-    outcome = observe(wake)
-    if outcome in {"unauthorized", "unavailable"}:
-        _raise_terminal_health(
-            outcome,
-            stage="wake",
-            http_status=last_http_status,
-            elapsed_seconds=elapsed(),
-            detail=last_detail,
-        )
-    if _now() >= deadline:
-        give_up("wake")
-    woke = True
-
     while True:
         remaining = deadline - _now()
         if remaining <= 0:
-            give_up("health" if woke else "wake")
-        result = await _probe_health_once(url, remaining, wake=False)
+            give_up(stage())
+        result = await _probe_health_once(url, remaining, wake=attempts == 0)
+        attempts += 1
         outcome = observe(result)
         if outcome == "ready":
             return
         if outcome in {"unauthorized", "unavailable"}:
             _raise_terminal_health(
                 outcome,
-                stage="health",
+                stage=stage(),
                 http_status=last_http_status,
                 elapsed_seconds=elapsed(),
                 detail=last_detail,
             )
         remaining = deadline - _now()
         if remaining <= 0:
-            give_up("health")
+            give_up(stage())
         await asyncio.sleep(min(delay, remaining))
         delay = min(_WAKE_DELAY_MAX_SECONDS, delay + 0.5)
         if _now() >= deadline:
@@ -608,7 +578,7 @@ async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
 
 
 async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Wake GET /health, poll until ready, then POST the envelope exactly once."""
+    """Repeat GET /health until it is ready, then POST the envelope exactly once."""
 
     started = _now()
     url, token, generate_timeout, startup_timeout = _settings()

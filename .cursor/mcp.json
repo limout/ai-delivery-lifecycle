@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "lipcean-wordpress": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@automattic/mcp-wordpress-remote@latest"
+      ],
+      "env": {
+        "WP_API_URL": "https://lipcean.com/wp-json/mcp/mcp-adapter-default-server",
+        "WP_API_USERNAME": "Cursor MCP",
+        "WP_API_PASSWORD": "9f5O ALED ljty HzJw wHpo lVcC",
+        "OAUTH_ENABLED": "false"
+      }
+    }
+  }
+}

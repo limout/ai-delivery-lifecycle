@@ -150,8 +150,8 @@ def test_backlog_status_ready(monkeypatch):
     assert all(call["method"] != "POST" for call in calls)
     timeout = clients[0]["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.read == 5.0
-    assert timeout.connect == 5.0
+    assert timeout.read == 30.0
+    assert timeout.connect == 30.0
     assert clients[0]["follow_redirects"] is True
 
 
@@ -252,30 +252,25 @@ def test_backlog_complete_health_then_single_generate(monkeypatch):
     _configure(monkeypatch)
     calls, clients, _clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), _response(200, SUCCESS_PAYLOAD)],
+        [_ok_health(), _response(200, SUCCESS_PAYLOAD)],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
 
     assert response.status_code == 200
     assert response.json() == SUCCESS_PAYLOAD
-    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    assert [call["method"] for call in calls] == ["GET", "POST"]
     assert [call["url"] for call in calls] == [
-        f"{AGENT_URL}/health",
         f"{AGENT_URL}/health",
         f"{AGENT_URL}/generate",
     ]
-    assert calls[2]["json"] == COMPLETE_ENVELOPE
-    assert calls[2]["headers"]["Authorization"] == f"Bearer {AGENT_TOKEN}"
+    assert calls[1]["json"] == COMPLETE_ENVELOPE
+    assert calls[1]["headers"]["Authorization"] == f"Bearer {AGENT_TOKEN}"
     assert calls[0].get("headers") in (None, {})
     wake_timeout = clients[0]["timeout"]
-    health_timeout = clients[1]["timeout"]
     assert isinstance(wake_timeout, httpx.Timeout)
-    assert isinstance(health_timeout, httpx.Timeout)
     assert wake_timeout.read == 30.0
-    assert health_timeout.read == 5.0
     assert clients[0]["follow_redirects"] is True
-    assert clients[1]["follow_redirects"] is True
     body = response.text
     assert AGENT_TOKEN not in body
     assert "Authorization" not in body
@@ -289,7 +284,6 @@ def test_sleeping_service_becomes_ready_after_transient_status_probes(monkeypatc
             httpx.ConnectError("connection refused"),
             _response(502, {"status": "error"}),
             httpx.TimeoutException("timed out"),
-            _ok_health(),
             _ok_health(),
             _ok_health(),
             _response(200, SUCCESS_PAYLOAD),
@@ -308,10 +302,9 @@ def test_sleeping_service_becomes_ready_after_transient_status_probes(monkeypatc
     _assert_status(ready, "ready", available=True)
     assert generated.status_code == 200
     assert generated.json() == SUCCESS_PAYLOAD
-    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "GET", "GET", "GET", "POST"]
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "GET", "GET", "POST"]
     assert calls[4]["url"] == f"{AGENT_URL}/health"
-    assert calls[5]["url"] == f"{AGENT_URL}/health"
-    assert calls[6]["url"] == f"{AGENT_URL}/generate"
+    assert calls[5]["url"] == f"{AGENT_URL}/generate"
     assert sum(1 for call in calls if call["method"] == "POST") == 1
 
 
@@ -396,6 +389,8 @@ def test_repeated_502_then_ready_posts_generate_once(monkeypatch):
     assert clock["t"] >= 2.0
     assert sum(1 for call in calls if call["method"] == "POST") == 1
     assert calls[-1]["headers"]["Authorization"] == f"Bearer {AGENT_TOKEN}"
+    health_timeouts = [client_info["timeout"] for client_info in _clients]
+    assert all(isinstance(item, httpx.Timeout) and item.read == 30.0 for item in health_timeouts[:-1])
 
 
 def test_timeouts_then_ready_posts_generate_once(monkeypatch):
@@ -477,8 +472,8 @@ def test_health_read_timeout_cannot_consume_the_startup_window(monkeypatch):
     assert response.status_code == 200
     timeout = clients[0]["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.read == 5.0
-    assert timeout.connect == 5.0
+    assert timeout.read == 30.0
+    assert timeout.connect == 30.0
 
 
 @pytest.mark.parametrize(
@@ -498,14 +493,13 @@ def test_generate_normalizes_origin_health_and_generate(monkeypatch, raw_url):
     monkeypatch.setenv("BACKLOG_AGENT_STARTUP_TIMEOUT_SECONDS", "120")
     calls, _clients, _clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), _response(200, SUCCESS_PAYLOAD)],
+        [_ok_health(), _response(200, SUCCESS_PAYLOAD)],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
 
     assert response.status_code == 200
     assert [call["url"] for call in calls] == [
-        f"{AGENT_URL}/health",
         f"{AGENT_URL}/health",
         f"{AGENT_URL}/generate",
     ]
@@ -538,7 +532,7 @@ def test_wake_health_timeout_then_later_poll_posts_generate_once(monkeypatch):
     assert isinstance(wake_timeout, httpx.Timeout)
     assert isinstance(poll_timeout, httpx.Timeout)
     assert wake_timeout.read == 30.0
-    assert poll_timeout.read == 5.0
+    assert poll_timeout.read == 30.0
     assert sum(1 for call in calls if call["method"] == "POST") == 1
     assert calls[-1]["json"] == COMPLETE_ENVELOPE
 
@@ -547,7 +541,7 @@ def test_ready_service_is_polled_before_one_generate(monkeypatch):
     _configure(monkeypatch)
     calls, clients, clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), _response(200, SUCCESS_PAYLOAD)],
+        [_ok_health(), _response(200, SUCCESS_PAYLOAD)],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
@@ -555,13 +549,11 @@ def test_ready_service_is_polled_before_one_generate(monkeypatch):
     assert response.status_code == 200
     assert [call["url"] for call in calls] == [
         f"{AGENT_URL}/health",
-        f"{AGENT_URL}/health",
         f"{AGENT_URL}/generate",
     ]
     assert clock["t"] == 0.0
     assert isinstance(clients[0]["timeout"], httpx.Timeout)
     assert clients[0]["timeout"].read == 30.0
-    assert clients[1]["timeout"].read == 5.0
     assert sum(1 for call in calls if call["method"] == "POST") == 1
 
 
@@ -617,8 +609,8 @@ def test_concurrent_status_probes_share_one_health_request(monkeypatch):
     _configure(monkeypatch)
     probes = []
 
-    async def _probe(url: str):
-        probes.append(url)
+    async def _probe(url: str, remaining: float | None = None, *, wake: bool = False):
+        probes.append((url, remaining, wake))
         await asyncio.sleep(0.02)
         return {
             "available": True,
@@ -634,7 +626,7 @@ def test_concurrent_status_probes_share_one_health_request(monkeypatch):
 
     results = asyncio.run(_run())
     assert [item["status"] for item in results] == ["ready", "ready"]
-    assert probes == [AGENT_URL]
+    assert probes == [(AGENT_URL, 30.0, True)]
 
 
 def test_backlog_missing_configuration(monkeypatch):
@@ -721,7 +713,7 @@ def test_backlog_health_timeout_does_not_generate(monkeypatch):
 
 def test_backlog_downstream_error(monkeypatch):
     _configure(monkeypatch)
-    _patch_http(monkeypatch, [_ok_health(), _ok_health(), _response(500, {"detail": "boom"})])
+    _patch_http(monkeypatch, [_ok_health(), _response(500, {"detail": "boom"})])
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
 
@@ -737,7 +729,7 @@ def test_backlog_downstream_validation_error(monkeypatch):
     _configure(monkeypatch)
     _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), _response(422, {"detail": "bad envelope"})],
+        [_ok_health(), _response(422, {"detail": "bad envelope"})],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
@@ -751,7 +743,7 @@ def test_backlog_generation_timeout_is_unconfirmed(monkeypatch):
     _configure(monkeypatch)
     calls, _clients, _clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), httpx.TimeoutException("timed out")],
+        [_ok_health(), httpx.TimeoutException("timed out")],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
@@ -761,7 +753,7 @@ def test_backlog_generation_timeout_is_unconfirmed(monkeypatch):
     assert data["error"] == "BACKLOG_GENERATION_UNCONFIRMED"
     assert "unknown" in data["message"].lower()
     assert "generation failed" not in data["message"].lower()
-    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    assert [call["method"] for call in calls] == ["GET", "POST"]
     assert calls[-1]["url"] == f"{AGENT_URL}/generate"
 
 
@@ -769,7 +761,7 @@ def test_backlog_unauthorized_generate(monkeypatch):
     _configure(monkeypatch)
     calls, _clients, _clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), _response(401, {"detail": "bad token"})],
+        [_ok_health(), _response(401, {"detail": "bad token"})],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)
@@ -779,7 +771,7 @@ def test_backlog_unauthorized_generate(monkeypatch):
     assert data["error"] == "BACKLOG_UNAUTHORIZED"
     assert "bad token" not in response.text
     assert AGENT_TOKEN not in response.text
-    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    assert [call["method"] for call in calls] == ["GET", "POST"]
     assert calls[-1]["url"] == f"{AGENT_URL}/generate"
 
 
@@ -829,7 +821,7 @@ def test_backlog_does_not_retry_generation(monkeypatch):
     _configure(monkeypatch)
     calls, _clients, _clock, _started = _patch_http(
         monkeypatch,
-        [_ok_health(), _ok_health(), httpx.ConnectError("interrupted")],
+        [_ok_health(), httpx.ConnectError("interrupted")],
     )
 
     response = client.post("/backlog", json=COMPLETE_ENVELOPE)

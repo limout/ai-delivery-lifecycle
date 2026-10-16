@@ -49,7 +49,7 @@ def can_queue_backlog_generate(
     )
 
 
-WAKE_BUDGET_MS = 180000
+WAKE_BUDGET_MS = 240000
 WAKE_POLL_MS = 3000
 IDLE_POLL_MS = 60000
 PERMANENT_STATUSES = {"not_configured", "unauthorized", "invalid_url"}
@@ -500,7 +500,7 @@ def test_generation_failure_preserves_analysis_contract():
 def test_polling_only_while_backlog_visible():
     assert "const BACKLOG_POLL_MS = 60000;" in INDEX
     assert "const BACKLOG_WAKE_POLL_MS = 3000;" in INDEX
-    assert "const BACKLOG_WAKE_BUDGET_MS = 180000;" in INDEX
+    assert "const BACKLOG_WAKE_BUDGET_MS = 240000;" in INDEX
     assert "function shouldPollBacklogStatus()" in INDEX
     assert 'currentArtifactTab === "backlog" && !document.hidden' in INDEX
     assert "visibilitychange" in INDEX
