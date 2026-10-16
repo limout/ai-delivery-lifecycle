@@ -911,6 +911,9 @@ class MockProvider(AIProvider):
                 "contradictions": [],
             }
 
+        if "you classify optional clarification questions" in prompt_lower:
+            return {"classifications": []}
+
         # IMPORTANT: this branch must return the validation schema.
         if "whether the project definition is" in prompt_lower:
             has_timeline = (

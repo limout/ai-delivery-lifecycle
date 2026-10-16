@@ -15,6 +15,8 @@ from app.decisions import (
     qualify_unresolved_sow_deliverables,
     question_text,
     reconcile_discovery_actors,
+    apply_optional_classifications,
+    classify_optional_questions,
     reconcile_open_questions,
     strip_verified_clarification_items,
 )
@@ -2030,6 +2032,21 @@ REQUIREMENTS:
             reasons.append(
                 "Material scope or integration evidence is missing, so a numeric estimate is not yet responsible."
             )
+
+    if state.get("clarification_history") or state.get("clarification_state"):
+        try:
+            classifications = classify_optional_questions(
+                provider, non_blocking_questions, state
+            )
+        except Exception:
+            _log.debug("optional question classification failed; using answer history only")
+            classifications = []
+        non_blocking_questions = [
+            question_text(item)
+            for item in apply_optional_classifications(
+                non_blocking_questions, classifications, state
+            )
+        ]
 
     validation = {
         "status": status,

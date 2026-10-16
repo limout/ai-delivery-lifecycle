@@ -116,9 +116,19 @@ _PENDING_REMAINDER = re.compile(
     r"|"
     r"(?:still\s+)?needs?\s+to\s+be\s+(approved|confirmed|decided|agreed|"
     r"defined|specified|established)"
+    r"|"
+    r"(?:still\s+)?remains?\s+(unconfirmed|unapproved|undecided|undefined)"
     r")",
     re.I,
 )
+_OPEN_STATUS_VERBS = {
+    "unconfirmed": "confirmed",
+    "unapproved": "approved",
+    "undecided": "decided",
+    "undefined": "defined",
+}
+_CONTRAST_SPLIT = re.compile(r"\s+\bbut\b\s+|;\s+", re.I)
+_FIGURE = re.compile(r"\b\d[\d,.]*\b|\b(?:thousand|million)\b", re.I)
 _CAPACITY = re.compile(
     r"\b(volume|capacity|concurrent|concurrency|user counts?|peak load|"
     r"peak concurrency|usage volume)\b",
@@ -282,6 +292,23 @@ def _matching_bigrams(first: str, second: str) -> bool:
     return False
 
 
+def _contrast_clauses(unit: str) -> list[str]:
+    """Split a sentence when one clause is established and another stays open.
+
+    A proposal followed by its own missing approval stays one statement.
+    "The initial scope is defined, but record volumes remain unconfirmed"
+    becomes an established fact plus a separate open aspect.
+    """
+
+    parts = [part.strip(" ,;") for part in _CONTRAST_SPLIT.split(str(unit or "")) if part.strip(" ,;")]
+    if len(parts) < 2:
+        return [unit] if unit else []
+    flags = [is_pending_text(part) for part in parts]
+    if any(flags) and not all(flags):
+        return parts
+    return [unit]
+
+
 def is_pending_text(text: str) -> bool:
     """True when the wording leaves a decision open (deferral or pending approval)."""
     value = str(text or "")
@@ -357,7 +384,9 @@ def _statements_from_legacy_sources(state: dict | None) -> list[ClarifiedStateme
         seen_records.add(key)
 
         question_tokens = content_tokens(real_question)
-        units = _sentences(body)
+        units = []
+        for sentence in _sentences(body):
+            units.extend(_contrast_clauses(sentence))
         pending = [is_pending_text(unit) for unit in units]
         # A short follow-up such as "That is not yet approved." qualifies the
         # sentence before it.
@@ -594,8 +623,21 @@ def build_clarification_state(
         )
 
     pending_state = {"clarification_state": {"decisions": decisions}}
-    for text in ClarificationDecisions(pending_state).remainder_questions():
-        add_question(_question_status_record(text, "OPEN", "RECOMMENDED", False))
+    pending_decisions = ClarificationDecisions(pending_state)
+    for text in pending_decisions.remainder_questions():
+        reason = next(
+            (
+                statement.text
+                for statement in pending_decisions.pending
+                if _pending_matches_question(statement, text)
+                or (
+                    statement.question
+                    and _same_question_text(text, statement.question)
+                )
+            ),
+            "",
+        )
+        add_question(_question_status_record(text, "OPEN", "RECOMMENDED", False, reason))
 
     if blocking_questions is None:
         blocking_questions = (
@@ -721,6 +763,7 @@ class ClarificationDecisions:
             seen.add(key)
 
         for statements in grouped.values():
+            statements = _without_subsumed_clauses(statements)
             original = statements[0].question.strip()
             specific: list[str] = []
             fallback: list[str] = []
@@ -740,6 +783,98 @@ class ClarificationDecisions:
             elif original:
                 add(_narrowed_from_pending(original, statements) or original)
         return remainders
+
+
+def _without_subsumed_clauses(
+    statements: list[ClarifiedStatement],
+) -> list[ClarifiedStatement]:
+    """Drop a combined sentence when a contrast clause from it is also present."""
+
+    kept = []
+    for statement in statements:
+        text = statement.text.strip()
+        if any(
+            other is not statement
+            and other.text.strip()
+            and other.text.strip() in text
+            and len(other.text.strip()) < len(text)
+            for other in statements
+        ):
+            continue
+        kept.append(statement)
+    return kept or list(statements)
+
+
+def _decision_subject(text: str) -> frozenset[str]:
+    """Content words of a question after approval, proposal, and frame wording."""
+
+    frames = frozenset(
+        _stem(word)
+        for word in (
+            "approved",
+            "approval",
+            "approve",
+            "confirmed",
+            "confirmation",
+            "confirm",
+            "signed",
+            "signoff",
+            "proposed",
+            "proposal",
+            "propose",
+            "provisional",
+            "tentative",
+            "draft",
+            "validation",
+            "validate",
+            "required",
+            "require",
+            "assumption",
+            "assumptions",
+            "stakeholder",
+            "business",
+            "decision",
+            "whether",
+        )
+    )
+    return content_tokens(text) - _FRAME_STEMS - frames
+
+
+def _same_open_decision(candidate: str, existing: str, decisions: ClarificationDecisions) -> bool:
+    """True when a new wording asks for a decision the history already left open.
+
+    Shared topic words are not enough. A stated numerical assumption and the
+    question of whether that figure is approved stay distinct. An approval
+    paraphrase of a decision that is already open does not.
+    """
+
+    if _is_approval_question(candidate) != _is_approval_question(existing):
+        if _FIGURE.search(candidate) or _FIGURE.search(existing):
+            return False
+    left = _decision_subject(candidate)
+    right = _decision_subject(existing)
+    if not left or not right:
+        return False
+    shared = _shared_stem_count(left, right)
+    smaller = min(len(left), len(right))
+    if shared < min(2, smaller) or shared / smaller < 0.6:
+        return False
+    extra = left - right
+    if extra & _REFINEMENT_STEMS:
+        return False
+    pending_tokens: set[str] = set()
+    for statement in decisions.pending:
+        if _pending_matches_question(statement, existing) or _pending_matches_question(
+            statement, candidate
+        ):
+            pending_tokens |= set(statement.own_tokens)
+    if not pending_tokens:
+        return False
+    if extra and not (extra & (pending_tokens - _FRAME_STEMS)):
+        # The new wording asks about something the recorded answer never left open.
+        if shared / max(len(left), len(right)) < 0.8:
+            return False
+    return True
 
 
 def question_text(item) -> str:
@@ -767,11 +902,51 @@ def _with_question_text(item, text: str):
     return text
 
 
+def _introduced_values(answer: str, question: str) -> bool:
+    """True when an answer names a proposed value the question did not already state."""
+
+    match = re.search(
+        r"\b(?:propos\w*|suggest\w*)\s+(.+?)(?:\bbut\b|,|;|$)",
+        str(answer or ""),
+        flags=re.I,
+    )
+    if not match:
+        return False
+    value = match.group(1)
+    frames = {
+        "a", "an", "the", "we", "our", "to", "be", "of", "and", "or",
+        "proposed", "proposal", "suggest", "suggested", "using",
+    }
+    question_words = set(re.findall(r"[a-z0-9]+", str(question or "").lower()))
+    leftovers = []
+    for word in re.findall(r"[A-Za-z0-9]+", value):
+        if word.lower() in question_words:
+            continue
+        if word.lower() in frames and not (word.isupper() and word.isalpha()):
+            continue
+        leftovers.append(word)
+    return bool(leftovers)
+
+
+def _approval_restates_question(candidate: str, original: str) -> bool:
+    """True when an approval ask has no subject beyond the original question."""
+
+    left = _decision_subject(candidate)
+    right = _decision_subject(original)
+    if not left or not right:
+        return False
+    return not (left - right) and _shared_stem_count(left, right) >= min(2, len(left))
+
+
 def questions_equivalent(first: str, second: str) -> bool:
     """True when two questions ask about the same remaining decision."""
     a = content_tokens(first) - _FRAME_STEMS
     b = content_tokens(second) - _FRAME_STEMS
     if not a or not b:
+        return False
+    if _is_approval_question(first) != _is_approval_question(second) and (
+        _FIGURE.search(first) or _FIGURE.search(second)
+    ):
         return False
     shared = _shared_stem_count(a, b)
     if shared < min(2, len(a), len(b)):
@@ -790,13 +965,30 @@ def questions_equivalent(first: str, second: str) -> bool:
         return True
     # "Have these usage figures been established?" asks for the same
     # capacity inputs as "What is the expected user volume and load?"
+    # Approval of a stated figure is a separate fact from collecting the load.
     if _is_usage_estimate_question(first) and _is_usage_estimate_question(second):
+        if _is_approval_question(first) != _is_approval_question(second) and (
+            _FIGURE.search(first) or _FIGURE.search(second)
+        ):
+            return False
         return True
     return False
 
 
+def _mentions_approval(text: str) -> bool:
+    """True when the text asks for or states an approval or confirmation.
+
+    ``approved`` does not end on a word boundary after the stem ``approv``,
+    so the narrower approval-ask pattern is not enough here.
+    """
+
+    return bool(
+        re.search(r"\b(?:approv\w*|sign-?off|signed off|confirm\w*)\b", str(text or ""), re.I)
+    )
+
+
 def _is_approval_question(text: str) -> bool:
-    return bool(_APPROVAL_ASK.search(str(text or "")))
+    return bool(_APPROVAL_ASK.search(str(text or ""))) or _mentions_approval(text)
 
 
 def _has_proposal(text: str) -> bool:
@@ -866,6 +1058,8 @@ def _pending_matches_question(statement: ClarifiedStatement, text: str) -> bool:
         statement.question
     ):
         return True
+    if _FIGURE.search(text) and not _FIGURE.search(statement.text) and _mentions_approval(text):
+        return False
     return _overlaps(
         content_tokens(text) - _FRAME_STEMS,
         statement.own_tokens - _FRAME_STEMS,
@@ -884,6 +1078,16 @@ def _question_from_pending_text(text: str) -> str:
     blob = str(text or "").strip()
     if blob.endswith("?"):
         return blob
+    actor_object = re.search(
+        r"\bhas\s+not\s+(?:yet\s+)?approved\s+(?:a\s+|an\s+|the\s+)?(.+)",
+        blob,
+        flags=re.I,
+    )
+    if actor_object:
+        subject = re.sub(r"\s+yet$", "", actor_object.group(1).strip(" .,"), flags=re.I)
+        subject = re.sub(r"^(that|the|whether|a|an)\s+", "", subject, flags=re.I).strip(" ,")
+        if subject:
+            return f"Has {subject} been approved?"
     remainder = blob
     for separator in (r"\bbut\b", r";"):
         match = re.search(separator, remainder)
@@ -899,7 +1103,7 @@ def _question_from_pending_text(text: str) -> str:
     subject = re.sub(r"^(that|the|whether)\s+", "", parsed.group(1).strip(), flags=re.I)
     subject = subject.rstrip(" ,")
     verb = next((group for group in parsed.groups()[1:] if group), "approved")
-    verb = verb.lower().replace("signed off", "signed off")
+    verb = _OPEN_STATUS_VERBS.get(verb.lower(), verb.lower()).replace("signed off", "signed off")
     if not subject:
         return ""
     aux = "Have" if (" and " in subject.lower() or subject.lower().endswith("s")) else "Has"
@@ -910,37 +1114,39 @@ def _question_from_pending_text(text: str) -> str:
     return f"{aux} {subject} been {verb}?"
 
 
+def _usage_collection_blob(blob: str, original: str) -> bool:
+    """True when the pending text is an unspecified usage/load estimate.
+
+    A historical-record volume, or approval of a stated figure, is not this case.
+    """
+
+    if _has_proposal(blob) or _FIGURE.search(blob):
+        return False
+    return _is_usage_estimate_question(blob) or (
+        _is_capacity_text(blob) and _is_usage_estimate_question(original)
+    )
+
+
 def _narrowed_from_pending(original: str, pending: list[ClarifiedStatement]) -> str:
     original = str(original or "").strip()
     blob = " ".join(statement.text for statement in pending)
-    if _is_capacity_text(blob) and not _has_proposal(blob):
+    if _usage_collection_blob(blob, original):
         if original.endswith("?") and not _is_approval_question(original):
             return original
         return CAPACITY_COLLECTION_QUESTION
-    if original.endswith("?") and not _has_proposal(blob) and not re.search(
-        r"signed off|sign-off|"
-        r"not(?:\s+yet)?(?:\s+been)?\s+(?:defined|specified|established|decided)|"
-        r"not(?:\s+yet)?\s+been\s+approved|"
-        r"has not been (?:decided|approved)|"
-        r"(?:still\s+)?needs?\s+to\s+be\s+(?:defined|specified|established|decided|approved|confirmed)",
-        blob,
-        re.I,
-    ):
-        return original
     candidate = _question_from_pending_text(blob)
     if candidate:
-        if _is_capacity_text(candidate) and not _has_proposal(blob):
+        if _usage_collection_blob(candidate, original):
             return original if original.endswith("?") and not _is_approval_question(original) else CAPACITY_COLLECTION_QUESTION
-        return candidate
-    if _has_proposal(blob) and original.endswith("?"):
-        stem = re.sub(
-            r"^(what are the|what is the|what are|what is|which|who|how|when|where)\s+",
-            "",
-            original.rstrip("?").strip(),
-            flags=re.I,
-        )
-        if stem:
-            return f"Has the proposed {stem} been approved?"
+        if (
+            _approval_restates_question(candidate, original)
+            and not _introduced_values(blob, original)
+        ):
+            return original
+        if not _same_question_text(candidate, original):
+            return candidate
+    # An answer that only says the decision is still open must not be rewritten
+    # into a new "Has the proposed <original question> been approved?" item.
     return original or next((s.text for s in pending if s.text), "")
 
 
@@ -959,6 +1165,148 @@ def dedupe_equivalent_questions(items: list) -> list:
             continue
         kept.append(item)
         kept_text.append(text)
+    return kept
+
+
+_OPTIONAL_STATUS = frozenset({"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "NEW"})
+
+OPTIONAL_QUESTION_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "classifications": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "NEW"],
+                    },
+                    "rationale": {"type": "string"},
+                    "source_question": {"type": "string"},
+                    "source_answer": {"type": "string"},
+                    "remaining": {"type": "string"},
+                },
+                "required": [
+                    "question",
+                    "status",
+                    "rationale",
+                    "source_question",
+                    "source_answer",
+                ],
+            },
+        }
+    },
+    "required": ["classifications"],
+}
+
+
+def classify_optional_questions(provider, candidates: list, state: dict | None) -> list[dict]:
+    """Classify every new optional question against answer history in one call.
+
+    Retrieval is not used as the decision. The model must cite the source
+    question and answer. Callers still apply the deterministic invariants:
+    an unapproved fact cannot become resolved, and a failed call leaves the
+    candidate list unchanged.
+    """
+
+    texts = [question_text(item) for item in candidates or [] if question_text(item)]
+    if provider is None or not texts or not _clarification_pairs(state):
+        return []
+    history = [
+        {"question": question, "answer": answer}
+        for question, answer in _clarification_pairs(state)
+        if str(answer or "").strip()
+    ]
+    prompt = f"""
+You classify optional clarification questions against answers the customer already gave.
+Answer history is a source of facts. Do not ask again for a decision that is already recorded.
+
+For each candidate return one of:
+- RESOLVED: an answer already settles it. Do not show it again.
+- PARTIALLY_RESOLVED: part of the answer is established. Put only the still-unknown detail in "remaining".
+- UNRESOLVED: the same decision is already open. A different wording is not a new question.
+- NEW: a distinct unknown that earlier answers do not cover.
+
+The same topic is not enough to call two questions the same fact. Expected system load and
+approval of a stated numerical assumption are related and still distinct when a figure was given.
+An unapproved or provisional assumption is not approved. Do not mark it RESOLVED.
+
+Answer history:
+{history}
+
+Candidates:
+{texts}
+"""
+    raw = provider.generate_json(prompt, OPTIONAL_QUESTION_STATUS_SCHEMA)
+    rows = raw.get("classifications") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return []
+    classified = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().upper()
+        question = str(row.get("question") or "").strip()
+        if status not in _OPTIONAL_STATUS or not question:
+            continue
+        classified.append(
+            {
+                "question": question,
+                "status": status,
+                "rationale": str(row.get("rationale") or ""),
+                "source_question": str(row.get("source_question") or ""),
+                "source_answer": str(row.get("source_answer") or ""),
+                "remaining": str(row.get("remaining") or ""),
+            }
+        )
+    return classified
+
+
+def apply_optional_classifications(questions: list, classifications: list, state: dict | None) -> list:
+    """Apply one batched classification without overriding answer facts."""
+
+    if not classifications:
+        return list(questions or [])
+    decisions = ClarificationDecisions(state)
+    open_questions = decisions.remainder_questions() + decisions.pending_questions()
+    drop: set[str] = set()
+    replace: dict[str, str] = {}
+    for row in classifications:
+        text = row["question"]
+        status = row["status"]
+        if status == "RESOLVED":
+            if decisions.resolves(text):
+                drop.add(normalize_question_text(text))
+            continue
+        if status == "UNRESOLVED":
+            if any(
+                _same_open_decision(text, existing, decisions)
+                or questions_equivalent(text, existing)
+                or _same_question_text(text, existing)
+                for existing in open_questions
+            ):
+                drop.add(normalize_question_text(text))
+            continue
+        if status == "PARTIALLY_RESOLVED":
+            remaining = str(row.get("remaining") or "").strip()
+            if remaining and not decisions.resolves(remaining):
+                replace[normalize_question_text(text)] = remaining
+            elif any(
+                _pending_matches_question(statement, text) for statement in decisions.pending
+            ):
+                drop.add(normalize_question_text(text))
+    kept = []
+    for item in questions or []:
+        text = question_text(item)
+        key = normalize_question_text(text)
+        if key in drop:
+            continue
+        if key in replace:
+            kept.append(_with_question_text(item, replace[key]))
+            continue
+        kept.append(item)
     return kept
 
 
@@ -994,10 +1342,20 @@ def _prefer_remaining(current: str, candidate: str, decisions: ClarificationDeci
         or _has_proposal(candidate)
     )
     if pending_context and has_proposal:
-        if _is_approval_question(candidate) and not _is_approval_question(current):
-            return candidate
-        if _is_approval_question(current) and not _is_approval_question(candidate):
-            return current
+        narrowed = any(
+            _question_from_pending_text(statement.text)
+            and (
+                questions_equivalent(candidate, _question_from_pending_text(statement.text))
+                or questions_equivalent(current, _question_from_pending_text(statement.text))
+            )
+            for statement in decisions.pending
+            if _has_proposal(statement.text)
+        )
+        if narrowed:
+            if _is_approval_question(candidate) and not _is_approval_question(current):
+                return candidate
+            if _is_approval_question(current) and not _is_approval_question(candidate):
+                return current
     elif pending_context or _is_capacity_text(current) or _is_capacity_text(candidate):
         if _is_approval_question(candidate) and not _is_approval_question(current):
             return current
@@ -1168,6 +1526,7 @@ def reconcile_open_questions(questions: list, state: dict | None) -> list:
                 for index, existing in enumerate(kept_text)
                 if _same_question_text(text, existing)
                 or questions_equivalent(text, existing)
+                or _same_open_decision(text, existing, decisions)
             ),
             None,
         )
