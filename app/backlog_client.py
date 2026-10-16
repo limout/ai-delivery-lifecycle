@@ -19,11 +19,8 @@ _WAKE_CONNECT_TIMEOUT = 5.0
 _WAKE_READ_TIMEOUT = 5.0
 _WAKE_WRITE_TIMEOUT = 5.0
 _WAKE_POOL_TIMEOUT = 5.0
-# A cold Render instance stays asleep through short /health probes. The request
-# that wakes it is GET / held open for about a minute. This cap covers that
-# delay and still leaves a health reserve inside the 120s startup window.
-_ORIGIN_WAKE_READ_TIMEOUT = 75.0
-_HEALTH_RESERVE_SECONDS = 20.0
+# Same budget as Invoke-RestMethod -TimeoutSec 30 against GET /health.
+_WAKE_REQUEST_TIMEOUT = 30.0
 _WAKE_DELAY_SECONDS = 2.0
 _WAKE_DELAY_MAX_SECONDS = 3.0
 _TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -49,7 +46,7 @@ class BacklogInvalidUrlError(Exception):
 
 
 class BacklogNotReadyError(Exception):
-    """The origin wake or the following health checks did not succeed in time."""
+    """The wake-up request or the following health checks did not succeed in time."""
 
     def __init__(
         self,
@@ -57,66 +54,140 @@ class BacklogNotReadyError(Exception):
         *,
         reason: str = "health_deadline",
         stage: str = "health",
+        elapsed_seconds: float | None = None,
+        detail: str | None = None,
     ) -> None:
         self.stage = stage
         self.http_status = http_status
         self.reason = reason
+        self.elapsed_seconds = elapsed_seconds
+        self.detail = detail
         super().__init__(self.public_message)
 
     @property
     def public_message(self) -> str:
         if self.reason == "connection_failure":
-            return "Could not connect to the Backlog Agent during startup."
-        if self.reason == "upstream_bad_gateway":
-            return (
+            message = "Could not connect to the Backlog Agent during startup."
+        elif self.reason == "upstream_bad_gateway":
+            message = (
                 "Backlog Agent kept returning HTTP 502. "
                 "The process is not accepting requests."
             )
-        if self.reason == "wake_timeout":
-            return "Backlog Agent wake-up timed out before the service responded."
-        if self.http_status is not None:
-            return (
+        elif self.reason == "wake_timeout":
+            message = "Backlog Agent wake-up timed out before the service responded."
+        elif self.http_status is not None:
+            message = (
                 "Backlog Agent did not become ready before the health deadline. "
                 f"Last health status was HTTP {self.http_status}."
             )
-        return "Backlog Agent did not become ready before the health deadline."
+        else:
+            message = "Backlog Agent did not become ready before the health deadline."
+        return _with_error_context(message, self.elapsed_seconds, self.detail)
 
 
 class BacklogUnavailableError(Exception):
-    """Backlog Agent is not reachable or not healthy."""
+    """Backlog Agent returned a non-transient HTTP error."""
 
-    def __init__(self, http_status: int | None = None, stage: str = "health") -> None:
-        super().__init__("backlog agent is unavailable")
+    def __init__(
+        self,
+        http_status: int | None = None,
+        stage: str = "health",
+        *,
+        elapsed_seconds: float | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.stage = stage
         self.http_status = http_status
+        self.elapsed_seconds = elapsed_seconds
+        self.detail = detail
+        super().__init__(self.public_message)
+
+    @property
+    def public_message(self) -> str:
+        status = f" HTTP {self.http_status}." if self.http_status is not None else "."
+        return _with_error_context(
+            f"Backlog Agent returned a non-transient error during {self.stage}.{status}",
+            self.elapsed_seconds,
+            self.detail,
+        )
 
 
 class BacklogUnauthorizedError(Exception):
     """Backlog Agent rejected the bearer token."""
 
-    def __init__(self, http_status: int | None = None, stage: str = "health") -> None:
-        super().__init__("backlog agent rejected the bearer token")
+    def __init__(
+        self,
+        http_status: int | None = None,
+        stage: str = "health",
+        *,
+        elapsed_seconds: float | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.stage = stage
         self.http_status = http_status
+        self.elapsed_seconds = elapsed_seconds
+        self.detail = detail
+        super().__init__(self.public_message)
+
+    @property
+    def public_message(self) -> str:
+        status = f" HTTP {self.http_status}." if self.http_status is not None else "."
+        return _with_error_context(
+            f"Backlog Agent authentication failed during {self.stage}.{status}",
+            self.elapsed_seconds,
+            self.detail,
+        )
 
 
 class BacklogGenerationUnconfirmedError(Exception):
     """POST /generate timed out or was interrupted; the result is unknown."""
 
-    def __init__(self) -> None:
-        super().__init__("backlog generation did not return a confirmed result")
+    def __init__(
+        self,
+        *,
+        elapsed_seconds: float | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.stage = "generate"
         self.http_status = None
+        self.elapsed_seconds = elapsed_seconds
+        self.detail = detail or "POST /generate did not return a response. The result is unknown."
+        super().__init__(self.public_message)
+
+    @property
+    def public_message(self) -> str:
+        return _with_error_context(
+            "Backlog generation did not return a confirmed result. The outcome is unknown.",
+            self.elapsed_seconds,
+            self.detail,
+        )
 
 
 class BacklogDownstreamError(Exception):
     """The Backlog Agent returned a non-success HTTP status."""
 
-    def __init__(self, status_code: int, stage: str = "generate") -> None:
-        super().__init__("backlog agent returned an error")
+    def __init__(
+        self,
+        status_code: int,
+        stage: str = "generate",
+        *,
+        elapsed_seconds: float | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.status_code = status_code
         self.stage = stage
         self.http_status = status_code
+        self.elapsed_seconds = elapsed_seconds
+        self.detail = detail or f"POST /generate returned HTTP {status_code}."
+        super().__init__(self.public_message)
+
+    @property
+    def public_message(self) -> str:
+        if self.status_code == 422:
+            message = "Backlog Agent rejected the request."
+        else:
+            message = "Backlog Agent returned an error."
+        return _with_error_context(message, self.elapsed_seconds, self.detail)
 
 
 def reset_wake_state() -> None:
@@ -127,6 +198,19 @@ def reset_wake_state() -> None:
     _probe_lock = None
     _probe_started_at = None
     _probe_attempt = 0
+
+
+def _with_error_context(
+    message: str,
+    elapsed_seconds: float | None,
+    detail: str | None,
+) -> str:
+    parts = [message.strip()]
+    if detail and detail.strip() and detail.strip() not in parts[0]:
+        parts.append(detail.strip())
+    if elapsed_seconds is not None:
+        parts.append(f"Elapsed {max(0.0, elapsed_seconds):.1f}s.")
+    return " ".join(parts)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -178,33 +262,22 @@ def _bounded_timeout(read_timeout: float, remaining: float) -> httpx.Timeout:
     )
 
 
-def _wake_timeout(remaining: float) -> httpx.Timeout:
-    """Bound one GET /health attempt. Readiness polls stay short."""
+def _poll_timeout(remaining: float) -> httpx.Timeout:
+    """Bound one readiness poll. These stay short; the wake request does not."""
 
     configured = _env_float("BACKLOG_AGENT_HEALTH_TIMEOUT_SECONDS", _WAKE_READ_TIMEOUT)
     return _bounded_timeout(min(configured, _WAKE_READ_TIMEOUT), remaining)
 
 
-def _origin_wake_timeout(remaining: float) -> httpx.Timeout:
-    """Hold GET / long enough for Render to boot, without using the whole window.
+def _wake_request_timeout(remaining: float) -> httpx.Timeout:
+    """One GET /health budget, matching a 30-second Invoke-RestMethod timeout.
 
-    When the service is suspended, Render's proxy answers GET /health with 502
-    and does not keep that request open through startup. GET / is held until
-    the process is listening, which takes about a minute. The read budget is
-    capped below the remaining startup window so /health can still be polled.
+    The budget is capped by the time still left in the startup window so a
+    single wake request cannot run past the readiness deadline.
     """
 
-    if remaining > _HEALTH_RESERVE_SECONDS + 1.0:
-        read_timeout = min(_ORIGIN_WAKE_READ_TIMEOUT, remaining - _HEALTH_RESERVE_SECONDS)
-    else:
-        read_timeout = min(_WAKE_READ_TIMEOUT, remaining)
-    return _bounded_timeout(read_timeout, remaining)
-
-
-def _origin_url(url: str) -> str:
-    """Service origin only. Never append /health or /generate."""
-
-    return f"{url.rstrip('/')}/"
+    budget = min(_WAKE_REQUEST_TIMEOUT, max(remaining, 0.001))
+    return httpx.Timeout(budget)
 
 
 def _health_is_ready(response: httpx.Response) -> bool:
@@ -251,16 +324,19 @@ def _classify_health_response(response: httpx.Response) -> str:
     return "unavailable"
 
 
-def _origin_outcome(response: httpx.Response) -> str:
-    """A non-5xx origin response means the process answered. It is not readiness.
+def _safe_health_detail(response: httpx.Response) -> str:
+    """Describe a health response without copying an arbitrary body."""
 
-    FastAPI has no root route, so 404 is the expected awake response. 502 and
-    other 5xx responses still come from the proxy and must be retried.
-    """
-
-    if response.status_code >= 500:
-        return "starting"
-    return "awake"
+    marker = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"ok", "ready", "error", "starting"}:
+            marker = f" Body status {status}."
+    return f"GET /health returned HTTP {response.status_code}.{marker}"
 
 
 def _log_probe(
@@ -281,46 +357,19 @@ def _log_probe(
     )
 
 
-async def _probe_origin_once(
-    url: str,
-    remaining: float,
-) -> dict[str, bool | str | int | float | None]:
-    """GET the service origin once. This is the request that wakes Render."""
-
-    timeout = _origin_wake_timeout(remaining)
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.get(_origin_url(url))
-    except Exception as exc:
-        if isinstance(exc, httpx.TimeoutException):
-            outcome = "starting"
-            failure = "timeout"
-        elif isinstance(exc, httpx.RequestError):
-            outcome = "starting"
-            failure = "connection"
-        else:
-            outcome = "unavailable"
-            failure = "error"
-        _LOG.info(
-            "backlog wake outcome=%s error_type=%s",
-            outcome,
-            type(exc).__name__,
-        )
-        return _status_payload(outcome, failure=failure)
-
-    outcome = _origin_outcome(response)
-    _LOG.info(
-        "backlog wake outcome=%s http_status=%s",
-        outcome,
-        response.status_code,
-    )
-    return _status_payload(outcome, http_status=response.status_code)
-
-
 async def _probe_health_once(
     url: str,
     remaining: float | None = None,
+    *,
+    wake: bool = False,
 ) -> dict[str, bool | str | int | float | None]:
+    """GET /health once.
+
+    ``wake=True`` is the explicit cold-start request: a 30-second timeout, the
+    same call as ``Invoke-RestMethod .../health -TimeoutSec 30``. Readiness
+    polls stay on the short health timeout.
+    """
+
     global _probe_attempt, _probe_started_at
     _probe_attempt += 1
     attempt = _probe_attempt
@@ -328,35 +377,44 @@ async def _probe_health_once(
         _probe_started_at = _now()
     started = _probe_started_at
     budget = _WAKE_READ_TIMEOUT if remaining is None else remaining
-    timeout = _wake_timeout(budget)
+    timeout = _wake_request_timeout(budget) if wake else _poll_timeout(budget)
+    phase = "wake" if wake else "health"
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(f"{url}/health")
+            response = await asyncio.wait_for(
+                client.get(f"{url}/health"),
+                timeout=timeout.read or budget,
+            )
     except Exception as exc:
         elapsed = _now() - started
-        if isinstance(exc, httpx.TimeoutException):
+        if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
             outcome = "starting"
             failure = "timeout"
+            detail = f"GET /health timed out during {phase}."
         elif isinstance(exc, httpx.RequestError):
             outcome = "starting"
             failure = "connection"
+            detail = f"GET /health could not connect during {phase}."
         else:
             outcome = "unavailable"
             failure = "error"
-        _log_probe(
-            attempt=attempt,
-            elapsed=elapsed,
-            outcome=outcome,
-            error_type=type(exc).__name__,
+            detail = f"GET /health failed during {phase}."
+        _LOG.info(
+            "backlog %s attempt=%s elapsed_s=%.3f outcome=%s error_type=%s",
+            phase,
+            attempt,
+            elapsed,
+            outcome,
+            type(exc).__name__,
         )
-        if _probe_started_at is not None and outcome == "ready":
-            _probe_started_at = None
-        return _status_payload(
+        payload = _status_payload(
             outcome,
             attempt=attempt,
             elapsed_seconds=elapsed,
             failure=failure,
         )
+        payload["detail"] = detail
+        return payload
 
     elapsed = _now() - started
     outcome = _classify_health_response(response)
@@ -369,12 +427,15 @@ async def _probe_health_once(
     if outcome == "ready":
         _probe_started_at = None
         _probe_attempt = 0
-    return _status_payload(
+    payload = _status_payload(
         outcome,
         attempt=attempt,
         elapsed_seconds=elapsed,
         http_status=response.status_code,
     )
+    if outcome != "ready":
+        payload["detail"] = _safe_health_detail(response)
+    return payload
 
 
 async def _coalesced_probe(url: str) -> dict[str, bool | str | int | float]:
@@ -409,17 +470,34 @@ def _http_status_of(health: dict[str, bool | str | int | float | None]) -> int |
     return value if isinstance(value, int) else None
 
 
-def _raise_for_status_outcome(
+def _detail_of(health: dict[str, bool | str | int | float | None]) -> str | None:
+    detail = health.get("detail")
+    text = str(detail or "").strip()
+    return text or None
+
+
+def _raise_terminal_health(
     outcome: str,
-    http_status: int | None = None,
+    *,
+    stage: str,
+    http_status: int | None,
+    elapsed_seconds: float,
+    detail: str | None,
 ) -> None:
-    if outcome == "ready":
-        return
     if outcome == "unauthorized":
-        raise BacklogUnauthorizedError(http_status, stage="health")
+        raise BacklogUnauthorizedError(
+            http_status,
+            stage=stage,
+            elapsed_seconds=elapsed_seconds,
+            detail=detail,
+        )
     if outcome == "unavailable":
-        raise BacklogUnavailableError(http_status, stage="health")
-    raise BacklogNotReadyError(http_status)
+        raise BacklogUnavailableError(
+            http_status,
+            stage=stage,
+            elapsed_seconds=elapsed_seconds,
+            detail=detail,
+        )
 
 
 def _failure_reason(
@@ -440,30 +518,26 @@ def _failure_reason(
 
 
 async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
-    """Wake the origin with GET /, then poll GET /health until it is ready.
+    """Wake with one 30s GET /health, then poll GET /health until it is ready.
 
-    POST /generate is not issued here. A 5xx from either request is not readiness.
+    A wake-up timeout or transient HTTP error is recoverable. POST /generate
+    is not issued here. A non-transient status stops the wait immediately.
     """
 
-    deadline = _now() + startup_timeout
+    started = _now()
+    deadline = started + startup_timeout
+    delay = _WAKE_DELAY_SECONDS
+    last_http_status: int | None = None
+    last_detail: str | None = None
+    timeouts = 0
+    connections = 0
+    statuses: list[int] = []
+    woke = False
 
-    async def _attempt(phase: str, probe) -> dict[str, bool | str | int | float | None]:
-        remaining = deadline - _now()
-        if remaining <= 0:
-            raise BacklogNotReadyError(
-                reason="wake_timeout" if phase == "wake" else "health_deadline",
-                stage="wake" if phase == "wake" else "health",
-            )
-        return await probe(url, remaining)
+    def elapsed() -> float:
+        return max(0.0, _now() - started)
 
-    def _give_up(
-        phase: str,
-        *,
-        last_http_status: int | None,
-        timeouts: int,
-        connections: int,
-        statuses: list[int],
-    ) -> None:
+    def give_up(phase: str) -> None:
         raise BacklogNotReadyError(
             last_http_status,
             reason=_failure_reason(
@@ -472,57 +546,71 @@ async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
                 connections=connections,
                 statuses=statuses,
             ),
-            stage="wake" if phase == "wake" else "health",
+            stage=phase,
+            elapsed_seconds=elapsed(),
+            detail=last_detail,
         )
 
-    async def _poll_until(phase: str, probe, success: str) -> None:
-        delay = _WAKE_DELAY_SECONDS
-        last_http_status: int | None = None
-        timeouts = 0
-        connections = 0
-        statuses: list[int] = []
-        while True:
-            result = await _attempt(phase, probe)
-            outcome = str(result["status"])
-            failure = result.get("failure")
-            last_http_status = _http_status_of(result)
-            if failure == "timeout":
-                timeouts += 1
-            elif failure == "connection":
-                connections += 1
-            elif last_http_status is not None and outcome != success:
-                statuses.append(last_http_status)
-            if outcome == success:
-                return
-            if outcome in {"unauthorized", "unavailable"}:
-                _raise_for_status_outcome(outcome, last_http_status)
-            remaining = deadline - _now()
-            if remaining <= 0:
-                _give_up(
-                    phase,
-                    last_http_status=last_http_status,
-                    timeouts=timeouts,
-                    connections=connections,
-                    statuses=statuses,
-                )
-            await asyncio.sleep(min(delay, remaining))
-            delay = min(_WAKE_DELAY_MAX_SECONDS, delay + 0.5)
-            if _now() >= deadline:
-                _give_up(
-                    phase,
-                    last_http_status=last_http_status,
-                    timeouts=timeouts,
-                    connections=connections,
-                    statuses=statuses,
-                )
+    def observe(result: dict[str, bool | str | int | float | None]) -> str:
+        nonlocal last_http_status, last_detail, timeouts, connections
+        outcome = str(result["status"])
+        failure = result.get("failure")
+        last_http_status = _http_status_of(result)
+        last_detail = _detail_of(result)
+        if failure == "timeout":
+            timeouts += 1
+        elif failure == "connection":
+            connections += 1
+        elif last_http_status is not None and outcome != "ready":
+            statuses.append(last_http_status)
+        return outcome
 
-    await _poll_until("wake", _probe_origin_once, "awake")
-    await _poll_until("health", _probe_health_once, "ready")
+    remaining = deadline - _now()
+    if remaining <= 0:
+        give_up("wake")
+    wake = await _probe_health_once(url, remaining, wake=True)
+    outcome = observe(wake)
+    if outcome in {"unauthorized", "unavailable"}:
+        _raise_terminal_health(
+            outcome,
+            stage="wake",
+            http_status=last_http_status,
+            elapsed_seconds=elapsed(),
+            detail=last_detail,
+        )
+    if _now() >= deadline:
+        give_up("wake")
+    woke = True
+
+    while True:
+        remaining = deadline - _now()
+        if remaining <= 0:
+            give_up("health" if woke else "wake")
+        result = await _probe_health_once(url, remaining, wake=False)
+        outcome = observe(result)
+        if outcome == "ready":
+            return
+        if outcome in {"unauthorized", "unavailable"}:
+            _raise_terminal_health(
+                outcome,
+                stage="health",
+                http_status=last_http_status,
+                elapsed_seconds=elapsed(),
+                detail=last_detail,
+            )
+        remaining = deadline - _now()
+        if remaining <= 0:
+            give_up("health")
+        await asyncio.sleep(min(delay, remaining))
+        delay = min(_WAKE_DELAY_MAX_SECONDS, delay + 0.5)
+        if _now() >= deadline:
+            give_up("health")
 
 
 async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Wake GET /, wait for GET /health, then POST the envelope exactly once."""
+    """Wake GET /health, poll until ready, then POST the envelope exactly once."""
 
+    started = _now()
     url, token, generate_timeout, startup_timeout = _settings()
     await _await_backlog_ready(url, startup_timeout)
     headers = {
@@ -534,20 +622,28 @@ async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
             response = await client.post(f"{url}/generate", json=envelope, headers=headers)
     except (httpx.TimeoutException, httpx.RequestError):
         _LOG.info("backlog generation did not return a confirmed result")
-        raise BacklogGenerationUnconfirmedError from None
+        raise BacklogGenerationUnconfirmedError(
+            elapsed_seconds=max(0.0, _now() - started),
+        ) from None
 
+    elapsed = max(0.0, _now() - started)
     if response.status_code in _AUTH_HTTP:
-        raise BacklogUnauthorizedError(response.status_code, stage="generate")
+        raise BacklogUnauthorizedError(
+            response.status_code,
+            stage="generate",
+            elapsed_seconds=elapsed,
+            detail=f"POST /generate returned HTTP {response.status_code}.",
+        )
     if response.status_code == 200:
         try:
             payload = response.json()
         except ValueError:
-            raise BacklogDownstreamError(502) from None
+            raise BacklogDownstreamError(502, elapsed_seconds=elapsed) from None
         if (
             isinstance(payload, dict)
             and "backlog" in payload
             and "findings" in payload
         ):
             return payload
-        raise BacklogDownstreamError(502)
-    raise BacklogDownstreamError(response.status_code)
+        raise BacklogDownstreamError(502, elapsed_seconds=elapsed)
+    raise BacklogDownstreamError(response.status_code, elapsed_seconds=elapsed)

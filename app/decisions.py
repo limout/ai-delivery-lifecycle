@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 
 from app.evidence import (
+    _GENERIC_OBJECT_TOKENS,
     answer_retracts_scope,
     behavior_signatures,
     is_non_substantive_clarification_answer,
@@ -1477,6 +1478,23 @@ def _object_tokens(obj: str) -> set[str]:
     return {part for part in str(obj or "").split() if part}
 
 
+def _objects_match(left: str, right: str) -> bool:
+    """Same object, allowing only generic extras such as 'service' or 'system'."""
+    if left == right:
+        return True
+    left_tokens = _object_tokens(left)
+    right_tokens = _object_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens <= right_tokens:
+        extra = right_tokens - left_tokens
+    elif right_tokens <= left_tokens:
+        extra = left_tokens - right_tokens
+    else:
+        return False
+    return bool(extra) and extra <= _GENERIC_OBJECT_TOKENS
+
+
 def _behaviors_equivalent(
     left: frozenset[tuple[str, str]],
     right: frozenset[tuple[str, str]],
@@ -1488,11 +1506,13 @@ def _behaviors_equivalent(
         return False
     (left_family, left_obj) = next(iter(left))
     (right_family, right_obj) = next(iter(right))
-    if left_family != right_family or left_family != "integrate":
+    if left_family != right_family:
         return False
-    left_tokens = _object_tokens(left_obj)
-    right_tokens = _object_tokens(right_obj)
-    return bool(left_tokens and right_tokens and left_tokens & right_tokens)
+    if left_family == "integrate":
+        left_tokens = _object_tokens(left_obj)
+        right_tokens = _object_tokens(right_obj)
+        return bool(left_tokens and right_tokens and left_tokens & right_tokens)
+    return _objects_match(left_obj, right_obj)
 
 
 def _integrate_single_covered(
@@ -1536,6 +1556,30 @@ def _behavior_represented(
     return False
 
 
+def _absorb_integrate_summary(index, other, texts, signatures) -> bool:
+    """Drop a generic integration line when a clearer item already names that system."""
+    if not _integrate_single_covered(signatures[index], signatures[other]):
+        return False
+    summary_rank = _statement_rank(texts[index])
+    other_rank = _statement_rank(texts[other])
+    if summary_rank[0] == 1 and other_rank[0] == 0:
+        return False
+    if len(signatures[other]) == 1 and other_rank >= summary_rank:
+        return True
+    return len(signatures[other]) > 1 and summary_rank[0] == 0
+
+
+def _nominal_integration_summary(index, other, behavior, texts, signatures) -> bool:
+    """A vague integration label does not replace a finite integration requirement."""
+    family, _obj = behavior
+    return (
+        family == "integrate"
+        and len(signatures[other]) == 1
+        and _statement_rank(texts[other])[0] == 0
+        and _statement_rank(texts[index])[0] == 1
+    )
+
+
 def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
     """Drop same-behavior paraphrases. Keep distinct behaviors.
 
@@ -1575,7 +1619,11 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 if signatures[other]
                 and (
                     _behaviors_equivalent(signatures[other], signature)
-                    or _integrate_single_covered(signature, signatures[other])
+                    or (
+                        len(signature) == 1
+                        and len(signatures[other]) == 1
+                        and _integrate_single_covered(signature, signatures[other])
+                    )
                 )
                 and conditions[other] == conditions[index]
             ),
@@ -1605,14 +1653,14 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
     still_kept: list[int] = []
     for index in kept:
         signature = signatures[index]
-        if any(
-            other != index and _integrate_single_covered(signature, signatures[other])
+        if len(signature) == 1 and any(
+            other != index and _absorb_integrate_summary(index, other, texts, signatures)
             for other in kept
         ):
             keeper = next(
                 texts[other]
                 for other in kept
-                if other != index and _integrate_single_covered(signature, signatures[other])
+                if other != index and _absorb_integrate_summary(index, other, texts, signatures)
             )
             findings.append(
                 {
@@ -1636,6 +1684,7 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 if other != index
                 and signatures[other]
                 and _behavior_represented(behavior, signatures[other])
+                and not _nominal_integration_summary(index, other, behavior, texts, signatures)
             ]
             if covers:
                 represented.append(covers[0])
@@ -1706,10 +1755,43 @@ def _string_leaves(value, location: str):
             yield from _string_leaves(item, f"{location}.{key}")
 
 
-def final_artifact_defects(payload: dict | None) -> list[dict]:
-    """Residual equivalent scope items and glued sentence fragments."""
-    from app.assessment import duplicated_sentence_fragments
+def repair_final_scope_lists(payload: dict | None) -> dict:
+    """Remove equivalent items from the assembled scope lists."""
+    payload = payload or {}
+    for artifact_key, field in _FINAL_SCOPE_FIELDS:
+        artifact = payload.get(artifact_key)
+        if not isinstance(artifact, dict) or not isinstance(artifact.get(field), list):
+            continue
+        normalized, _findings = normalize_paraphrase_duplicates(artifact.get(field) or [])
+        artifact[field] = collapse_equivalent_scope_items(normalized)
+    return payload
 
+
+def _text_defects(location: str, text: str) -> list[dict]:
+    from app.assessment import duplicated_sentence_fragments, joined_sentence_boundaries
+
+    defects: list[dict] = []
+    if duplicated_sentence_fragments(text):
+        defects.append(
+            {
+                "kind": "duplicated_sentence_fragment",
+                "field": location,
+                "message": f"Malformed duplicated sentence fragment in {location}.",
+            }
+        )
+    if joined_sentence_boundaries(text):
+        defects.append(
+            {
+                "kind": "joined_sentence",
+                "field": location,
+                "message": f"Missing sentence separator in {location}.",
+            }
+        )
+    return defects
+
+
+def final_artifact_defects(payload: dict | None) -> list[dict]:
+    """Residual equivalent scope items and malformed sentence joins."""
     payload = payload or {}
     defects: list[dict] = []
     for artifact_key, field in _FINAL_SCOPE_FIELDS:
@@ -1749,30 +1831,22 @@ def final_artifact_defects(payload: dict | None) -> list[dict]:
         if not isinstance(artifact, dict):
             continue
         for location, text in _string_leaves(artifact, artifact_key):
-            if duplicated_sentence_fragments(text):
-                defects.append(
-                    {
-                        "kind": "duplicated_sentence_fragment",
-                        "field": location,
-                        "message": f"Malformed duplicated sentence fragment in {location}.",
-                    }
-                )
+            defects.extend(_text_defects(location, text))
     for key in ("assessment_text", "print_assessment_text"):
         text = payload.get(key)
-        if isinstance(text, str) and duplicated_sentence_fragments(text):
-            defects.append(
-                {
-                    "kind": "duplicated_sentence_fragment",
-                    "field": key,
-                    "message": f"Malformed duplicated sentence fragment in {key}.",
-                }
-            )
+        if isinstance(text, str):
+            defects.extend(_text_defects(key, text))
+    artifact_texts = payload.get("artifact_texts")
+    if isinstance(artifact_texts, dict):
+        for location, text in _string_leaves(artifact_texts, "artifact_texts"):
+            defects.extend(_text_defects(location, text))
     return defects
 
 
 def apply_final_artifact_quality(payload: dict | None) -> list[dict]:
-    """Surface leftover artifact defects on a READY review instead of hiding them."""
+    """Repair equivalent scope items, then reject a clean result if defects remain."""
     payload = payload or {}
+    repair_final_scope_lists(payload)
     defects = final_artifact_defects(payload)
     if not defects:
         payload["artifact_quality"] = "CLEAN"

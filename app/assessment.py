@@ -179,7 +179,23 @@ def sanitize_comparison_wording(
         return match.group(0)
 
     rewritten = _EXCEEDS_CLAUSE.sub(replace_clause, source)
-    return _repair_spliced_comparison(rewritten, canonical)
+    return separate_joined_sentences(_repair_spliced_comparison(rewritten, canonical))
+
+
+_JOINED_SENTENCE = re.compile(r"(?<=[.!?])(?=[A-Z])")
+
+
+def separate_joined_sentences(text: str) -> str:
+    """Insert the missing space when a sentence is glued to the next one.
+
+    Decimal points stay in place because the following character is a digit.
+    """
+    return _JOINED_SENTENCE.sub(" ", str(text or ""))
+
+
+def joined_sentence_boundaries(text: str) -> list[str]:
+    """Sentence boundaries that were concatenated without a space."""
+    return [match.group(0) for match in re.finditer(r"[.!?][A-Z]", str(text or ""))]
 
 
 def strip_repeated_deadline_statements(document: dict, canonical: str) -> dict:
@@ -795,10 +811,14 @@ def repair_stored_comparison_text(result: dict | None) -> dict:
         for field in fields:
             value = artifact.get(field)
             if isinstance(value, str):
-                artifact[field] = sanitize_comparison_wording(value, estimate, date_kind)
+                artifact[field] = separate_joined_sentences(
+                    sanitize_comparison_wording(value, estimate, date_kind)
+                )
             elif isinstance(value, list):
                 artifact[field] = [
-                    sanitize_comparison_wording(item, estimate, date_kind)
+                    separate_joined_sentences(
+                        sanitize_comparison_wording(item, estimate, date_kind)
+                    )
                     if isinstance(item, str)
                     else item
                     for item in value

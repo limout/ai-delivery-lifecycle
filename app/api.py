@@ -1055,8 +1055,10 @@ def _backlog_failure(
     stage: str,
     http_status: int | None = None,
     reason: str | None = None,
+    elapsed_seconds: float | None = None,
+    detail: str | None = None,
 ) -> JSONResponse:
-    content: dict[str, str | int] = {
+    content: dict[str, str | int | float] = {
         "error": code,
         "message": message,
         "stage": stage,
@@ -1065,6 +1067,10 @@ def _backlog_failure(
         content["http_status"] = http_status
     if reason is not None:
         content["reason"] = reason
+    if elapsed_seconds is not None:
+        content["elapsed_seconds"] = round(max(0.0, elapsed_seconds), 3)
+    if detail:
+        content["detail"] = detail
     return JSONResponse(status_code=status_code, content=content)
 
 
@@ -1102,44 +1108,49 @@ async def create_backlog(payload: dict):
             stage=exc.stage,
             http_status=exc.http_status,
             reason=exc.reason,
+            elapsed_seconds=exc.elapsed_seconds,
+            detail=exc.detail,
         )
     except BacklogUnauthorizedError as exc:
         return _backlog_failure(
             401,
             "BACKLOG_UNAUTHORIZED",
-            "Backlog Agent authentication failed.",
+            exc.public_message,
             stage=exc.stage,
             http_status=exc.http_status,
+            elapsed_seconds=exc.elapsed_seconds,
+            detail=exc.detail,
         )
     except BacklogUnavailableError as exc:
         return _backlog_failure(
             503,
             "BACKLOG_UNAVAILABLE",
-            "Backlog Agent is unavailable.",
+            exc.public_message,
             stage=exc.stage,
             http_status=exc.http_status,
+            elapsed_seconds=exc.elapsed_seconds,
+            detail=exc.detail,
         )
     except BacklogGenerationUnconfirmedError as exc:
         return _backlog_failure(
             504,
             "BACKLOG_GENERATION_UNCONFIRMED",
-            "Backlog generation did not return a confirmed result. The outcome is unknown.",
+            exc.public_message,
             stage=exc.stage,
+            elapsed_seconds=exc.elapsed_seconds,
+            detail=exc.detail,
         )
     except BacklogDownstreamError as exc:
         status_code = 422 if exc.status_code == 422 else 502
         code = "BACKLOG_REJECTED" if exc.status_code == 422 else "BACKLOG_DOWNSTREAM_ERROR"
-        message = (
-            "Backlog Agent rejected the request."
-            if exc.status_code == 422
-            else "Backlog Agent returned an error."
-        )
         return _backlog_failure(
             status_code,
             code,
-            message,
+            exc.public_message,
             stage=exc.stage,
             http_status=exc.http_status,
+            elapsed_seconds=exc.elapsed_seconds,
+            detail=exc.detail,
         )
 
 

@@ -570,6 +570,10 @@ _NOMINAL_VERBS = {
     "notifying": "notify",
     "paying": "pay",
     "integrating": "integrate",
+    "displayed": "display",
+    "displaying": "display",
+    "created": "create",
+    "submitted": "submit",
 }
 for _nominal, _verb in _NOMINAL_VERBS.items():
     _FAMILY_ID_BY_TOKEN.setdefault(_nominal, _FAMILY_ID_BY_TOKEN.get(_verb, _verb))
@@ -581,20 +585,24 @@ _SIGNATURE_SKIP = _STOPWORDS | {
     "available", "possible", "supported", "support", "works", "work",
     "succeeds", "successful", "successfully", "provided", "including",
     "sent", "sending", "send",
+    "then", "when", "given",
 }
 _GENERIC_OBJECT_TOKENS = frozenset({
     "data", "system", "record", "information", "platform", "application",
     "service", "master", "item", "web", "online", "customer", "user",
-    "secure", "securely",
+    "secure", "securely", "event",
+    "api", "access", "technical", "documentation", "document",
+    "endpoint", "credential", "specification", "using",
 })
 _SIGNATURE_FILLERS = frozenset({
     "workflow", "workflows", "capability", "capabilities", "process", "processes",
     "functionality", "feature", "features", "handling", "ability", "function",
     "functions", "processing",
 })
+_OBJECT_NOISE = frozenset({"system", "event", "events"})
 _SIGNATURE_QUALIFIERS = frozenset({
     "status", "state", "progress", "detail", "details",
-    "secure", "securely", "online",
+    "secure", "securely", "online", "event", "events",
 })
 _SIGNATURE_ACTORS = frozenset({
     "customer", "customers", "user", "users", "member", "members", "staff",
@@ -677,12 +685,14 @@ def _behavior_family(words: list[str], index: int) -> str | None:
     while nxt < len(words) and (
         words[nxt] in _SIGNATURE_FILLERS or words[nxt] in _SIGNATURE_SKIP
     ):
-        if words[nxt] in {"of", "for", "to", "via", "by", "with"}:
+        if words[nxt] in {"of", "for", "to", "via", "by", "with", "and"}:
             return family
         nxt += 1
     if prev < 0 or nxt >= len(words):
         return family
     if words[nxt] in _SIGNATURE_QUALIFIERS:
+        return family
+    if any(words[earlier] in {"is", "are", "was", "were", "be", "been"} for earlier in range(max(0, index - 3), index)):
         return family
     if _is_nominal_token(words[index]) and _is_nominal_token(words[nxt]):
         return None
@@ -697,8 +707,13 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
     Each signature is a verb family plus the object it applies to. Login and
     authentication share the authenticate family. Create and track stay
     distinct. Words outside the generic verb families produce no signature.
+    A Gherkin ``then`` clause is the verified behavior.
     """
-    raw = str(text or "").lower()
+    source = str(text or "")
+    then_parts = re.split(r"\bthen\b", source, maxsplit=1, flags=re.I)
+    if len(then_parts) == 2 and then_parts[1].strip():
+        source = then_parts[1]
+    raw = source.lower()
     raw = re.sub(r"\blog\s+in\b", "login", raw)
     raw = re.sub(r"\bsign\s+in\b", "signin", raw)
     raw = re.sub(r"[^a-z0-9]+", " ", raw)
@@ -726,7 +741,7 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
             group: list[str] = []
             while (
                 cursor < len(words)
-                and words[cursor] != "and"
+                and words[cursor] not in {"and", "from", "then", "when", "given"}
                 and not _behavior_family(words, cursor)
             ):
                 group.append(words[cursor])
@@ -746,7 +761,13 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
             break
         before: list[str] = []
         back = index - 1
-        while back >= 0 and len(before) < 3 and not _behavior_family(words, back):
+        while back >= 0 and len(before) < 8 and not _behavior_family(words, back):
+            if words[back] == "from":
+                before.clear()
+                back -= 1
+                continue
+            if words[back] in {"then", "when", "given"}:
+                break
             before.append(words[back])
             back -= 1
         before.reverse()
@@ -757,18 +778,39 @@ def behavior_signatures(text: str) -> frozenset[tuple[str, str]]:
                 found.append((item, ""))
                 continue
             if item == "integrate":
-                for group in groups:
-                    found.append(("integrate", _distinctive_object([*before, *group])))
+                objects = [
+                    _distinctive_object([*before, *group])
+                    for group in groups
+                ]
+                objects = [obj for obj in objects if obj]
+                if objects:
+                    for obj in objects:
+                        found.append(("integrate", obj))
+                else:
+                    found.append(("integrate", ""))
                 continue
             for group in groups:
                 forward_obj = _signature_object(group)
-                parts = [part for part in forward_obj.split() if part not in _SIGNATURE_ACTORS]
+                forward_parts = forward_obj.split()
+                parts = [
+                    part for part in forward_parts
+                    if part not in _SIGNATURE_ACTORS and part not in _OBJECT_NOISE
+                ]
                 obj = " ".join(parts)
+                back_obj = _signature_object(before)
+                back_parts = [
+                    part for part in back_obj.split()
+                    if part not in _SIGNATURE_ACTORS and part not in _OBJECT_NOISE
+                ]
                 if not obj:
-                    back_obj = _signature_object(before)
-                    back_parts = [part for part in back_obj.split() if part not in _SIGNATURE_ACTORS]
-                    obj = " ".join(back_parts) or forward_obj
-                found.append((item, obj))
+                    obj = " ".join(back_parts)
+                if not obj:
+                    actors = [part for part in [*forward_parts, *back_obj.split()] if part in _SIGNATURE_ACTORS]
+                    obj = " ".join(actors)
+                if obj:
+                    found.append((item, obj))
+                elif not any(family_name == item for family_name, _object in found):
+                    found.append((item, ""))
         index = max(cursor, index + 1)
     return frozenset(found)
 
