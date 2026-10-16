@@ -1496,11 +1496,25 @@ def _objects_match(left: str, right: str) -> bool:
     return bool(extra) and extra <= _GENERIC_OBJECT_TOKENS
 
 
+def _signature_is_incomplete(signature: frozenset[tuple[str, str]]) -> bool:
+    """An empty object means the distinctive outcome was not recovered.
+
+    Authenticate is the exception: login and authentication are the same
+    behavior and intentionally carry no object.
+    """
+    return any(not obj for family, obj in signature if family != "authenticate")
+
+
 def _behaviors_equivalent(
     left: frozenset[tuple[str, str]],
     right: frozenset[tuple[str, str]],
 ) -> bool:
-    """Same behavior, including two integrations that name the same system."""
+    """Same behavior, including two integrations that name the same system.
+
+    Matching families with an empty object are not evidence of equivalence.
+    """
+    if _signature_is_incomplete(left) or _signature_is_incomplete(right):
+        return False
     if left == right:
         return True
     if len(left) != 1 or len(right) != 1:
@@ -1547,12 +1561,14 @@ def _behavior_represented(
             continue
         other_tokens = _object_tokens(other_obj)
         if obj == other_obj:
-            return True
+            if obj or family == "authenticate":
+                return True
+            continue
         if family == "integrate" and obj_tokens and other_tokens and (obj_tokens & other_tokens):
             return True
         if obj_tokens and other_tokens and obj_tokens <= other_tokens:
             return True
-        if not obj_tokens and not other_tokens:
+        if family == "authenticate" and not obj_tokens and not other_tokens:
             return True
     return False
 
