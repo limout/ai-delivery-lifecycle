@@ -16,9 +16,10 @@ _LOG = logging.getLogger("app.backlog_client")
 _DEFAULT_GENERATE_TIMEOUT = 300.0
 # Render can return HTTP 502 for longer than a minute while a free instance boots.
 _DEFAULT_STARTUP_TIMEOUT = 180.0
-# Same budget as Invoke-RestMethod -TimeoutSec 30 against GET /health.
-# Every readiness attempt uses this. A shorter poll is answered with an immediate 502.
-_WAKE_REQUEST_TIMEOUT = 30.0
+# A sleeping Render proxy can hold the waking GET open for about a minute.
+# Connect fails fast. The read budget stays open long enough for that first response.
+_CONNECT_TIMEOUT = 5.0
+_HEALTH_READ_TIMEOUT = 90.0
 _WAKE_DELAY_SECONDS = 2.0
 _WAKE_DELAY_MAX_SECONDS = 3.0
 _TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -301,15 +302,28 @@ def _settings() -> tuple[str, str, float, float]:
     return url, token, generate_timeout, startup_timeout
 
 
-def _wake_request_timeout(remaining: float) -> httpx.Timeout:
-    """One GET /health budget, matching a 30-second Invoke-RestMethod timeout.
+def _split_timeout(read_seconds: float) -> httpx.Timeout:
+    """Separate a short connect budget from the time allowed to read a response."""
 
-    The budget is capped by the time still left in the startup window so a
-    single wake request cannot run past the readiness deadline.
+    read_budget = max(read_seconds, 0.001)
+    connect_budget = min(_CONNECT_TIMEOUT, read_budget)
+    return httpx.Timeout(
+        connect=connect_budget,
+        read=read_budget,
+        write=read_budget,
+        pool=connect_budget,
+    )
+
+
+def _wake_request_timeout(remaining: float) -> httpx.Timeout:
+    """One GET /health budget: 5s to connect and up to 90s to read.
+
+    The read budget is capped by the time still left in the startup window so
+    a single wake request cannot run past the readiness deadline.
     """
 
-    budget = min(_WAKE_REQUEST_TIMEOUT, max(remaining, 0.001))
-    return httpx.Timeout(budget)
+    read_budget = min(_HEALTH_READ_TIMEOUT, max(remaining, 0.001))
+    return _split_timeout(read_budget)
 
 
 def _health_is_ready(response: httpx.Response) -> bool:
@@ -395,10 +409,10 @@ async def _probe_health_once(
     *,
     wake: bool = False,
 ) -> dict[str, bool | str | int | float | None]:
-    """GET /health once, with the same 30-second timeout as a cold-start wake.
+    """GET /health once, with a 5s connect timeout and up to a 90s read timeout.
 
-    ``wake`` only labels the log line. Short polls are not used: Render answers
-    those with an immediate HTTP 502 and the instance does not finish booting.
+    ``wake`` only labels the log line. A short read budget is not used: Render
+    can hold the waking request open until the instance finishes booting.
     """
 
     global _probe_attempt, _probe_started_at
@@ -407,7 +421,7 @@ async def _probe_health_once(
     if _probe_started_at is None:
         _probe_started_at = _now()
     started = _probe_started_at
-    budget = _WAKE_REQUEST_TIMEOUT if remaining is None else remaining
+    budget = _HEALTH_READ_TIMEOUT if remaining is None else remaining
     timeout = _wake_request_timeout(budget)
     phase = "wake" if wake else "health"
     try:
@@ -479,7 +493,7 @@ async def _coalesced_probe(url: str) -> dict[str, bool | str | int | float]:
         current = _probe_task
         if current is None or current.done():
             current = asyncio.get_running_loop().create_task(
-                _probe_health_once(url, _WAKE_REQUEST_TIMEOUT, wake=True)
+                _probe_health_once(url, _HEALTH_READ_TIMEOUT, wake=True)
             )
             _probe_task = current
     return await current
@@ -551,13 +565,13 @@ def _failure_reason(
 
 
 async def _await_backlog_ready(url: str, startup_timeout: float) -> None:
-    """Repeat a 30-second GET /health until the agent is ready.
+    """Repeat GET /health until the agent is ready.
 
-    Each attempt is the same request as
-    ``Invoke-RestMethod .../health -TimeoutSec 30``. A ready response ends the
-    wait. POST /generate is not issued here. A timeout, connection error, or
-    transient HTTP status is retried until the startup window ends. A
-    non-transient status stops the wait immediately.
+    Each attempt connects within 5 seconds and may read for up to 90 seconds,
+    bounded by the startup window. A ready JSON status ends the wait. POST
+    /generate is not issued here. A timeout, connection error, or transient
+    HTTP status is retried until the window ends. A non-transient status stops
+    the wait immediately.
     """
 
     started = _now()
@@ -641,7 +655,10 @@ async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
         "Content-Type": "application/json",
     }
     try:
-        async with httpx.AsyncClient(timeout=generate_timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=_split_timeout(generate_timeout),
+            follow_redirects=True,
+        ) as client:
             response = await client.post(f"{url}/generate", json=envelope, headers=headers)
     except (httpx.TimeoutException, httpx.RequestError):
         _LOG.info("backlog generation did not return a confirmed result")
