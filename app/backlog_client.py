@@ -197,6 +197,59 @@ def reset_wake_state() -> None:
     _probe_attempt = 0
 
 
+def _validation_summary(payload: dict[str, Any]) -> str:
+    """Loc, message, and type from a 422 body. Submitted values are omitted."""
+    raw = payload.get("validation_errors")
+    if not isinstance(raw, list):
+        raw = payload.get("detail")
+    if not isinstance(raw, list):
+        return ""
+    lines: list[str] = []
+    for item in raw[:8]:
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("loc")
+        if isinstance(loc, (list, tuple)):
+            loc_text = ".".join(
+                str(part) for part in loc if isinstance(part, (str, int)) and not isinstance(part, bool)
+            )
+        else:
+            loc_text = str(loc or "").strip()
+        message = str(item.get("msg") or item.get("message") or "").strip()[:180]
+        error_type = str(item.get("type") or "").strip()[:80]
+        if not loc_text and not message:
+            continue
+        text = loc_text or "field"
+        if message:
+            text = f"{text}: {message}"
+        if error_type:
+            text = f"{text} ({error_type})"
+        lines.append(text)
+    return "; ".join(lines)
+
+
+def _rejection_detail(response: httpx.Response) -> str:
+    """Describe a 422 without copying secrets or submitted document text."""
+    summary = f"POST /generate returned HTTP {response.status_code}."
+    try:
+        payload = response.json()
+    except ValueError:
+        return summary
+    if not isinstance(payload, dict):
+        return summary
+    parts = [summary]
+    code = str(payload.get("error") or "").strip()[:80]
+    message = str(payload.get("message") or "").strip()[:240]
+    if code:
+        parts.append(f"{code}.")
+    if message and message not in " ".join(parts):
+        parts.append(message)
+    diagnostics = _validation_summary(payload)
+    if diagnostics:
+        parts.append(diagnostics)
+    return " ".join(parts)[:800]
+
+
 def _with_error_context(
     message: str,
     elapsed_seconds: float | None,
@@ -604,6 +657,10 @@ async def generate_backlog(envelope: dict[str, Any]) -> dict[str, Any]:
             elapsed_seconds=elapsed,
             detail=f"POST /generate returned HTTP {response.status_code}.",
         )
+    if response.status_code == 422:
+        detail = _rejection_detail(response)
+        _LOG.info("backlog generate rejected http_status=422 detail=%s", detail)
+        raise BacklogDownstreamError(422, elapsed_seconds=elapsed, detail=detail)
     if response.status_code == 200:
         try:
             payload = response.json()

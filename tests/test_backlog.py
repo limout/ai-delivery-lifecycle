@@ -739,6 +739,48 @@ def test_backlog_downstream_validation_error(monkeypatch):
     assert "bad envelope" not in response.text
 
 
+def test_backlog_422_validation_details_are_surfaced(monkeypatch, caplog):
+    _configure(monkeypatch)
+    _patch_http(
+        monkeypatch,
+        [
+            _ok_health(),
+            _response(
+                422,
+                {
+                    "error": "INVALID_ENVELOPE",
+                    "message": "Request must be a COMPLETE copilot.workflow_response.v1 JSON envelope.",
+                    "validation_errors": [
+                        {
+                            "loc": ["body", "status"],
+                            "msg": "Input should be 'COMPLETE'",
+                            "type": "literal_error",
+                            "input": "SECRET-customer-text",
+                        }
+                    ],
+                },
+            ),
+        ],
+    )
+
+    with caplog.at_level("INFO", logger="app.backlog_client"):
+        response = client.post("/backlog", json=COMPLETE_ENVELOPE)
+
+    data = response.json()
+    assert response.status_code == 422
+    assert data["error"] == "BACKLOG_REJECTED"
+    assert data["http_status"] == 422
+    assert "body.status" in data["detail"]
+    assert "Input should be 'COMPLETE'" in data["detail"]
+    assert "literal_error" in data["detail"]
+    assert "INVALID_ENVELOPE" in data["detail"]
+    assert "SECRET-customer-text" not in response.text
+    assert AGENT_TOKEN not in response.text
+    assert "Authorization" not in response.text
+    assert "SECRET-customer-text" not in caplog.text
+    assert "body.status" in caplog.text
+
+
 def test_backlog_generation_timeout_is_unconfirmed(monkeypatch):
     _configure(monkeypatch)
     calls, _clients, _clock, _started = _patch_http(
