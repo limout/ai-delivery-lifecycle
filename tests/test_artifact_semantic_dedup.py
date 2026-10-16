@@ -209,11 +209,12 @@ def test_ambiguous_compound_is_kept_and_reported():
         "Creation and tracking of service requests.",
     ]
     kept, findings = normalize_paraphrase_duplicates(items)
-    assert items[0] in kept
-    assert items[1] not in kept
-    assert findings[0]["code"] == "COMPOUND_SPLIT"
+    assert kept == items
+    assert findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert "left unchanged" in findings[0]["reason"].lower()
     assert ("track", "service request") in _signatures(kept)
     assert ("create", "service request") in _signatures(kept)
+    assert "The system shall track" not in " ".join(kept)
 
 
 def test_observed_sow_drops_paraphrases_and_keeps_distinct_requirements():
@@ -370,13 +371,13 @@ def test_notification_paraphrase_collapses_and_tracking_is_kept():
     assert blob.count("email") == 1 or blob.count("notification") == 1
     assert nominal not in kept
     assert "create" in blob and "track" in blob
-    assert compound not in kept
+    assert compound in kept
+    assert "The system shall track" not in blob
     assert any("pay" in item.lower() or "payment" in item.lower() for item in kept)
     assert any("integrat" in item.lower() for item in kept)
     assert findings
-    again, again_findings = normalize_paraphrase_duplicates(kept)
+    again, _again_findings = normalize_paraphrase_duplicates(kept)
     assert again == kept
-    assert again_findings == []
 
 
 def test_bare_technology_labels_are_absorbed_and_grammar_is_repaired():
@@ -443,3 +444,60 @@ def test_unrelated_domain_keeps_distinct_behaviors_and_grades_the_final_artifact
     assert defective["artifact_quality"] == "DEFECTS"
     assert defective["delivery_review"]["status"] == "READY"
     assert defects
+
+
+def test_acceptance_overlap_does_not_emit_truncated_criteria():
+    view = "The system shall allow customers to view their historical and current orders."
+    create = "The system shall allow customers to create service requests."
+    compound = "Service request creation and status tracking"
+    kept, findings = normalize_paraphrase_duplicates([view, create, compound])
+    banned = {
+        "The system shall view current.",
+        "The system shall track service request.",
+        "The system shall track current.",
+    }
+    assert banned.isdisjoint(kept)
+    assert view in kept and create in kept and compound in kept
+    assert findings and any(item["code"] == "AMBIGUOUS_OVERLAP" for item in findings)
+    again, _again = normalize_paraphrase_duplicates(kept)
+    assert again == kept
+
+
+def test_truncated_acceptance_criteria_cannot_be_marked_clean():
+    payload = {
+        "delivery_review": {"status": "READY", "warnings": [], "blocking_issues": []},
+        "sow": {
+            "acceptance": [
+                "The system shall view current.",
+                "The system shall track service request.",
+                "The system shall track current.",
+            ]
+        },
+    }
+    defects = apply_final_artifact_quality(payload)
+    assert payload["artifact_quality"] == "DEFECTS"
+    assert payload["delivery_review"]["status"] == "READY"
+    assert {item["kind"] for item in defects} >= {"truncated_criterion"}
+    assert payload["sow"]["acceptance"] == [
+        "The system shall view current.",
+        "The system shall track service request.",
+        "The system shall track current.",
+    ]
+
+
+def test_complete_compound_clause_can_still_be_split():
+    create = "The system shall allow customers to create service requests."
+    compound = (
+        "The system shall allow customers to create service requests "
+        "and the system shall allow customers to track service request status."
+    )
+    track = "The system shall allow customers to track service request status."
+    kept, findings = normalize_paraphrase_duplicates([create, compound])
+    assert create in kept
+    assert compound not in kept
+    assert track in kept
+    assert findings[0]["code"] == "COMPOUND_SPLIT"
+    assert "The system shall track service request." not in kept
+    again, again_findings = normalize_paraphrase_duplicates(kept)
+    assert again == kept
+    assert again_findings == []

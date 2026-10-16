@@ -1581,12 +1581,58 @@ def _nominal_integration_summary(index, other, behavior, texts, signatures) -> b
     )
 
 
-def _behavior_statement(family: str, obj: str) -> str:
-    """One finite line for a behavior that a compound stated but did not keep."""
-    object_text = " ".join(part for part in str(obj or "").split() if part)
-    if object_text:
-        return f"The system shall {family} {object_text}."
-    return f"The system shall {family}."
+_FINITE_CLAUSE = re.compile(r"\b(?:shall|must|should|can|will|given|when)\b", re.I)
+_TRUNCATED_MODAL = re.compile(r"^the system shall [a-z]+(?: [a-z]+){0,4}\.$", re.I)
+_FRAGMENT_HEADS = frozenset({
+    "current", "status", "state", "new", "existing", "historical", "previous", "other",
+})
+
+
+def _complete_behavior_clause(text: str, behavior: tuple[str, str]) -> str | None:
+    """A finite clause already written in ``text`` that states only this behavior.
+
+    Signature leftovers are not turned into a new sentence. Splitting is safe
+    only when the source already contains a complete clause for the outcome.
+    """
+    family, _obj = behavior
+    whole = str(text or "").strip().rstrip(".").lower()
+    pieces = re.split(r"\s*;\s+|(?<=[.!?])\s+|\s+\band\b\s+", str(text or ""), flags=re.I)
+    for piece in pieces:
+        clause = piece.strip(" .;")
+        if len(clause.split()) < 6 or clause.lower() == whole:
+            continue
+        if not _FINITE_CLAUSE.search(clause):
+            continue
+        signature = behavior_signatures(clause)
+        if len(signature) != 1:
+            continue
+        only = next(iter(signature))
+        if only[0] != family:
+            continue
+        if not (
+            _behavior_represented(behavior, signature)
+            or _behavior_represented(only, frozenset({behavior}))
+        ):
+            continue
+        if clause[0].islower():
+            clause = clause[0].upper() + clause[1:]
+        return clause if clause.endswith(".") else f"{clause}."
+    return None
+
+
+def _truncated_criterion(text: str) -> bool:
+    """A modal line built from a verb plus leftover words, not a full outcome."""
+    stripped = " ".join(str(text or "").split())
+    if not _TRUNCATED_MODAL.match(stripped):
+        return False
+    complement = [word.lower() for word in stripped[:-1].split()[4:]]
+    if not complement:
+        return True
+    if any(word in {"a", "an", "the", "their", "its", "this", "these", "those", "to", "with", "for", "from", "via", "of", "into"} for word in complement):
+        return False
+    if complement[-1] in _FRAGMENT_HEADS:
+        return True
+    return not complement[-1].endswith("s")
 
 
 def _standalone_label(text: str, others: list[str]) -> bool:
@@ -1757,26 +1803,51 @@ def normalize_paraphrase_duplicates(items) -> tuple[list[str], list[dict]]:
                 if "integrate" in missing_families and _statement_rank(text)[0] == 1:
                     final.append(text)
                     continue
-                replacements = []
-                existing = {item.lower() for item in final}
-                for family, obj in missing:
-                    line = _behavior_statement(family, obj)
-                    if line.lower() in existing:
-                        continue
-                    replacements.append(line)
-                    existing.add(line.lower())
+                clauses = []
+                meaningful = [
+                    behavior
+                    for behavior in missing
+                    if any(
+                        part not in {
+                            "customer", "customers", "user", "users", "member", "members",
+                            "staff", "client", "clients",
+                        }
+                        for part in behavior[1].split()
+                    )
+                ]
+                for behavior in meaningful:
+                    clause = _complete_behavior_clause(text, behavior)
+                    if clause is None:
+                        clauses = []
+                        break
+                    if clause.lower() not in {item.lower() for item in (*final, *clauses)}:
+                        clauses.append(clause)
+                if not clauses:
+                    findings.append(
+                        {
+                            "code": "AMBIGUOUS_OVERLAP",
+                            "item": text,
+                            "overlaps": represented,
+                            "reason": (
+                                "This item overlaps an existing behavior and also states "
+                                "a distinct one. It was left unchanged."
+                            ),
+                        }
+                    )
+                    final.append(text)
+                    continue
                 findings.append(
                     {
                         "code": "COMPOUND_SPLIT",
                         "removed": text,
-                        "kept": replacements or represented,
+                        "kept": clauses,
                         "reason": (
                             "Overlapping wording was removed. "
-                            "The behavior that was not already stated was kept separately."
+                            "The remaining outcome was already stated as a complete clause."
                         ),
                     }
                 )
-                final.extend(replacements)
+                final.extend(clauses)
                 continue
         final.append(text)
     labeled = []
@@ -1882,6 +1953,16 @@ def final_artifact_defects(payload: dict | None) -> list[dict]:
                     "message": (
                         f"Equivalent scope items remain in {artifact_key}.{field}: {subject}"
                     ),
+                }
+            )
+        for entry in current:
+            if not _truncated_criterion(entry):
+                continue
+            defects.append(
+                {
+                    "kind": "truncated_criterion",
+                    "field": f"{artifact_key}.{field}",
+                    "message": f"Truncated criterion in {artifact_key}.{field}: {entry}",
                 }
             )
     for artifact_key in (

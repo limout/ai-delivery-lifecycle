@@ -88,9 +88,9 @@ def test_create_and_track_remain_distinct_when_both_are_present():
 
 def test_compound_is_removed_only_when_every_behavior_is_already_covered():
     partial, partial_findings = normalize_paraphrase_duplicates([CREATE, CREATE_AND_TRACK])
-    assert CREATE in partial and CREATE_AND_TRACK not in partial
-    assert any("track" in item.lower() for item in partial)
-    assert partial_findings[0]["code"] == "COMPOUND_SPLIT"
+    assert partial == [CREATE, CREATE_AND_TRACK]
+    assert partial_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert "The system shall track" not in " ".join(partial)
 
     covered, covered_findings = normalize_paraphrase_duplicates([CREATE, TRACK, CREATE_AND_TRACK])
     assert CREATE in covered and TRACK in covered
@@ -98,9 +98,9 @@ def test_compound_is_removed_only_when_every_behavior_is_already_covered():
     assert covered_findings[0]["code"] == "COMPOUND_REDUNDANT"
 
     login_only, login_findings = normalize_paraphrase_duplicates([LOGIN, LOGIN_PROFILE])
-    assert LOGIN in login_only and LOGIN_PROFILE not in login_only
-    assert any("manage" in item.lower() for item in login_only)
-    assert login_findings[0]["code"] == "COMPOUND_SPLIT"
+    assert LOGIN in login_only and LOGIN_PROFILE in login_only
+    assert login_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert "The system shall manage" not in " ".join(login_only)
 
     broader, broader_findings = normalize_paraphrase_duplicates([LOGIN, PROFILE, LOGIN_PROFILE])
     assert LOGIN in broader and PROFILE in broader
@@ -224,8 +224,8 @@ def test_ready_result_surfaces_residual_artifact_defects():
     assert defects
     assert EMAIL_PARAPHRASE not in payload["proposal"]["scope"]
     assert PAYMENTS_PARAPHRASE not in payload["sow"]["acceptance"]
-    assert CREATE_AND_TRACK not in payload["sow"]["in_scope"]
-    assert any("track" in item.lower() for item in payload["sow"]["in_scope"])
+    assert CREATE_AND_TRACK in payload["sow"]["in_scope"]
+    assert "The system shall track" not in " ".join(payload["sow"]["in_scope"])
     messages = " ".join(payload["delivery_review"]["warnings"])
     assert "proposal.executive_summary" in messages
 
@@ -294,9 +294,9 @@ def test_latest_acceptance_and_scope_duplicates_are_removed():
     assert any(item["removed"] == COMBINED_INTEGRATION for item in findings)
 
     partial, partial_findings = normalize_paraphrase_duplicates([CREATE_SHALL, CREATE_TRACK])
-    assert CREATE_SHALL in partial and CREATE_TRACK not in partial
-    assert any("track" in item.lower() for item in partial)
-    assert partial_findings[0]["code"] == "COMPOUND_SPLIT"
+    assert CREATE_SHALL in partial and CREATE_TRACK in partial
+    assert partial_findings[0]["code"] == "AMBIGUOUS_OVERLAP"
+    assert "The system shall track" not in " ".join(partial)
 
     again, again_findings = normalize_paraphrase_duplicates(kept)
     assert again == kept
@@ -470,16 +470,16 @@ def test_remaining_detected_overlap_is_not_clean():
         "artifact_texts": {"proposal": "stale duplicate render"},
     }
     findings = normalize_paraphrase_duplicates([CREATE_SHALL, CREATE_TRACK])[1]
-    assert findings and findings[0]["code"] == "COMPOUND_SPLIT"
+    assert findings and findings[0]["code"] == "AMBIGUOUS_OVERLAP"
 
     defects = apply_final_artifact_quality(payload)
 
-    assert CREATE_TRACK not in payload["proposal"]["scope"]
+    assert CREATE_TRACK in payload["proposal"]["scope"]
     assert CREATE_SHALL in payload["proposal"]["scope"]
-    assert any("track" in item.lower() for item in payload["proposal"]["scope"])
-    assert payload["artifact_quality"] == "CLEAN"
+    assert "The system shall track" not in " ".join(payload["proposal"]["scope"])
+    assert payload["artifact_quality"] == "DEFECTS"
     assert payload["delivery_review"]["status"] == "READY"
-    assert defects == []
+    assert defects
     assert "stale duplicate render" not in payload["artifact_texts"]["proposal"]
     assert payload["artifact_texts"]["proposal"].count(CREATE_SHALL) == 1
 
